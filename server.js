@@ -4,6 +4,10 @@ import dotenv from 'dotenv';
 import connectDB from './config/database.js';
 import authRoutes from './routes/authRoutes.js';
 import vendorRoutes from './routes/vendorRoutes.js';
+import grnRoutes from './routes/grnRoutes.js';
+import purchaseOrderRoutes from './routes/purchaseOrderRoutes.js';
+import purchaseRequisitionRoutes from './routes/purchaseRequisitionRoutes.js';
+import rfqRoutes from './routes/rfqRoutes.js';
 
 dotenv.config();
 
@@ -20,6 +24,10 @@ app.use(express.urlencoded({ extended: true }));
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/vendors', vendorRoutes);
+app.use('/api/grn', grnRoutes);
+app.use('/api/purchase-orders', purchaseOrderRoutes);
+app.use('/api/purchase-requisitions', purchaseRequisitionRoutes);
+app.use('/api/rfq', rfqRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
