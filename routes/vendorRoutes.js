@@ -1,15 +1,40 @@
 import express from 'express';
-import * as vendorController from '../controllers/vendorController.js';
+import { protect, authorize } from '../middleware/authMiddleware.js';
+import {
+  createVendor,
+  getAllVendors,
+  getVendorStats,
+  getVendorsByStatus,
+  getVendorById,
+  updateVendor,
+  deleteVendor,
+  getVendorPrices,
+  addVendorPrice,
+  updateVendorPrice,
+  deleteVendorPrice,
+  getPricesByProduct,
+} from '../controllers/vendorController.js';
 
 const router = express.Router();
 
-// CRUD Operations
-router.post('/', vendorController.createVendor);                    // CREATE
-router.get('/', vendorController.getAllVendors);                    // READ ALL
-router.get('/stats', vendorController.getVendorStats);              // READ STATS
-router.get('/status/:status', vendorController.getVendorsByStatus); // READ BY STATUS
-router.get('/:id', vendorController.getVendorById);                 // READ ONE
-router.put('/:id', vendorController.updateVendor);                  // UPDATE
-router.delete('/:id', vendorController.deleteVendor);               // DELETE
+// All vendor routes require login
+router.use(protect);
+
+// ── Vendor CRUD ───────────────────────────────────────────────────────────────
+router.get('/stats',           getVendorStats);
+router.get('/status/:status',  getVendorsByStatus);
+router.get('/prices/product',  getPricesByProduct);   // compare across vendors
+
+router.get('/',    getAllVendors);
+router.post('/',   authorize('super_admin', 'purchase_manager'), createVendor);
+router.get('/:id', getVendorById);
+router.put('/:id', authorize('super_admin', 'purchase_manager'), updateVendor);
+router.delete('/:id', authorize('super_admin'), deleteVendor);
+
+// ── Price Mapping ─────────────────────────────────────────────────────────────
+router.get('/:id/prices',                authorize('super_admin', 'purchase_manager'), getVendorPrices);
+router.post('/:id/prices',               authorize('super_admin', 'purchase_manager'), addVendorPrice);
+router.put('/:id/prices/:priceId',       authorize('super_admin', 'purchase_manager'), updateVendorPrice);
+router.delete('/:id/prices/:priceId',    authorize('super_admin'), deleteVendorPrice);
 
 export default router;

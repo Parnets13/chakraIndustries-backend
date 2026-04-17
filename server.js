@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import connectDB from './config/database.js';
+import authRoutes from './routes/authRoutes.js';
+import vendorRoutes from './routes/vendorRoutes.js';
 
 dotenv.config();
 
@@ -16,7 +18,8 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Routes
-// All routes removed - controllers are empty
+app.use('/api/auth', authRoutes);
+app.use('/api/vendors', vendorRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
