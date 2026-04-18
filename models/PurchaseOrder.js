@@ -78,7 +78,6 @@ const purchaseOrderSchema = new mongoose.Schema(
       enum: ['Pending', 'Approved', 'Received', 'Cancelled'],
       default: 'Pending'
     },
-    
     deliveryAddress: String,
     specialInstructions: String
   },

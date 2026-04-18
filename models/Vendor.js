@@ -15,7 +15,7 @@ const vendorSchema = new mongoose.Schema(
     },
     category: {
       type: String,
-      enum: ['Raw Material', 'Components', 'Bearings', 'Castings', 'Seals & Gaskets', 'Packaging Material', 'Tools & Equipment'],
+      enum: ['Raw Material', 'Components', 'Bearings', 'Castings', 'Seals & Gaskets', 'Electrical', 'Packaging', 'Tools & Consumables'],
       required: [true, 'Category is required']
     },
     website: {
