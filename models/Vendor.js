@@ -71,7 +71,9 @@ const vendorSchema = new mongoose.Schema(
     gstNumber: {
       type: String,
       required: [true, 'GST number is required'],
-      match: [/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GST format']
+      uppercase: true,
+      trim: true,
+      match: [/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GST format - must be 15 characters: 2 digits, 5 letters, 4 digits, 1 letter, 1 alphanumeric, Z, 1 alphanumeric']
     },
     panNumber: {
       type: String,
@@ -112,5 +114,13 @@ const vendorSchema = new mongoose.Schema(
     timestamps: true
   }
 );
+
+// Pre-save hook to clean GST number
+vendorSchema.pre('save', function(next) {
+  if (this.gstNumber) {
+    this.gstNumber = this.gstNumber.toUpperCase().trim();
+  }
+  next();
+});
 
 export default mongoose.model('Vendor', vendorSchema);

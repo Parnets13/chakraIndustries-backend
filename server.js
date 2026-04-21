@@ -6,6 +6,8 @@ import vendorRoutes from './routes/vendorRoutes.js';
 import categoryRoutes from './routes/categoryRoutes.js';
 import purchaseRequisitionRoutes from './routes/purchaseRequisitionRoutes.js';
 import departmentRoutes from './routes/departmentRoutes.js';
+import rfqRoutes from './routes/rfqRoutes.js';
+import purchaseOrderRoutes from './routes/purchaseOrderRoutes.js';
 
 dotenv.config();
 
@@ -24,6 +26,8 @@ app.use('/api/vendors', vendorRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/purchase-requisitions', purchaseRequisitionRoutes);
 app.use('/api/departments', departmentRoutes);
+app.use('/api/rfqs', rfqRoutes);
+app.use('/api/purchase-orders', purchaseOrderRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

@@ -1,85 +1,154 @@
 import RFQ from '../models/RFQ.js';
 
-// CREATE
-export const createRFQ = async (req, res) => {
-  try {
-    const rfq = new RFQ(req.body);
-    const saved = await rfq.save();
-    res.status(201).json({ success: true, data: saved });
-  } catch (err) {
-    res.status(400).json({ success: false, message: err.message });
-  }
+// Generate RFQ ID (RFQ-2026-001)
+const generateRFQId = async () => {
+  const year = new Date().getFullYear();
+  const prefix = `RFQ-${year}-`;
+  
+  const lastRFQ = await RFQ.findOne({ rfqId: new RegExp(`^${prefix}`) })
+    .sort({ rfqId: -1 })
+    .limit(1);
+  
+  if (!lastRFQ) return `${prefix}001`;
+  
+  const lastNum = parseInt(lastRFQ.rfqId.split('-')[2]);
+  const nextNum = (lastNum + 1).toString().padStart(3, '0');
+  return `${prefix}${nextNum}`;
 };
 
-// READ ALL
+// GET /api/rfqs
 export const getAllRFQs = async (req, res) => {
   try {
-    const rfqs = await RFQ.find()
-      .populate('vendorId', 'name')
+    const { status, priority } = req.query;
+    const filter = {};
+    
+    if (status) filter.status = status;
+    if (priority) filter.priority = priority;
+    
+    const rfqs = await RFQ.find(filter)
+      .populate('vendors', 'companyName vendorId')
+      .populate('linkedPR', 'prId department')
       .sort({ createdAt: -1 });
+    
     res.json({ success: true, data: rfqs });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// READ STATS
-export const getRFQStats = async (req, res) => {
-  try {
-    const total = await RFQ.countDocuments();
-    const open = await RFQ.countDocuments({ status: 'Open' });
-    const closed = await RFQ.countDocuments({ status: 'Closed' });
-    const cancelled = await RFQ.countDocuments({ status: 'Cancelled' });
-    res.json({ success: true, data: { total, open, closed, cancelled } });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// READ ONE
+// GET /api/rfqs/:id
 export const getRFQById = async (req, res) => {
   try {
-    const rfq = await RFQ.findById(req.params.id).populate('vendorId', 'name');
-    if (!rfq) return res.status(404).json({ success: false, message: 'RFQ not found' });
+    const rfq = await RFQ.findById(req.params.id)
+      .populate('vendors', 'companyName vendorId contactPerson email phone')
+      .populate('linkedPR', 'prId department items totalValue');
+    
+    if (!rfq) {
+      return res.status(404).json({ success: false, message: 'RFQ not found' });
+    }
+    
     res.json({ success: true, data: rfq });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// UPDATE
+// POST /api/rfqs
+export const createRFQ = async (req, res) => {
+  try {
+    const rfqId = await generateRFQId();
+    
+    const rfq = await RFQ.create({
+      ...req.body,
+      rfqId
+    });
+    
+    const populated = await RFQ.findById(rfq._id)
+      .populate('vendors', 'companyName vendorId')
+      .populate('linkedPR', 'prId department');
+    
+    res.status(201).json({ success: true, data: populated });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /api/rfqs/:id
 export const updateRFQ = async (req, res) => {
   try {
-    req.body.updatedAt = new Date();
-    const rfq = await RFQ.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
-    if (!rfq) return res.status(404).json({ success: false, message: 'RFQ not found' });
+    const rfq = await RFQ.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true, runValidators: true }
+    )
+      .populate('vendors', 'companyName vendorId')
+      .populate('linkedPR', 'prId department');
+    
+    if (!rfq) {
+      return res.status(404).json({ success: false, message: 'RFQ not found' });
+    }
+    
     res.json({ success: true, data: rfq });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
   }
 };
 
-// UPDATE STATUS
+// PATCH /api/rfqs/:id/status
 export const updateRFQStatus = async (req, res) => {
   try {
     const { status } = req.body;
+    
     const rfq = await RFQ.findByIdAndUpdate(
       req.params.id,
-      { status, updatedAt: new Date() },
-      { new: true, runValidators: true }
-    );
-    if (!rfq) return res.status(404).json({ success: false, message: 'RFQ not found' });
+      { status },
+      { new: true }
+    )
+      .populate('vendors', 'companyName vendorId')
+      .populate('linkedPR', 'prId department');
+    
+    if (!rfq) {
+      return res.status(404).json({ success: false, message: 'RFQ not found' });
+    }
+    
     res.json({ success: true, data: rfq });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
   }
 };
 
-// DELETE
+// POST /api/rfqs/:id/quotations
+export const addQuotation = async (req, res) => {
+  try {
+    const rfq = await RFQ.findById(req.params.id);
+    
+    if (!rfq) {
+      return res.status(404).json({ success: false, message: 'RFQ not found' });
+    }
+    
+    rfq.quotations.push(req.body);
+    rfq.status = 'Quoted';
+    await rfq.save();
+    
+    const populated = await RFQ.findById(rfq._id)
+      .populate('vendors', 'companyName vendorId')
+      .populate('quotations.vendor', 'companyName vendorId');
+    
+    res.json({ success: true, data: populated });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// DELETE /api/rfqs/:id
 export const deleteRFQ = async (req, res) => {
   try {
     const rfq = await RFQ.findByIdAndDelete(req.params.id);
-    if (!rfq) return res.status(404).json({ success: false, message: 'RFQ not found' });
+    
+    if (!rfq) {
+      return res.status(404).json({ success: false, message: 'RFQ not found' });
+    }
+    
     res.json({ success: true, message: 'RFQ deleted successfully' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

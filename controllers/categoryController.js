@@ -22,9 +22,12 @@ export const getCategories = async (req, res) => {
 // POST /api/categories
 export const createCategory = async (req, res) => {
   try {
+    console.log('📥 POST /api/categories - Request body:', req.body);
     const cat = await Category.create({ name: req.body.name });
+    console.log('✅ Category created:', cat);
     res.status(201).json({ success: true, data: cat });
   } catch (err) {
+    console.error('❌ Error creating category:', err.message);
     res.status(400).json({ success: false, message: err.message });
   }
 };

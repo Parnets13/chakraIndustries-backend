@@ -1,15 +1,22 @@
 import express from 'express';
-import * as rfqController from '../controllers/rfqController.js';
+import {
+  getAllRFQs,
+  getRFQById,
+  createRFQ,
+  updateRFQ,
+  updateRFQStatus,
+  addQuotation,
+  deleteRFQ
+} from '../controllers/rfqController.js';
 
 const router = express.Router();
 
-// CRUD Operations
-router.post('/', rfqController.createRFQ);                    // CREATE
-router.get('/', rfqController.getAllRFQs);                    // READ ALL
-router.get('/stats', rfqController.getRFQStats);              // READ STATS
-router.get('/:id', rfqController.getRFQById);                 // READ ONE
-router.put('/:id', rfqController.updateRFQ);                  // UPDATE
-router.patch('/:id/status', rfqController.updateRFQStatus);   // UPDATE STATUS
-router.delete('/:id', rfqController.deleteRFQ);               // DELETE
+router.get('/', getAllRFQs);
+router.get('/:id', getRFQById);
+router.post('/', createRFQ);
+router.put('/:id', updateRFQ);
+router.patch('/:id/status', updateRFQStatus);
+router.post('/:id/quotations', addQuotation);
+router.delete('/:id', deleteRFQ);
 
 export default router;
