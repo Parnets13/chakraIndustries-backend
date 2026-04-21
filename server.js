@@ -2,9 +2,13 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import connectDB from './config/database.js';
+import authRoutes from './routes/authRoutes.js';
 import vendorRoutes from './routes/vendorRoutes.js';
 import categoryRoutes from './routes/categoryRoutes.js';
 import purchaseRequisitionRoutes from './routes/purchaseRequisitionRoutes.js';
+import purchaseOrderRoutes from './routes/purchaseOrderRoutes.js';
+import rfqRoutes from './routes/rfqRoutes.js';
+import grnRoutes from './routes/grnRoutes.js';
 import departmentRoutes from './routes/departmentRoutes.js';
 import rfqRoutes from './routes/rfqRoutes.js';
 import purchaseOrderRoutes from './routes/purchaseOrderRoutes.js';
@@ -17,14 +21,27 @@ const app = express();
 connectDB();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    /\.netlify\.app$/,
+    /\.netlify\.com$/,
+  ],
+  credentials: true,
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Routes
+app.use('/api/auth', authRoutes);
 app.use('/api/vendors', vendorRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/purchase-requisitions', purchaseRequisitionRoutes);
+app.use('/api/purchase-orders', purchaseOrderRoutes);
+app.use('/api/rfq', rfqRoutes);
+app.use('/api/grn', grnRoutes);
 app.use('/api/departments', departmentRoutes);
 app.use('/api/rfqs', rfqRoutes);
 app.use('/api/purchase-orders', purchaseOrderRoutes);

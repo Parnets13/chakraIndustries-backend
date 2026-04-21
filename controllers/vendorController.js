@@ -96,3 +96,64 @@ export const deleteVendor = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Vendor Price Mapping
+// ══════════════════════════════════════════════════════════════════════════════
+import VendorPrice from '../models/VendorPrice.js';
+
+// GET /api/vendors/:id/prices — all prices for a vendor
+export const getVendorPrices = async (req, res) => {
+  try {
+    const prices = await VendorPrice.find({ vendor: req.params.id }).sort({ productName: 1 });
+    res.json({ success: true, data: prices });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/vendors/:id/prices — add a price entry
+export const addVendorPrice = async (req, res) => {
+  try {
+    const price = await VendorPrice.create({ ...req.body, vendor: req.params.id });
+    res.status(201).json({ success: true, data: price });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /api/vendors/:id/prices/:priceId — update a price entry
+export const updateVendorPrice = async (req, res) => {
+  try {
+    const price = await VendorPrice.findByIdAndUpdate(req.params.priceId, req.body, { new: true, runValidators: true });
+    if (!price) return res.status(404).json({ success: false, message: 'Price entry not found' });
+    res.json({ success: true, data: price });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// DELETE /api/vendors/:id/prices/:priceId — delete a price entry
+export const deleteVendorPrice = async (req, res) => {
+  try {
+    const price = await VendorPrice.findByIdAndDelete(req.params.priceId);
+    if (!price) return res.status(404).json({ success: false, message: 'Price entry not found' });
+    res.json({ success: true, message: 'Price entry deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/vendors/prices/product?productCode=SKU-1042 — compare prices across vendors
+export const getPricesByProduct = async (req, res) => {
+  try {
+    const { productCode, productName } = req.query;
+    const filter = {};
+    if (productCode) filter.productCode = productCode;
+    if (productName) filter.productName = { $regex: productName, $options: 'i' };
+    const prices = await VendorPrice.find(filter).populate('vendor', 'companyName vendorId rating').sort({ unitPrice: 1 });
+    res.json({ success: true, data: prices });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
