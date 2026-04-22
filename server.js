@@ -21,7 +21,7 @@ connectDB();
 // Middleware
 app.use(cors({
   origin: [
-    'http://localhost:5173',
+    'https://chakraindustries-backend.onrender.com',
     'http://localhost:3000',
     /\.netlify\.app$/,
     /\.netlify\.com$/,
