@@ -10,8 +10,12 @@ import purchaseOrderRoutes from './routes/purchaseOrderRoutes.js';
 import rfqRoutes from './routes/rfqRoutes.js';
 import grnRoutes from './routes/grnRoutes.js';
 import departmentRoutes from './routes/departmentRoutes.js';
-import rfqRoutes from './routes/rfqRoutes.js';
-import purchaseOrderRoutes from './routes/purchaseOrderRoutes.js';
+import inventoryRoutes from './routes/inventoryRoutes.js';
+import warehouseRoutes from './routes/warehouseRoutes.js';
+import stockMovementRoutes from './routes/stockMovementRoutes.js';
+import batchRoutes from './routes/batchRoutes.js';
+import pickingListRoutes from './routes/pickingListRoutes.js';
+import defectiveStockRoutes from './routes/defectiveStockRoutes.js';
 
 dotenv.config();
 
@@ -40,11 +44,15 @@ app.use('/api/vendors', vendorRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/purchase-requisitions', purchaseRequisitionRoutes);
 app.use('/api/purchase-orders', purchaseOrderRoutes);
-app.use('/api/rfq', rfqRoutes);
+app.use('/api/rfqs', rfqRoutes);
 app.use('/api/grn', grnRoutes);
 app.use('/api/departments', departmentRoutes);
-app.use('/api/rfqs', rfqRoutes);
-app.use('/api/purchase-orders', purchaseOrderRoutes);
+app.use('/api/inventory', inventoryRoutes);
+app.use('/api/warehouses', warehouseRoutes);
+app.use('/api/stock-movements', stockMovementRoutes);
+app.use('/api/batches', batchRoutes);
+app.use('/api/picking-lists', pickingListRoutes);
+app.use('/api/defective-stock', defectiveStockRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

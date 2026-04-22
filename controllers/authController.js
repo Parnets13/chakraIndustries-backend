@@ -67,7 +67,7 @@ export const login = async (req, res) => {
     const token = generateToken(user._id);
     res.json(userResponse(user, token));
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ success: false, message: error.message }); 
   }
 };
 
@@ -87,7 +87,7 @@ export const getMe = async (req, res) => {
 
 // PUT /api/auth/change-password  (protected)
 export const changePassword = async (req, res) => {
-  try {
+  try { 
     const { currentPassword, newPassword } = req.body;
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ success: false, message: 'Both passwords are required' });
@@ -98,14 +98,13 @@ export const changePassword = async (req, res) => {
     if (!isMatch) {
       return res.status(401).json({ success: false, message: 'Current password is incorrect' });
     }
-
     user.password = newPassword;
     await user.save();
     res.json({ success: true, message: 'Password updated successfully' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
-};
+};  
 
 // GET /api/auth/users  (super_admin only)
 export const getAllUsers = async (req, res) => {
