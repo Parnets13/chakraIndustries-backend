@@ -16,6 +16,7 @@ import stockMovementRoutes from './routes/stockMovementRoutes.js';
 import batchRoutes from './routes/batchRoutes.js';
 import pickingListRoutes from './routes/pickingListRoutes.js';
 import defectiveStockRoutes from './routes/defectiveStockRoutes.js';
+import creditNoteRoutes from './routes/creditNoteRoutes.js';
 
 dotenv.config();
 
@@ -53,6 +54,7 @@ app.use('/api/stock-movements', stockMovementRoutes);
 app.use('/api/batches', batchRoutes);
 app.use('/api/picking-lists', pickingListRoutes);
 app.use('/api/defective-stock', defectiveStockRoutes);
+app.use('/api/credit-notes', creditNoteRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

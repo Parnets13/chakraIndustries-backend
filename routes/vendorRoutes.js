@@ -12,4 +12,11 @@ router.get('/:id', vendorController.getVendorById);                 // READ ONE
 router.put('/:id', vendorController.updateVendor);                  // UPDATE
 router.delete('/:id', vendorController.deleteVendor);               // DELETE
 
+// Vendor Price Mapping Routes
+router.get('/:id/prices', vendorController.getVendorPrices);        // GET all prices for vendor
+router.post('/:id/prices', vendorController.addVendorPrice);        // ADD price entry
+router.put('/:id/prices/:priceId', vendorController.updateVendorPrice); // UPDATE price entry
+router.delete('/:id/prices/:priceId', vendorController.deleteVendorPrice); // DELETE price entry
+router.get('/prices/product', vendorController.getPricesByProduct); // COMPARE prices across vendors
+
 export default router;
