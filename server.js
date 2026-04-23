@@ -21,7 +21,7 @@ connectDB();
 // Middleware
 app.use(cors({
   origin: [
-    'https://chakraindustries-backend.onrender.com',
+    'http://localhost:5173',
     'http://localhost:3000',
     /\.netlify\.app$/,
     /\.netlify\.com$/,
@@ -41,6 +41,8 @@ app.use('/api/purchase-orders', purchaseOrderRoutes);
 app.use('/api/rfq', rfqRoutes);
 app.use('/api/grn', grnRoutes);
 app.use('/api/departments', departmentRoutes);
+app.use('/api/rfqs', rfqRoutes);
+app.use('/api/purchase-orders', purchaseOrderRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
