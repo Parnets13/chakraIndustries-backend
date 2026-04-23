@@ -35,7 +35,11 @@ export const createCategory = async (req, res) => {
 // DELETE /api/categories/:id
 export const deleteCategory = async (req, res) => {
   try {
-    await Category.findByIdAndDelete(req.params.id);
+    const { id } = req.params;
+    if (!id || id === 'undefined') {
+      return res.status(400).json({ success: false, message: 'Invalid category ID' });
+    }
+    await Category.findByIdAndDelete(id);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
