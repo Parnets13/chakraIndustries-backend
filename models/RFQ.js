@@ -24,21 +24,12 @@ const rfqSchema = new mongoose.Schema(
       required: true
     }],
     items: [{
-      name: {
-        type: String,
-        required: true,
-        trim: true
-      },
-      qty: {
-        type: Number,
-        required: true,
-        min: 0
-      },
-      unit: {
-        type: String,
-        required: true,
-        default: 'Nos'
-      }
+      sku: { type: String, trim: true },
+      name: { type: String, required: true, trim: true },
+      qty: { type: Number, required: true, min: 0 },
+      unit: { type: String, required: true, default: 'Nos' },
+      spec: { type: String, trim: true },
+      requiredDate: { type: Date },
     }],
     dueDate: {
       type: Date,

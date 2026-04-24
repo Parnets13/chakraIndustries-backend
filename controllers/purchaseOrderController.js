@@ -53,6 +53,16 @@ export const getPOById = async (req, res) => {
 // Create PO
 export const createPO = async (req, res) => {
   try {
+    // Validate vendor exists
+    const Vendor = (await import('../models/Vendor.js')).default;
+    const vendor = await Vendor.findById(req.body.vendor);
+    if (!vendor) {
+      return res.status(400).json({ success: false, message: 'Vendor not found' });
+    }
+    if (vendor.status === 'Blacklisted') {
+      return res.status(400).json({ success: false, message: 'Cannot create PO for blacklisted vendor' });
+    }
+
     const poId = await generatePOId();
     
     // Calculate totals

@@ -1,23 +1,5 @@
-import dotenv from 'dotenv';
-import connectDB from './config/database.js';
-import User from './models/User.js';
-import Permission from './models/Permission.js';
-
-dotenv.config();
-
-const SEED_USERS = [
-  {
-    name:     process.env.SUPER_ADMIN_NAME     || 'Super Admin',
-    email:    process.env.SUPER_ADMIN_EMAIL    || 'admin@chakra.in',
-    password: process.env.SUPER_ADMIN_PASSWORD || 'admin123',
-    role:     'super_admin',
-  },
-  { name: 'Priya Sharma', email: 'ceo@chakra.in',        password: 'mgmt123',     role: 'management' },
-  { name: 'Ramesh Gupta', email: 'purchase@chakra.in',   password: 'purchase123', role: 'purchase_manager' },
-  { name: 'Sunil Das',    email: 'production@chakra.in', password: 'prod123',     role: 'production_manager' },
-  { name: 'Vijay Rao',    email: 'dealer@chakra.in',     password: 'dealer123',   role: 'dealer' },
-  { name: 'Meera Patel',  email: 'client@chakra.in',     password: 'client123',   role: 'corporate_client' },
-];
+import Permission from '../models/Permission.js';
+import { logActivity } from '../utils/activityLogger.js';
 
 const DEFAULT_PERMISSIONS = {
   super_admin: {
@@ -76,40 +58,71 @@ const DEFAULT_PERMISSIONS = {
   },
 };
 
-async function seed() {
-  await connectDB();
-
-  // Seed users
-  for (const u of SEED_USERS) {
-    const exists = await User.findOne({ email: u.email });
-    if (!exists) {
-      await User.create({ ...u, avatar: u.name.split(' ').map(n => n[0]).join('').toUpperCase() });
-      console.log(`✅ Created user: ${u.email} (${u.role})`);
-    } else {
-      if (u.role === 'super_admin') {
-        exists.name = u.name;
-        exists.password = u.password;
-        await exists.save();
-        console.log(`🔄 Updated super_admin: ${u.email}`);
-      } else {
-        console.log(`⏭  Skipped (exists): ${u.email}`);
-      }
-    }
+// GET /api/permissions  — get all role permissions
+export const getAllPermissions = async (req, res) => {
+  try {
+    const permissions = await Permission.find().sort({ role: 1 });
+    res.json({ success: true, permissions });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
+};
 
-  // Seed default permissions (only if not already set)
-  for (const [role, modules] of Object.entries(DEFAULT_PERMISSIONS)) {
-    const exists = await Permission.findOne({ role });
-    if (!exists) {
-      await Permission.create({ role, modules });
-      console.log(`✅ Created permissions for role: ${role}`);
-    } else {
-      console.log(`⏭  Permissions exist for: ${role}`);
-    }
+// GET /api/permissions/:role
+export const getPermissionByRole = async (req, res) => {
+  try {
+    const perm = await Permission.findOne({ role: req.params.role });
+    if (!perm) return res.status(404).json({ success: false, message: 'Permission config not found for this role' });
+    res.json({ success: true, permission: perm });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
+};
 
-  console.log('\nSeed complete.');
-  process.exit(0);
-}
+// PUT /api/permissions/:role  — super_admin only
+export const updatePermission = async (req, res) => {
+  try {
+    const { modules } = req.body;
+    if (!modules) return res.status(400).json({ success: false, message: 'modules object is required' });
 
-seed().catch(err => { console.error(err); process.exit(1); });
+    const perm = await Permission.findOneAndUpdate(
+      { role: req.params.role },
+      { modules, updatedBy: req.user._id },
+      { new: true, upsert: true, runValidators: true }
+    );
+
+    await logActivity(req, req.user, 'UPDATE_PERMISSION', {
+      module: 'permissions',
+      description: `Updated permissions for role: ${req.params.role}`,
+      targetType: 'Permission',
+      metadata: { role: req.params.role, modules },
+    });
+
+    res.json({ success: true, permission: perm });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /api/permissions/seed  — super_admin only — seeds default permissions
+export const seedPermissions = async (req, res) => {
+  try {
+    const ops = Object.entries(DEFAULT_PERMISSIONS).map(([role, modules]) => ({
+      updateOne: {
+        filter: { role },
+        update: { $setOnInsert: { role, modules, updatedBy: req.user._id } },
+        upsert: true,
+      },
+    }));
+    await Permission.bulkWrite(ops);
+
+    await logActivity(req, req.user, 'SEED_PERMISSIONS', {
+      module: 'permissions',
+      description: 'Default permissions seeded',
+    });
+
+    res.json({ success: true, message: 'Default permissions seeded successfully' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
