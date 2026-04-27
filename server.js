@@ -17,6 +17,10 @@ import batchRoutes from './routes/batchRoutes.js';
 import pickingListRoutes from './routes/pickingListRoutes.js';
 import defectiveStockRoutes from './routes/defectiveStockRoutes.js';
 import creditNoteRoutes from './routes/creditNoteRoutes.js';
+import clientRoutes from './routes/clientRoutes.js';
+import corporateClientRoutes from './routes/corporateClientRoutes.js';
+import bulkQuotationRoutes from './routes/bulkQuotationRoutes.js';
+import deliveryScheduleRoutes from './routes/deliveryScheduleRoutes.js';
 
 dotenv.config();
 
@@ -55,6 +59,10 @@ app.use('/api/batches', batchRoutes);
 app.use('/api/picking-lists', pickingListRoutes);
 app.use('/api/defective-stock', defectiveStockRoutes);
 app.use('/api/credit-notes', creditNoteRoutes);
+app.use('/api/clients', clientRoutes);
+app.use('/api/corporate-clients', corporateClientRoutes);
+app.use('/api/bulk-quotations', bulkQuotationRoutes);
+app.use('/api/delivery-schedules', deliveryScheduleRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
