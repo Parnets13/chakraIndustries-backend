@@ -14,7 +14,7 @@ const purchaseRequisitionSchema = new mongoose.Schema({
     required: true,
   },
   requestedBy: { type: String, required: true },
-  requiredBy: { type: Date, required: true },
+  requiredBy: { type: Date },
   priority: { type: String, enum: ['Normal', 'Urgent', 'Critical'], default: 'Normal' },
   costCenter: String,
   remarks: String,

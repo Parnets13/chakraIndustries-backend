@@ -13,6 +13,19 @@ import purchaseOrderRoutes from './routes/purchaseOrderRoutes.js';
 import rfqRoutes from './routes/rfqRoutes.js';
 import grnRoutes from './routes/grnRoutes.js';
 import departmentRoutes from './routes/departmentRoutes.js';
+import qualityCheckRoutes from './routes/qualityCheckRoutes.js';
+import approvalRoutes from './routes/approvalRoutes.js';
+import notificationRoutes from './routes/notificationRoutes.js';
+import inventoryRoutes from './routes/inventoryRoutes.js';
+import materialReturnRoutes from './routes/materialReturnRoutes.js';
+import creditNoteRoutes from './routes/creditNoteRoutes.js';
+import taskRoutes from './routes/taskRoutes.js';
+import logisticsRoutes from './routes/logisticsRoutes.js';
+import bulkOrderRoutes from './routes/bulkOrderRoutes.js';
+
+// Ensure new models are registered
+import './models/Warehouse.js';
+import './models/StockMovement.js';
 
 dotenv.config();
 
@@ -24,7 +37,7 @@ connectDB();
 // Middleware
 app.use(cors({
   origin: [
-    'http://localhost:5173',
+    'https://chakraindustries-backend.onrender.com',
     'http://localhost:3000',
     /\.netlify\.app$/,
     /\.netlify\.com$/,
@@ -47,6 +60,15 @@ app.use('/api/purchase-orders', purchaseOrderRoutes);
 app.use('/api/rfqs', rfqRoutes);
 app.use('/api/grns', grnRoutes);
 app.use('/api/departments', departmentRoutes);
+app.use('/api/quality-checks', qualityCheckRoutes);
+app.use('/api/approvals', approvalRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/inventory', inventoryRoutes);
+app.use('/api/material-returns', materialReturnRoutes);
+app.use('/api/credit-notes', creditNoteRoutes);
+app.use('/api/tasks', taskRoutes);
+app.use('/api/logistics', logisticsRoutes);
+app.use('/api/bulk-orders', bulkOrderRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

@@ -66,6 +66,18 @@ export const createRFQ = async (req, res) => {
       }
     }
 
+    // Validate linked PR is approved (if provided)
+    if (req.body.linkedPR) {
+      const PurchaseRequisition = (await import('../models/PurchaseRequisition.js')).default;
+      const pr = await PurchaseRequisition.findById(req.body.linkedPR);
+      if (!pr) {
+        return res.status(400).json({ success: false, message: 'Linked PR not found' });
+      }
+      if (pr.status !== 'Approved') {
+        return res.status(400).json({ success: false, message: `Cannot create RFQ: PR ${pr.prId} is not approved (current status: ${pr.status})` });
+      }
+    }
+
     const rfqId = await generateRFQId();
     
     const rfq = await RFQ.create({

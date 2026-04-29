@@ -33,8 +33,24 @@ const grnSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
+  items: [{
+    name:     { type: String },
+    orderedQty:  { type: Number },
+    receivedQty: { type: Number },
+    unit:     { type: String },
+  }],
   remarks: String,
-  
+  qcStatus: {
+    type: String,
+    enum: ['Not Started', 'Pending', 'Passed', 'Partial', 'Rejected'],
+    default: 'Not Started',
+  },
+  approvalStatus: {
+    type: String,
+    enum: ['Not Required', 'Pending', 'Approved', 'Rejected'],
+    default: 'Not Required',
+  },
+
   createdAt: {
     type: Date,
     default: Date.now

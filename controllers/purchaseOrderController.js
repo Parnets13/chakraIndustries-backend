@@ -63,6 +63,21 @@ export const createPO = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Cannot create PO for blacklisted vendor' });
     }
 
+    // If linked to an RFQ, validate the RFQ's linked PR is approved
+    if (req.body.linkedRFQ) {
+      const RFQ = (await import('../models/RFQ.js')).default;
+      const rfq = await RFQ.findById(req.body.linkedRFQ).populate('linkedPR');
+      if (!rfq) {
+        return res.status(400).json({ success: false, message: 'Linked RFQ not found' });
+      }
+      if (rfq.linkedPR && rfq.linkedPR.status !== 'Approved') {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot create PO: PR ${rfq.linkedPR.prId} linked to this RFQ is not approved (status: ${rfq.linkedPR.status}). Please approve the PR first.`,
+        });
+      }
+    }
+
     const poId = await generatePOId();
     
     // Calculate totals
