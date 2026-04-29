@@ -39,7 +39,7 @@ export const getPOById = async (req, res) => {
     const po = await PurchaseOrder.findById(req.params.id)
       .populate('vendor')
       .populate('linkedRFQ');
-    
+
     if (!po) {
       return res.status(404).json({ success: false, message: 'PO not found' });
     }
@@ -133,7 +133,7 @@ export const updatePO = async (req, res) => {
     if (!po) {
       return res.status(404).json({ success: false, message: 'PO not found' });
     }
-    
+
     res.json({ success: true, data: po });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -154,7 +154,6 @@ export const updatePOStatus = async (req, res) => {
     if (!po) {
       return res.status(404).json({ success: false, message: 'PO not found' });
     }
-    
     res.json({ success: true, data: po });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -169,7 +168,7 @@ export const deletePO = async (req, res) => {
     if (!po) {
       return res.status(404).json({ success: false, message: 'PO not found' });
     }
-    
+
     res.json({ success: true, message: 'PO deleted successfully' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
