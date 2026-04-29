@@ -36,12 +36,23 @@ connectDB();
 
 // Middleware
 app.use(cors({
-  origin: [
-    'https://chakraindustries-backend.onrender.com',
-    'http://localhost:3000',
-    /\.netlify\.app$/,
-    /\.netlify\.com$/,
-  ],
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    const allowed = [
+      'http://localhost:5173',
+      'http://localhost:3000',
+    ];
+    const allowedPatterns = [
+      /\.netlify\.app$/,
+      /\.netlify\.com$/,
+      /\.onrender\.com$/,
+    ];
+    if (allowed.includes(origin) || allowedPatterns.some(p => p.test(origin))) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS blocked: ${origin}`));
+  },
   credentials: true,
 }));
 
