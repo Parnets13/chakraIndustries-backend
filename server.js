@@ -22,6 +22,7 @@ import creditNoteRoutes from './routes/creditNoteRoutes.js';
 import taskRoutes from './routes/taskRoutes.js';
 import logisticsRoutes from './routes/logisticsRoutes.js';
 import bulkOrderRoutes from './routes/bulkOrderRoutes.js';
+import assetRoutes from './routes/assetRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -80,6 +81,7 @@ app.use('/api/credit-notes', creditNoteRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/logistics', logisticsRoutes);
 app.use('/api/bulk-orders', bulkOrderRoutes);
+app.use('/api/assets', assetRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

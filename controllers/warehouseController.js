@@ -63,9 +63,24 @@ export const getWarehouseById = async (req, res) => {
 // Create warehouse
 export const createWarehouse = async (req, res) => {
   try {
-    const warehouse = new Warehouse(req.body);
+    // Auto-generate warehouseId if not provided
+    let { warehouseId, ...rest } = req.body;
+    if (!warehouseId || !warehouseId.trim()) {
+      const last = await Warehouse.findOne().sort({ createdAt: -1 });
+      let nextNum = 1;
+      if (last && last.warehouseId) {
+        const match = last.warehouseId.match(/(\d+)$/);
+        if (match) nextNum = parseInt(match[1]) + 1;
+      }
+      warehouseId = `WH-${String(nextNum).padStart(2, '0')}`;
+      // Ensure uniqueness
+      while (await Warehouse.findOne({ warehouseId })) {
+        nextNum++;
+        warehouseId = `WH-${String(nextNum).padStart(2, '0')}`;
+      }
+    }
+    const warehouse = new Warehouse({ warehouseId, ...rest });
     await warehouse.save();
-    
     res.status(201).json({
       success: true,
       message: 'Warehouse created successfully',
