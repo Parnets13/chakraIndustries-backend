@@ -277,3 +277,163 @@ export const getDashboardStats = async (req, res) => {
     });
   }
 };
+
+// Get stock by warehouse
+export const getStockByWarehouse = async (req, res) => {
+  try {
+    const { warehouseId } = req.params;
+    
+    const stock = await Inventory.find({ warehouse: warehouseId })
+      .populate('warehouse', 'warehouseId name')
+      .populate('category', 'name');
+    
+    res.json({
+      success: true,
+      data: stock
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching warehouse stock',
+      error: error.message
+    });
+  }
+};
+
+// Get stock by location
+export const getStockByLocation = async (req, res) => {
+  try {
+    const { locationId } = req.params;
+    
+    const stock = await Inventory.find({
+      'location.zone': locationId
+    }).populate('warehouse', 'warehouseId name');
+    
+    res.json({
+      success: true,
+      data: stock
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching location stock',
+      error: error.message
+    });
+  }
+};
+
+// Get stock by SKU
+export const getStockBySKU = async (req, res) => {
+  try {
+    const { sku } = req.params;
+    
+    const stock = await Inventory.findOne({ sku: sku.toUpperCase() })
+      .populate('warehouse', 'warehouseId name')
+      .populate('category', 'name');
+    
+    if (!stock) {
+      return res.status(404).json({
+        success: false,
+        message: 'SKU not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: stock
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching stock by SKU',
+      error: error.message
+    });
+  }
+};
+
+// Get stock type breakdown for SKU
+export const getStockTypeBreakdown = async (req, res) => {
+  try {
+    const { sku } = req.params;
+    
+    const inventory = await Inventory.findOne({ sku: sku.toUpperCase() });
+    
+    if (!inventory) {
+      return res.status(404).json({
+        success: false,
+        message: 'SKU not found'
+      });
+    }
+    
+    // Calculate stock breakdown based on status and quantity
+    const breakdown = {
+      sku: inventory.sku,
+      itemName: inventory.name,
+      total: inventory.quantity,
+      available: inventory.status === 'Active' ? inventory.quantity : 0,
+      reserved: 0,
+      damaged: 0,
+      expired: 0,
+      transit: 0
+    };
+    
+    res.json({
+      success: true,
+      data: breakdown
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching stock breakdown',
+      error: error.message
+    });
+  }
+};
+
+// Get all stock with filters
+export const getAllStock = async (req, res) => {
+  try {
+    const { sku, type, warehouse, status } = req.query;
+    
+    let query = {};
+    
+    if (sku) {
+      query.sku = { $regex: sku, $options: 'i' };
+    }
+    
+    if (warehouse) {
+      query.warehouse = warehouse;
+    }
+    
+    if (status) {
+      query.status = status;
+    }
+    
+    const stock = await Inventory.find(query)
+      .populate('warehouse', 'warehouseId name')
+      .populate('category', 'name')
+      .sort({ sku: 1 });
+    
+    // Add stock type breakdown
+    const stockWithBreakdown = stock.map(item => ({
+      ...item.toObject(),
+      available: item.status === 'Active' ? item.quantity : 0,
+      reserved: 0,
+      damaged: 0,
+      expired: 0,
+      transit: 0,
+      total: item.quantity
+    }));
+    
+    res.json({
+      success: true,
+      data: stockWithBreakdown
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching stock',
+      error: error.message
+    });
+  }
+};

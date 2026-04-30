@@ -173,10 +173,9 @@ export const addZone = async (req, res) => {
   }
 };
 
-// Update zone
-export const updateZone = async (req, res) => {
+// Get warehouse capacity
+export const getWarehouseCapacity = async (req, res) => {
   try {
-    const { zoneId } = req.params; // This is the MongoDB _id of the subdocument
     const warehouse = await Warehouse.findById(req.params.id);
     
     if (!warehouse) {
@@ -186,8 +185,67 @@ export const updateZone = async (req, res) => {
       });
     }
     
-    // .id() is a Mongoose method that finds subdocument by its _id
-    // It searches warehouse.zones array for a subdocument with _id === zoneId
+    const capacityPercent = (warehouse.used / warehouse.capacity) * 100;
+    
+    res.json({
+      success: true,
+      data: {
+        warehouseId: warehouse.warehouseId,
+        totalCapacity: warehouse.capacity,
+        usedCapacity: warehouse.used,
+        availableCapacity: warehouse.capacity - warehouse.used,
+        capacityPercent: Math.round(capacityPercent),
+        status: capacityPercent >= 90 ? 'Critical' : capacityPercent >= 80 ? 'Warning' : 'Normal'
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching warehouse capacity',
+      error: error.message
+    });
+  }
+};
+
+// Get warehouse zones
+export const getWarehouseZones = async (req, res) => {
+  try {
+    const warehouse = await Warehouse.findById(req.params.id);
+    
+    if (!warehouse) {
+      return res.status(404).json({
+        success: false,
+        message: 'Warehouse not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: warehouse.zones || []
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching warehouse zones',
+      error: error.message
+    });
+  }
+};
+
+// Update zone
+export const updateZone = async (req, res) => {
+  try {
+    const { id, zoneId } = req.params;
+    const warehouse = await Warehouse.findById(id);
+    
+    if (!warehouse) {
+      return res.status(404).json({
+        success: false,
+        message: 'Warehouse not found'
+      });
+    }
+    
+    // Find zone by zoneId (MongoDB _id)
     const zone = warehouse.zones.id(zoneId);
     if (!zone) {
       return res.status(404).json({
@@ -196,7 +254,7 @@ export const updateZone = async (req, res) => {
       });
     }
     
-    // Update the zone subdocument
+    // Update zone properties
     Object.assign(zone, req.body);
     await warehouse.save();
     
@@ -209,6 +267,135 @@ export const updateZone = async (req, res) => {
     res.status(400).json({
       success: false,
       message: 'Error updating zone',
+      error: error.message
+    });
+  }
+};
+
+// Get warehouse summary
+export const getWarehouseSummary = async (req, res) => {
+  try {
+    const warehouse = await Warehouse.findById(req.params.id);
+    
+    if (!warehouse) {
+      return res.status(404).json({
+        success: false,
+        message: 'Warehouse not found'
+      });
+    }
+    
+    const skuCount = await Inventory.countDocuments({ warehouse: warehouse._id });
+    const totalQuantity = await Inventory.aggregate([
+      { $match: { warehouse: warehouse._id } },
+      { $group: { _id: null, total: { $sum: '$quantity' } } }
+    ]);
+    
+    const capacityPercent = (warehouse.used / warehouse.capacity) * 100;
+    
+    res.json({
+      success: true,
+      data: {
+        warehouseId: warehouse.warehouseId,
+        name: warehouse.name,
+        location: warehouse.location,
+        status: warehouse.status,
+        totalCapacity: warehouse.capacity,
+        usedCapacity: warehouse.used,
+        capacityPercent: Math.round(capacityPercent),
+        skuCount,
+        totalQuantity: totalQuantity[0]?.total || 0,
+        zones: warehouse.zones?.length || 0,
+        manager: warehouse.manager
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching warehouse summary',
+      error: error.message
+    });
+  }
+};
+
+// Sync warehouse capacity from inventory
+export const syncWarehouseCapacity = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const warehouse = await Warehouse.findById(id);
+    
+    if (!warehouse) {
+      return res.status(404).json({
+        success: false,
+        message: 'Warehouse not found'
+      });
+    }
+    
+    // Calculate total quantity from all inventory items in this warehouse
+    const totalQuantity = await Inventory.aggregate([
+      { $match: { warehouse: warehouse._id } },
+      { $group: { _id: null, total: { $sum: '$quantity' } } }
+    ]);
+    
+    // Update warehouse used capacity
+    warehouse.used = totalQuantity[0]?.total || 0;
+    await warehouse.save();
+    
+    res.json({
+      success: true,
+      message: 'Warehouse capacity synced successfully',
+      data: {
+        warehouseId: warehouse.warehouseId,
+        totalCapacity: warehouse.capacity,
+        usedCapacity: warehouse.used,
+        availableCapacity: warehouse.capacity - warehouse.used,
+        capacityPercent: Math.round((warehouse.used / warehouse.capacity) * 100)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error syncing warehouse capacity',
+      error: error.message
+    });
+  }
+};
+
+// Get all warehouses with automatic data
+export const getAllWarehousesWithData = async (req, res) => {
+  try {
+    const warehouses = await Warehouse.find().sort({ createdAt: -1 });
+    
+    // Calculate complete data for each warehouse
+    const warehousesWithData = await Promise.all(
+      warehouses.map(async (wh) => {
+        const skuCount = await Inventory.countDocuments({ warehouse: wh._id });
+        const totalQuantity = await Inventory.aggregate([
+          { $match: { warehouse: wh._id } },
+          { $group: { _id: null, total: { $sum: '$quantity' } } }
+        ]);
+        
+        const totalQty = totalQuantity[0]?.total || 0;
+        const capacityPercent = (totalQty / wh.capacity) * 100;
+        
+        return {
+          ...wh.toObject(),
+          skus: skuCount,
+          totalQuantity: totalQty,
+          usedCapacity: totalQty,
+          capacityPercent: Math.round(capacityPercent),
+          capacityStatus: capacityPercent >= 90 ? 'Critical' : capacityPercent >= 80 ? 'Warning' : 'Normal'
+        };
+      })
+    );
+    
+    res.json({
+      success: true,
+      data: warehousesWithData
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching warehouses with data',
       error: error.message
     });
   }

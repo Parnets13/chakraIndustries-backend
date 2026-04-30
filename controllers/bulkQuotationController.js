@@ -9,10 +9,28 @@ const generateQuotationId = async () => {
 
 export const createBulkQuotation = async (req, res) => {
   try {
+    // Drop the old index if it exists
+    try {
+      await BulkQuotation.collection.dropIndex('quotationId_1');
+    } catch (err) {
+      // Index might not exist, that's okay
+    }
+
+    // Delete any documents with null quotationId
+    await BulkQuotation.deleteMany({ quotationId: null });
+
+    // Generate unique quotation ID
     const quotationId = await generateQuotationId();
-    const quotation = await BulkQuotation.create({ ...req.body, quotationId });
+    
+    // Create the quotation with the generated ID
+    const quotation = await BulkQuotation.create({ 
+      ...req.body, 
+      quotationId 
+    });
+    
     res.status(201).json({ success: true, data: quotation });
   } catch (err) {
+    console.error('Bulk quotation creation error:', err);
     const message = err.message || 'Failed to create bulk quotation';
     res.status(400).json({ success: false, message });
   }

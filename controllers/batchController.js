@@ -159,6 +159,142 @@ export const deleteBatch = async (req, res) => {
   }
 };
 
+// Get batches by SKU
+export const getBatchesBySKU = async (req, res) => {
+  try {
+    const { sku } = req.params;
+    
+    const batches = await Batch.find({ sku: sku.toUpperCase() })
+      .populate('inventory', 'sku name')
+      .populate('warehouse', 'warehouseId name')
+      .sort({ createdAt: -1 });
+    
+    res.json({
+      success: true,
+      data: batches
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching batches by SKU',
+      error: error.message
+    });
+  }
+};
+
+// Get expiring batches
+export const getExpiringBatches = async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+    const daysThreshold = parseInt(days);
+    
+    const today = new Date();
+    const futureDate = new Date(today.getTime() + daysThreshold * 24 * 60 * 60 * 1000);
+    
+    const batches = await Batch.find({
+      expiryDate: {
+        $gte: today,
+        $lte: futureDate
+      }
+    })
+      .populate('inventory', 'sku name')
+      .populate('warehouse', 'warehouseId name')
+      .sort({ expiryDate: 1 });
+    
+    // Add days until expiry
+    const batchesWithDays = batches.map(batch => {
+      const daysLeft = Math.ceil((batch.expiryDate - today) / (1000 * 60 * 60 * 24));
+      return {
+        ...batch.toObject(),
+        daysLeft,
+        batchId: batch.batchNumber,
+        mfgDate: batch.manufacturingDate,
+        expiryDate: batch.expiryDate
+      };
+    });
+    
+    res.json({
+      success: true,
+      data: batchesWithDays
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching expiring batches',
+      error: error.message
+    });
+  }
+};
+
+// Get batch expiry info
+export const getBatchExpiry = async (req, res) => {
+  try {
+    const batch = await Batch.findById(req.params.id)
+      .populate('inventory', 'sku name');
+    
+    if (!batch) {
+      return res.status(404).json({
+        success: false,
+        message: 'Batch not found'
+      });
+    }
+    
+    const today = new Date();
+    const daysLeft = Math.ceil((batch.expiryDate - today) / (1000 * 60 * 60 * 24));
+    
+    res.json({
+      success: true,
+      data: {
+        batchNumber: batch.batchNumber,
+        sku: batch.sku,
+        expiryDate: batch.expiryDate,
+        manufacturingDate: batch.manufacturingDate,
+        daysLeft,
+        status: daysLeft < 0 ? 'Expired' : daysLeft <= 7 ? 'Critical' : daysLeft <= 30 ? 'Warning' : 'Good',
+        shelfLifePercentage: batch.shelfLifePercentage
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching batch expiry info',
+      error: error.message
+    });
+  }
+};
+
+// Update batch expiry
+export const updateBatchExpiry = async (req, res) => {
+  try {
+    const { expiryDate } = req.body;
+    
+    const batch = await Batch.findByIdAndUpdate(
+      req.params.id,
+      { expiryDate },
+      { new: true, runValidators: true }
+    );
+    
+    if (!batch) {
+      return res.status(404).json({
+        success: false,
+        message: 'Batch not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Batch expiry updated successfully',
+      data: batch
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error updating batch expiry',
+      error: error.message
+    });
+  }
+};
+
 // Get ageing stock report
 export const getAgeingReport = async (req, res) => {
   try {

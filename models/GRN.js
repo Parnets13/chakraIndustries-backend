@@ -16,6 +16,11 @@ const grnSchema = new mongoose.Schema({
     ref: 'Vendor',
     required: true
   },
+  warehouseId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Warehouse',
+    required: true
+  },
   orderedQuantity: {
     type: Number,
     required: true
@@ -24,17 +29,39 @@ const grnSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
-  status: {
+  acceptedQuantity: {
+    type: Number,
+    default: 0
+  },
+  rejectedQuantity: {
+    type: Number,
+    default: 0
+  },
+  grnStatus: {
     type: String,
-    enum: ['Completed', 'Partial', 'Pending'],
-    default: 'Pending'
+    enum: ['Received', 'QC_Pending', 'QC_Approved', 'QC_Rejected', 'Partial_Approved', 'Inventory_Updated'],
+    default: 'Received'
   },
   receivedDate: {
     type: Date,
     default: Date.now
   },
+  qcCompletedDate: Date,
+  inventoryUpdatedDate: Date,
   remarks: String,
-  
+  items: [{
+    skuId: String,
+    name: String,
+    orderedQty: Number,
+    receivedQty: Number,
+    condition: {
+      type: String,
+      enum: ['Good', 'Damaged', 'Partial'],
+      default: 'Good'
+    },
+    batchNumber: String,
+    itemRemarks: String
+  }],
   createdAt: {
     type: Date,
     default: Date.now
@@ -44,5 +71,11 @@ const grnSchema = new mongoose.Schema({
     default: Date.now
   }
 });
+
+// Index for performance
+grnSchema.index({ grnId: 1 });
+grnSchema.index({ poId: 1 });
+grnSchema.index({ grnStatus: 1 });
+grnSchema.index({ receivedDate: -1 });
 
 export default mongoose.model('GRN', grnSchema);

@@ -4,7 +4,6 @@ const inventorySchema = new mongoose.Schema({
   sku: {
     type: String,
     required: true,
-    unique: true,
     uppercase: true
   },
   name: {
@@ -20,7 +19,20 @@ const inventorySchema = new mongoose.Schema({
     ref: 'Warehouse',
     required: true
   },
-  quantity: {
+  // Inventory Levels
+  totalQuantity: {
+    type: Number,
+    required: true,
+    default: 0,
+    min: 0
+  },
+  availableQuantity: {
+    type: Number,
+    required: true,
+    default: 0,
+    min: 0
+  },
+  reservedQuantity: {
     type: Number,
     required: true,
     default: 0,
@@ -57,23 +69,46 @@ const inventorySchema = new mongoose.Schema({
   totalValue: {
     type: Number,
     default: 0
+  },
+  // Tracking
+  grnId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'GRN'
+  },
+  qcId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'QualityCheck'
+  },
+  lastMovementDate: Date,
+  createdDate: {
+    type: Date,
+    default: Date.now
   }
 }, {
   timestamps: true
 });
 
+// Compound unique index for SKU + Warehouse + Batch
+inventorySchema.index({ sku: 1, warehouse: 1, batch: 1 }, { unique: true });
+inventorySchema.index({ warehouse: 1 });
+inventorySchema.index({ status: 1 });
+inventorySchema.index({ lastMovementDate: -1 });
+
 // Auto-calculate status based on quantity
 inventorySchema.pre('save', function(next) {
-  if (this.quantity === 0) {
+  // Ensure availableQuantity + reservedQuantity = totalQuantity
+  this.availableQuantity = Math.max(0, this.totalQuantity - this.reservedQuantity);
+  
+  if (this.totalQuantity === 0) {
     this.status = 'Dead';
-  } else if (this.quantity < this.minQuantity) {
+  } else if (this.availableQuantity < this.minQuantity) {
     this.status = 'Critical';
   } else {
     this.status = 'Active';
   }
   
   // Calculate total value
-  this.totalValue = this.quantity * this.unitPrice;
+  this.totalValue = this.totalQuantity * this.unitPrice;
   
   next();
 });

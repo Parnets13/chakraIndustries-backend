@@ -196,7 +196,84 @@ export const transferStock = async (req, res) => {
   }
 };
 
-// Delete movement
+// Get movements by SKU
+export const getMovementsBySKU = async (req, res) => {
+  try {
+    const { sku } = req.params;
+    const { limit = 100 } = req.query;
+    
+    const movements = await StockMovement.find({ sku: sku.toUpperCase() })
+      .populate('inventory', 'sku name')
+      .populate('performedBy', 'name email')
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit));
+    
+    res.json({
+      success: true,
+      data: movements
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching movements by SKU',
+      error: error.message
+    });
+  }
+};
+
+// Get movements by warehouse
+export const getMovementsByWarehouse = async (req, res) => {
+  try {
+    const { warehouseId } = req.params;
+    const { limit = 100 } = req.query;
+    
+    const movements = await StockMovement.find({ from: warehouseId })
+      .populate('inventory', 'sku name')
+      .populate('performedBy', 'name email')
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit));
+    
+    res.json({
+      success: true,
+      data: movements
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching movements by warehouse',
+      error: error.message
+    });
+  }
+};
+
+// Get movements by location
+export const getMovementsByLocation = async (req, res) => {
+  try {
+    const { locationId } = req.params;
+    const { limit = 100 } = req.query;
+    
+    const movements = await StockMovement.find({
+      $or: [{ from: locationId }, { to: locationId }]
+    })
+      .populate('inventory', 'sku name')
+      .populate('performedBy', 'name email')
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit));
+    
+    res.json({
+      success: true,
+      data: movements
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching movements by location',
+      error: error.message
+    });
+  }
+};
+
+// Delete stock movement
 export const deleteMovement = async (req, res) => {
   try {
     const movement = await StockMovement.findByIdAndDelete(req.params.id);
