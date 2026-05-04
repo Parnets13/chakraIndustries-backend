@@ -4,18 +4,15 @@ import {
   getDefectiveStockById,
   createDefectiveStock,
   updateDefectiveStock,
-  updateStage,
   deleteDefectiveStock
 } from '../controllers/defectiveStockController.js';
-import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-router.get('/', protect, getAllDefectiveStock);
-router.get('/:id', protect, getDefectiveStockById);
-router.post('/', protect, createDefectiveStock);
-router.put('/:id', protect, updateDefectiveStock);
-router.patch('/:id/stage', protect, updateStage);
-router.delete('/:id', protect, deleteDefectiveStock);
+router.get('/', getAllDefectiveStock);
+router.get('/:id', getDefectiveStockById);
+router.post('/', createDefectiveStock);
+router.put('/:id', updateDefectiveStock);
+router.delete('/:id', deleteDefectiveStock);
 
 export default router;

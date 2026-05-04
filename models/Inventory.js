@@ -10,6 +10,11 @@ const inventorySchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  // Reference to Item Master
+  itemMasterId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ItemMaster'
+  },
   category: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Category'
@@ -70,15 +75,29 @@ const inventorySchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-  // Tracking
+  // Tracking & Relationships
   grnId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'GRN'
+  },
+  batchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Batch'
   },
   qcId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'QualityCheck'
   },
+  vendorId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Vendor'
+  },
+  poId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PurchaseOrder'
+  },
+  mfgDate: Date,
+  expiryDate: Date,
   lastMovementDate: Date,
   createdDate: {
     type: Date,
@@ -93,6 +112,8 @@ inventorySchema.index({ sku: 1, warehouse: 1, batch: 1 }, { unique: true });
 inventorySchema.index({ warehouse: 1 });
 inventorySchema.index({ status: 1 });
 inventorySchema.index({ lastMovementDate: -1 });
+inventorySchema.index({ batchId: 1 });
+inventorySchema.index({ grnId: 1 });
 
 // Auto-calculate status based on quantity
 inventorySchema.pre('save', function(next) {

@@ -15,8 +15,8 @@ const vendorSchema = new mongoose.Schema(
     },
     category: {
       type: String,
-      enum: ['Raw Material', 'Components', 'Bearings', 'Castings', 'Seals & Gaskets', 'Electrical', 'Packaging', 'Tools & Consumables'],
-      required: [true, 'Category is required']
+      required: [true, 'Category is required'],
+      trim: true
     },
     website: {
       type: String,
@@ -34,13 +34,11 @@ const vendorSchema = new mongoose.Schema(
     phone: {
       type: String,
       required: [true, 'Phone is required'],
-      match: [/^\d{10}$/, 'Phone must be 10 digits']
     },
     alternatePhone: String,
     email: {
       type: String,
       required: [true, 'Email is required'],
-      match: [/^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/, 'Invalid email format']
     },
     alternateEmail: String,
     
@@ -60,7 +58,6 @@ const vendorSchema = new mongoose.Schema(
     pincode: {
       type: String,
       required: [true, 'Pincode is required'],
-      match: [/^\d{6}$/, 'Pincode must be 6 digits']
     },
     country: {
       type: String,
@@ -70,10 +67,8 @@ const vendorSchema = new mongoose.Schema(
     // Financial Information
     gstNumber: {
       type: String,
-      required: [true, 'GST number is required'],
       uppercase: true,
       trim: true,
-      match: [/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GST format - must be 15 characters: 2 digits, 5 letters, 4 digits, 1 letter, 1 alphanumeric, Z, 1 alphanumeric']
     },
     panNumber: {
       type: String,

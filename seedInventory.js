@@ -182,37 +182,52 @@ const seedInventoryData = async () => {
     console.log('Creating batches...');
     await Batch.insertMany([
       {
-        batchNumber: 'B-2024-04',
-        inventory: inventoryItems[0]._id,
+        batchNo: 'B-2024-04',
         sku: inventoryItems[0].sku,
         itemName: inventoryItems[0].name,
         quantity: 12,
-        warehouse: warehouses[0]._id,
-        manufacturingDate: new Date('2024-04-01'),
+        unitPrice: inventoryItems[0].unitPrice,
+        warehouse: 'WH-01',
+        mfgDate: new Date('2024-04-01'),
         expiryDate: new Date('2026-04-01'),
-        status: 'Critical'
+        status: 'Critical',
+        inventoryId: inventoryItems[0]._id
       },
       {
-        batchNumber: 'B-2024-03',
-        inventory: inventoryItems[5]._id,
+        batchNo: 'B-2024-03',
         sku: inventoryItems[5].sku,
         itemName: inventoryItems[5].name,
         quantity: 180,
-        warehouse: warehouses[1]._id,
-        manufacturingDate: new Date('2024-03-01'),
+        unitPrice: inventoryItems[5].unitPrice,
+        warehouse: 'WH-02',
+        mfgDate: new Date('2024-03-01'),
         expiryDate: new Date('2026-03-01'),
-        status: 'Active'
+        status: 'Active',
+        inventoryId: inventoryItems[5]._id
       },
       {
-        batchNumber: 'B-2024-02',
-        inventory: inventoryItems[3]._id,
+        batchNo: 'B-2024-02',
         sku: inventoryItems[3].sku,
         itemName: inventoryItems[3].name,
         quantity: 340,
-        warehouse: warehouses[2]._id,
-        manufacturingDate: new Date('2024-02-01'),
+        unitPrice: inventoryItems[3].unitPrice,
+        warehouse: 'WH-03',
+        mfgDate: new Date('2024-02-01'),
         expiryDate: new Date('2026-02-01'),
-        status: 'Active'
+        status: 'Active',
+        inventoryId: inventoryItems[3]._id
+      },
+      {
+        batchNo: 'B-2024-01',
+        sku: inventoryItems[6].sku,
+        itemName: inventoryItems[6].name,
+        quantity: 0,
+        unitPrice: inventoryItems[6].unitPrice,
+        warehouse: 'WH-03',
+        mfgDate: new Date('2024-01-01'),
+        expiryDate: new Date('2026-01-01'),
+        status: 'Active',
+        inventoryId: inventoryItems[6]._id
       }
     ]);
     

@@ -155,51 +155,92 @@ export const getAllBatchesData = async (req, res) => {
 // Get ageing stock report
 export const getAgeingStockData = async (req, res) => {
   try {
-    const batches = await Batch.find()
-      .populate('inventory', 'sku name unitPrice')
-      .populate('warehouse', 'warehouseId name');
+    console.log('getAgeingStockData called');
+    
+    // Fetch all inventory items (not just those with quantity > 0)
+    const inventoryItems = await Inventory.find()
+      .populate('warehouse', 'warehouseId name')
+      .populate('vendorId', 'name')
+      .lean()
+      .exec();
 
-    const ageingData = batches.map(batch => {
-      const daysSinceManufacture = Math.floor((new Date() - new Date(batch.manufacturingDate)) / (1000 * 60 * 60 * 24));
+    console.log(`Found ${inventoryItems.length} total inventory items`);
 
-      let bucket = '0–30';
-      if (daysSinceManufacture > 90) bucket = '90+';
-      else if (daysSinceManufacture > 60) bucket = '61–90';
-      else if (daysSinceManufacture > 30) bucket = '31–60';
+    if (!inventoryItems || inventoryItems.length === 0) {
+      console.log('No inventory items found');
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
 
-      let action = 'No Action';
-      let actionColor = '#22c55e';
+    const ageingData = inventoryItems
+      .filter(item => {
+        // Include items that have a date reference
+        const hasDate = item.lastMovementDate || item.mfgDate || item.createdDate;
+        return hasDate;
+      })
+      .map(item => {
+        try {
+          // Use lastMovementDate if available, otherwise mfgDate, otherwise createdDate
+          const referenceDate = item.lastMovementDate || item.mfgDate || item.createdDate;
+          const daysSinceLastMovement = Math.floor((new Date() - new Date(referenceDate)) / (1000 * 60 * 60 * 24));
 
-      if (daysSinceManufacture > 90) {
-        action = batch.quantity === 0 ? 'Write-off' : 'Return to Supplier';
-        actionColor = '#ef4444';
-      } else if (daysSinceManufacture > 60) {
-        action = 'Offer Discount';
-        actionColor = '#f59e0b';
-      } else if (daysSinceManufacture > 30) {
-        action = 'Monitor';
-        actionColor = '#f59e0b';
-      }
+          let bucket = '0–30';
+          if (daysSinceLastMovement > 90) bucket = '90+';
+          else if (daysSinceLastMovement > 60) bucket = '61–90';
+          else if (daysSinceLastMovement > 30) bucket = '31–60';
 
-      return {
-        sku: batch.sku,
-        item: batch.itemName,
-        wh: batch.warehouse?.warehouseId || 'N/A',
-        qty: batch.quantity,
-        lastMov: new Date(batch.manufacturingDate).toLocaleDateString('en-IN', { month: 'short', year: '2-digit' }),
-        days: daysSinceManufacture,
-        bucket,
-        value: batch.inventory?.unitPrice ? `₹${(batch.quantity * batch.inventory.unitPrice).toLocaleString()}` : '₹0',
-        action,
-        actionColor
-      };
-    });
+          let action = 'No Action';
+          let actionColor = '#22c55e';
 
+          if (daysSinceLastMovement > 90) {
+            action = item.totalQuantity === 0 ? 'Write-off' : 'Return to Supplier';
+            actionColor = '#ef4444';
+          } else if (daysSinceLastMovement > 60) {
+            action = 'Offer Discount';
+            actionColor = '#f59e0b';
+          } else if (daysSinceLastMovement > 30) {
+            action = 'Monitor';
+            actionColor = '#f59e0b';
+          }
+
+          // Calculate value
+          let value = '₹0';
+          if (item.unitPrice && item.unitPrice > 0) {
+            const totalValue = item.totalQuantity * item.unitPrice;
+            // Format number with commas for Indian locale
+            const formattedValue = Math.round(totalValue).toString().replace(/\B(?=(\d{2})+(?!\d))/g, ',');
+            value = `₹${formattedValue}`;
+          }
+
+          return {
+            sku: item.sku || 'N/A',
+            item: item.name || 'N/A',
+            wh: item.warehouse?.warehouseId || 'N/A',
+            qty: item.totalQuantity || 0,
+            lastMov: new Date(referenceDate).toLocaleDateString('en-IN', { month: 'short', year: '2-digit' }),
+            days: daysSinceLastMovement,
+            bucket,
+            value,
+            action,
+            actionColor
+          };
+        } catch (mapError) {
+          console.error('Error mapping inventory item:', item._id, mapError);
+          return null;
+        }
+      })
+      .filter(item => item !== null) // Remove any failed mappings
+      .sort((a, b) => b.days - a.days); // Sort by days descending
+
+    console.log(`Returning ${ageingData.length} ageing stock items`);
     res.json({
       success: true,
       data: ageingData
     });
   } catch (error) {
+    console.error('Error fetching ageing data:', error);
     res.status(500).json({
       success: false,
       message: 'Error fetching ageing data',

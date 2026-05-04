@@ -17,18 +17,17 @@ import {
 
 const router = express.Router();
 
-// GET endpoints - no auth required
-router.get('/inventory/all', getAllInventoryData);
-router.get('/warehouses/all', getAllWarehousesData);
-router.get('/movements/all', getAllMovementsData);
-router.get('/batches/all', getAllBatchesData);
-router.get('/ageing/all', getAgeingStockData);
+// GET endpoints
+router.get('/all', getAllInventoryData);
+router.get('/warehouses', getAllWarehousesData);
+router.get('/movements', getAllMovementsData);
+router.get('/batches', getAllBatchesData);
 router.get('/ageing', getAgeingStockData);
 router.get('/defective', getDefectiveStockData);
 router.get('/storage', getStorageLocationData);
 router.get('/pincode', getPincodeStockData);
 
-// POST endpoints - no auth required for testing
+// POST endpoints
 router.post('/inventory/create', createInventoryItem);
 router.post('/warehouse/create', createWarehouseItem);
 router.post('/movement/create', createMovementItem);

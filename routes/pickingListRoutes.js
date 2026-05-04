@@ -11,11 +11,11 @@ import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-router.get('/', protect, getAllPickingLists);
-router.get('/:id', protect, getPickingListById);
-router.post('/', protect, createPickingList);
-router.put('/:id', protect, updatePickingList);
-router.patch('/:id/items/:itemId/pick', protect, markItemPicked);
-router.delete('/:id', protect, deletePickingList);
+router.get('/', getAllPickingLists);
+router.get('/:id', getPickingListById);
+router.post('/', createPickingList);
+router.put('/:id', updatePickingList);
+router.patch('/:id/items/:itemId/pick', markItemPicked);
+router.delete('/:id', deletePickingList);
 
 export default router;

@@ -1,65 +1,144 @@
-import StockMovement from '../models/StockMovement.js';
-import Inventory from '../models/Inventory.js';
+import { Vehicle, Dispatch, CourierShipment } from '../models/Logistics.js';
 
-export const getDispatchDashboard = async (req, res) => {
-  try {
-    const movements = await StockMovement.find({ type: 'Outward' })
-      .populate('inventory', 'sku name')
-      .sort({ createdAt: -1 })
-      .limit(10);
-
-    const formattedData = movements.map(m => ({
-      id: m._id,
-      sku: m.inventory?.sku || 'N/A',
-      item: m.inventory?.name || 'N/A',
-      qty: m.quantity,
-      from: m.fromLocation || 'Warehouse',
-      to: m.toLocation || 'Destination',
-      date: m.createdAt?.toLocaleDateString('en-IN') || 'N/A',
-      ref: m.reference || 'N/A'
-    }));
-
-    res.json({
-      success: true,
-      data: formattedData
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching dispatch data',
-      error: error.message
-    });
-  }
+// ── ID generators ─────────────────────────────────────────────────────────────
+const genId = async (Model, field, prefix) => {
+  const year = new Date().getFullYear();
+  const p = `${prefix}-${year}-`;
+  const last = await Model.findOne({ [field]: new RegExp(`^${p}`) }).sort({ [field]: -1 });
+  if (!last) return `${p}001`;
+  const num = parseInt(last[field].split('-').pop()) || 0;
+  return `${p}${String(num + 1).padStart(3, '0')}`;
 };
 
-export const getMovementHistory = async (req, res) => {
+// ── VEHICLES ──────────────────────────────────────────────────────────────────
+export const getVehicles = async (req, res) => {
   try {
-    const movements = await StockMovement.find()
-      .populate('inventory', 'sku name')
-      .sort({ createdAt: -1 })
-      .limit(50);
+    const { status } = req.query;
+    const filter = status ? { status } : {};
+    const list = await Vehicle.find(filter).sort({ createdAt: -1 });
+    res.json({ success: true, data: list });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
 
-    const formattedData = movements.map(m => ({
-      id: m._id,
-      type: m.type,
-      sku: m.inventory?.sku || 'N/A',
-      item: m.inventory?.name || 'N/A',
-      qty: m.quantity,
-      from: m.fromLocation || 'N/A',
-      to: m.toLocation || 'N/A',
-      date: m.createdAt?.toLocaleDateString('en-IN') || 'N/A',
-      ref: m.reference || 'N/A'
-    }));
+export const createVehicle = async (req, res) => {
+  try {
+    const vehicleId = await genId(Vehicle, 'vehicleId', 'VH');
+    const vehicle = await Vehicle.create({ ...req.body, vehicleId });
+    res.status(201).json({ success: true, data: vehicle });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
 
-    res.json({
-      success: true,
-      data: formattedData
+export const updateVehicle = async (req, res) => {
+  try {
+    const vehicle = await Vehicle.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!vehicle) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: vehicle });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const deleteVehicle = async (req, res) => {
+  try {
+    await Vehicle.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── DISPATCHES ────────────────────────────────────────────────────────────────
+export const getDispatches = async (req, res) => {
+  try {
+    const { status } = req.query;
+    const filter = status ? { status } : {};
+    const list = await Dispatch.find(filter).sort({ createdAt: -1 });
+    res.json({ success: true, data: list });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+export const getDispatchStats = async (req, res) => {
+  try {
+    const total       = await Dispatch.countDocuments();
+    const inTransit   = await Dispatch.countDocuments({ status: 'In Transit' });
+    const delivered   = await Dispatch.countDocuments({ status: 'Delivered' });
+    const pending     = await Dispatch.countDocuments({ status: 'Pending' });
+    const vehicles    = await Vehicle.countDocuments({ status: 'Available' });
+    res.json({ success: true, data: { total, inTransit, delivered, pending, availableVehicles: vehicles } });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+export const createDispatch = async (req, res) => {
+  try {
+    const dispatchId = await genId(Dispatch, 'dispatchId', 'DSP');
+    const dispatch = await Dispatch.create({
+      ...req.body,
+      dispatchId,
+      status: 'Dispatched',
+      timeline: [{ event: 'Order Dispatched', location: req.body.origin || '', status: 'success' }],
     });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching movement history',
-      error: error.message
-    });
-  }
+    res.status(201).json({ success: true, data: dispatch });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const updateDispatchStatus = async (req, res) => {
+  try {
+    const { status, location, event } = req.body;
+    const dispatch = await Dispatch.findById(req.params.id);
+    if (!dispatch) return res.status(404).json({ success: false, message: 'Not found' });
+    dispatch.status = status;
+    if (status === 'Delivered') dispatch.deliveredAt = new Date();
+    dispatch.timeline.push({ event: event || status, location: location || '', status: 'success' });
+    await dispatch.save();
+    res.json({ success: true, data: dispatch });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const deleteDispatch = async (req, res) => {
+  try {
+    await Dispatch.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── COURIER SHIPMENTS ─────────────────────────────────────────────────────────
+export const getShipments = async (req, res) => {
+  try {
+    const { status } = req.query;
+    const filter = status ? { status } : {};
+    const list = await CourierShipment.find(filter).sort({ createdAt: -1 });
+    res.json({ success: true, data: list });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+export const createShipment = async (req, res) => {
+  try {
+    const shipmentId = await genId(CourierShipment, 'shipmentId', 'SHP');
+    const shipment = await CourierShipment.create({ ...req.body, shipmentId });
+    res.status(201).json({ success: true, data: shipment });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const updateShipment = async (req, res) => {
+  try {
+    const shipment = await CourierShipment.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!shipment) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: shipment });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const markPOD = async (req, res) => {
+  try {
+    const { receivedBy, deliveredAt } = req.body;
+    const shipment = await CourierShipment.findByIdAndUpdate(
+      req.params.id,
+      { pod: true, receivedBy, deliveredAt: deliveredAt || new Date(), status: 'Delivered' },
+      { new: true }
+    );
+    if (!shipment) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: shipment });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const deleteShipment = async (req, res) => {
+  try {
+    await CourierShipment.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

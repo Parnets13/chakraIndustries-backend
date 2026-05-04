@@ -4,26 +4,31 @@ import {
   getBatchById,
   createBatch,
   updateBatch,
-  deleteBatch,
-  getAgeingReport,
-  getBatchesBySKU,
-  getExpiringBatches,
-  getBatchExpiry,
-  updateBatchExpiry
+  deleteBatch
 } from '../controllers/batchController.js';
-import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-router.get('/ageing-report', protect, getAgeingReport);
-router.get('/expiring', protect, getExpiringBatches);
-router.get('/sku/:sku', protect, getBatchesBySKU);
-router.get('/', protect, getAllBatches);
-router.get('/:id', protect, getBatchById);
-router.get('/:id/expiry', protect, getBatchExpiry);
-router.post('/', protect, createBatch);
-router.put('/:id', protect, updateBatch);
-router.put('/:id/expiry', protect, updateBatchExpiry);
-router.delete('/:id', protect, deleteBatch);
+// Add comprehensive logging middleware
+router.use((req, res, next) => {
+  console.log(`\n[BATCH ROUTE] ${req.method} ${req.path}`);
+  console.log('  Query:', JSON.stringify(req.query));
+  console.log('  Body:', req.body ? JSON.stringify(req.body).substring(0, 100) : 'none');
+  
+  // Wrap res.json to log responses
+  const originalJson = res.json;
+  res.json = function(data) {
+    console.log('  Response:', data.success ? '✓ Success' : '✗ Error', data.message || '');
+    return originalJson.call(this, data);
+  };
+  
+  next();
+});
+
+router.get('/', getAllBatches);
+router.get('/:id', getBatchById);
+router.post('/', createBatch);
+router.put('/:id', updateBatch);
+router.delete('/:id', deleteBatch);
 
 export default router;

@@ -1,206 +1,80 @@
 import CreditNote from '../models/CreditNote.js';
-import Vendor from '../models/Vendor.js';
 
-// Generate Credit Note ID
-const generateCNId = async () => {
+const genCNId = async () => {
   const year = new Date().getFullYear();
-  const lastCN = await CreditNote.findOne({ cnId: new RegExp(`^CN-${year}-`) })
-    .sort({ cnId: -1 })
-    .limit(1);
-  
-  if (!lastCN) return `CN-${year}-001`;
-  
-  const lastNum = parseInt(lastCN.cnId.split('-')[2]);
-  const newNum = String(lastNum + 1).padStart(3, '0');
-  return `CN-${year}-${newNum}`;
+  const prefix = `CN-${year}-`;
+  const last = await CreditNote.findOne({ cnId: new RegExp(`^${prefix}`) }).sort({ cnId: -1 });
+  if (!last) return `${prefix}001`;
+  const num = parseInt(last.cnId.split('-')[2]) || 0;
+  return `${prefix}${String(num + 1).padStart(3, '0')}`;
 };
 
-// CREATE Credit Note
-export const createCreditNote = async (req, res) => {
+const calcDaysOpen = (createdAt) =>
+  Math.floor((Date.now() - new Date(createdAt).getTime()) / (1000 * 60 * 60 * 24));
+
+export const getAll = async (req, res) => {
   try {
-    const cnId = await generateCNId();
-    const creditNote = new CreditNote({
-      ...req.body,
-      cnId
-    });
-    await creditNote.save();
-    await creditNote.populate('vendor', 'companyName');
-    res.status(201).json({ success: true, data: creditNote });
-  } catch (err) {
-    res.status(400).json({ success: false, message: err.message });
-  }
+    const { status } = req.query;
+    const filter = status ? { status } : {};
+    const list = await CreditNote.find(filter).sort({ createdAt: -1 });
+    const enriched = list.map(cn => ({
+      ...cn.toObject(),
+      daysOpen: calcDaysOpen(cn.createdAt),
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// GET ALL Credit Notes
-export const getAllCreditNotes = async (req, res) => {
+export const getStats = async (req, res) => {
   try {
-    const { status, vendor, priority } = req.query;
-    const filter = {};
-    if (status) filter.status = status;
-    if (vendor) filter.vendor = vendor;
-    if (priority) filter.priority = priority;
-
-    const creditNotes = await CreditNote.find(filter)
-      .populate('vendor', 'companyName email phone')
-      .populate('poId', 'poId')
-      .sort({ createdAt: -1 });
-
-    res.json({ success: true, data: creditNotes });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+    const all    = await CreditNote.find();
+    const open   = all.filter(c => c.status === 'Open');
+    const total  = open.reduce((s, c) => s + c.amount, 0);
+    const overdue = open.filter(c => calcDaysOpen(c.createdAt) >= 7).length;
+    res.json({ success: true, data: {
+      openCount: open.length,
+      totalValue: total,
+      overdue,
+      closed: all.filter(c => c.status === 'Closed').length,
+    }});
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// GET Credit Note by ID
-export const getCreditNoteById = async (req, res) => {
+export const create = async (req, res) => {
   try {
-    const creditNote = await CreditNote.findById(req.params.id)
-      .populate('vendor')
-      .populate('poId');
-
-    if (!creditNote) {
-      return res.status(404).json({ success: false, message: 'Credit note not found' });
-    }
-
-    res.json({ success: true, data: creditNote });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+    const cnId = await genCNId();
+    const cn = await CreditNote.create({ ...req.body, cnId });
+    res.status(201).json({ success: true, data: cn });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// UPDATE Credit Note
-export const updateCreditNote = async (req, res) => {
+export const updateStatus = async (req, res) => {
   try {
-    const creditNote = await CreditNote.findByIdAndUpdate(
+    const cn = await CreditNote.findByIdAndUpdate(
       req.params.id,
-      req.body,
-      { new: true, runValidators: true }
-    ).populate('vendor', 'companyName');
-
-    if (!creditNote) {
-      return res.status(404).json({ success: false, message: 'Credit note not found' });
-    }
-
-    res.json({ success: true, data: creditNote });
-  } catch (err) {
-    res.status(400).json({ success: false, message: err.message });
-  }
+      { status: req.body.status },
+      { new: true }
+    );
+    if (!cn) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: cn });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// UPDATE Credit Note Status
-export const updateCreditNoteStatus = async (req, res) => {
-  try {
-    const { status } = req.body;
-    const creditNote = await CreditNote.findByIdAndUpdate(
-      req.params.id,
-      { status },
-      { new: true, runValidators: true }
-    ).populate('vendor', 'companyName');
-
-    if (!creditNote) {
-      return res.status(404).json({ success: false, message: 'Credit note not found' });
-    }
-
-    res.json({ success: true, data: creditNote });
-  } catch (err) {
-    res.status(400).json({ success: false, message: err.message });
-  }
-};
-
-// SEND REMINDER
 export const sendReminder = async (req, res) => {
   try {
-    const creditNote = await CreditNote.findById(req.params.id)
-      .populate('vendor', 'email companyName');
-
-    if (!creditNote) {
-      return res.status(404).json({ success: false, message: 'Credit note not found' });
-    }
-
-    // Calculate next reminder date (7 days from now)
-    const nextReminderDate = new Date();
-    nextReminderDate.setDate(nextReminderDate.getDate() + 7);
-
-    // Update reminder status
-    creditNote.reminderSent = true;
-    creditNote.reminderSentDate = new Date();
-    creditNote.nextReminderDate = nextReminderDate;
-    await creditNote.save();
-
-    // TODO: Integrate with email service to send actual reminder
-    // For now, just log it
-    console.log(`📧 Reminder sent to ${creditNote.vendor.email} for CN ${creditNote.cnId}`);
-
-    res.json({ 
-      success: true, 
-      message: 'Reminder sent successfully',
-      data: creditNote 
-    });
-  } catch (err) {
-    res.status(400).json({ success: false, message: err.message });
-  }
+    const cn = await CreditNote.findByIdAndUpdate(
+      req.params.id,
+      { reminderSentAt: new Date() },
+      { new: true }
+    );
+    if (!cn) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, message: `Reminder logged for ${cn.cnId}`, data: cn });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// GET OVERDUE Credit Notes
-export const getOverdueCreditNotes = async (req, res) => {
+export const remove = async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const overdueCNs = await CreditNote.find({
-      dueDate: { $lt: today },
-      status: { $nin: ['Paid', 'Cancelled'] }
-    })
-      .populate('vendor', 'companyName email phone')
-      .sort({ dueDate: 1 });
-
-    res.json({ success: true, data: overdueCNs });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// GET CREDIT NOTE STATS
-export const getCreditNoteStats = async (req, res) => {
-  try {
-    const total = await CreditNote.countDocuments();
-    const pending = await CreditNote.countDocuments({ status: 'Pending' });
-    const overdue = await CreditNote.countDocuments({ 
-      dueDate: { $lt: new Date() },
-      status: { $nin: ['Paid', 'Cancelled'] }
-    });
-    const paid = await CreditNote.countDocuments({ status: 'Paid' });
-    const totalAmount = await CreditNote.aggregate([
-      { $match: { status: { $nin: ['Cancelled'] } } },
-      { $group: { _id: null, total: { $sum: '$amount' } } }
-    ]);
-
-    res.json({ 
-      success: true, 
-      data: { 
-        total, 
-        pending, 
-        overdue, 
-        paid,
-        totalAmount: totalAmount[0]?.total || 0
-      } 
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// DELETE Credit Note
-export const deleteCreditNote = async (req, res) => {
-  try {
-    const creditNote = await CreditNote.findByIdAndDelete(req.params.id);
-
-    if (!creditNote) {
-      return res.status(404).json({ success: false, message: 'Credit note not found' });
-    }
-
-    res.json({ success: true, message: 'Credit note deleted successfully' });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+    await CreditNote.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

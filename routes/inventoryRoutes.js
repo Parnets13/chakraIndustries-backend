@@ -1,33 +1,46 @@
 import express from 'express';
 import {
-  getAllInventory,
-  getInventoryById,
-  createInventory,
-  updateInventory,
-  deleteInventory,
-  adjustStock,
-  getDashboardStats,
-  getStockByWarehouse,
-  getStockByLocation,
-  getStockBySKU,
-  getStockTypeBreakdown,
-  getAllStock
+  getAllInventory, getInventoryStats,
+  createInventoryItem, adjustInventoryQty, moveInventoryItem, deleteInventoryItem,
+  getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse,
+  getMovements, createMovement, deleteMovement,
+  convertGRNToInventory,
 } from '../controllers/inventoryController.js';
-import { protect } from '../middleware/authMiddleware.js';
+import {
+  getInventoryFlowDashboard,
+  getGRNInventoryFlow,
+  getInventoryTrends,
+} from '../controllers/inventoryFlowController.js';
 
 const router = express.Router();
 
-router.get('/stats', protect, getDashboardStats);
-router.get('/stock', protect, getAllStock);
-router.get('/stock/warehouse/:warehouseId', protect, getStockByWarehouse);
-router.get('/stock/location/:locationId', protect, getStockByLocation);
-router.get('/stock/sku/:sku', protect, getStockBySKU);
-router.get('/stock/:sku/breakdown', protect, getStockTypeBreakdown);
-router.get('/', protect, getAllInventory);
-router.get('/:id', protect, getInventoryById);
-router.post('/', protect, createInventory);
-router.put('/:id', protect, updateInventory);
-router.delete('/:id', protect, deleteInventory);
-router.patch('/:id/adjust', protect, adjustStock);
+// Stats (must be before /:id routes)
+router.get('/stats',      getInventoryStats);
+
+// Inventory Flow Dashboard
+router.get('/flow/dashboard', getInventoryFlowDashboard);
+router.get('/flow/trends', getInventoryTrends);
+router.get('/flow/grn/:grnId', getGRNInventoryFlow);
+
+// Warehouses
+router.get('/warehouses',      getWarehouses);
+router.post('/warehouses',     createWarehouse);
+router.put('/warehouses/:id',  updateWarehouse);
+router.delete('/warehouses/:id', deleteWarehouse);
+
+// Movements
+router.get('/movements',       getMovements);
+router.post('/movements',      createMovement);
+router.delete('/movements/:id', deleteMovement);
+
+// GRN to Inventory conversion
+router.post('/convert-grn/:grnId', convertGRNToInventory);
+
+// Inventory items
+router.get('/',              getAllInventory);
+router.post('/',             createInventoryItem);
+router.patch('/:id/adjust',  adjustInventoryQty);
+router.patch('/:id/move',    moveInventoryItem);
+router.delete('/:id',        deleteInventoryItem);
 
 export default router;

@@ -62,40 +62,43 @@ export const createPickingList = async (req, res) => {
   try {
     const { orderId, items, pickerId } = req.body;
     
+    // Validate required fields
+    if (!orderId || !items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'orderId and items array are required'
+      });
+    }
+    
     // Generate pick ID
     const pickId = `PCK-${String(await PickingList.countDocuments() + 1).padStart(3, '0')}`;
     
-    // Validate and enrich items
-    const enrichedItems = await Promise.all(
-      items.map(async (item) => {
-        const inventory = await Inventory.findById(item.inventoryId);
-        if (!inventory) {
-          throw new Error(`Inventory item ${item.inventoryId} not found`);
-        }
-        
-        if (inventory.quantity < item.quantity) {
-          throw new Error(`Insufficient stock for ${inventory.sku}`);
-        }
-        
-        return {
-          inventory: item.inventoryId,
-          sku: inventory.sku,
-          itemName: inventory.name,
-          quantity: item.quantity,
-          location: item.location || `${inventory.location?.zone || 'N/A'} / ${inventory.location?.rack || 'N/A'}`,
-          picked: false
-        };
-      })
-    );
+    // Enrich items
+    const enrichedItems = items.map((item) => {
+      return {
+        inventory: item.inventoryId || null,
+        sku: item.sku || 'N/A',
+        itemName: item.itemName || 'Unknown Item',
+        quantity: item.quantity || 0,
+        location: item.location || 'N/A',
+        picked: false
+      };
+    });
     
-    const pickingList = new PickingList({
+    // Create picking list without picker field if not valid
+    const pickingListData = {
       pickId,
       orderId,
       items: enrichedItems,
-      picker: pickerId,
       status: 'Pending'
-    });
+    };
     
+    // Only add picker if it's a valid ObjectId
+    if (pickerId && pickerId.match(/^[0-9a-fA-F]{24}$/)) {
+      pickingListData.picker = pickerId;
+    }
+    
+    const pickingList = new PickingList(pickingListData);
     await pickingList.save();
     
     res.status(201).json({
@@ -104,6 +107,7 @@ export const createPickingList = async (req, res) => {
       data: pickingList
     });
   } catch (error) {
+    console.error('Error creating picking list:', error);
     res.status(400).json({
       success: false,
       message: 'Error creating picking list',

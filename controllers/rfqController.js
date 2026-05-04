@@ -21,15 +21,15 @@ export const getAllRFQs = async (req, res) => {
   try {
     const { status, priority } = req.query;
     const filter = {};
-    
     if (status) filter.status = status;
     if (priority) filter.priority = priority;
-    
+
     const rfqs = await RFQ.find(filter)
       .populate('vendors', 'companyName vendorId')
       .populate('linkedPR', 'prId department')
+      .populate('quotations.vendor', 'companyName vendorId')
       .sort({ createdAt: -1 });
-    
+
     res.json({ success: true, data: rfqs });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -41,7 +41,8 @@ export const getRFQById = async (req, res) => {
   try {
     const rfq = await RFQ.findById(req.params.id)
       .populate('vendors', 'companyName vendorId contactPerson email phone')
-      .populate('linkedPR', 'prId department items totalValue');
+      .populate('linkedPR', 'prId department items totalValue')
+      .populate('quotations.vendor', 'companyName vendorId');
     
     if (!rfq) {
       return res.status(404).json({ success: false, message: 'RFQ not found' });
@@ -56,6 +57,27 @@ export const getRFQById = async (req, res) => {
 // POST /api/rfqs
 export const createRFQ = async (req, res) => {
   try {
+    // Validate vendors exist
+    if (req.body.vendors && req.body.vendors.length > 0) {
+      const Vendor = (await import('../models/Vendor.js')).default;
+      const vendorCount = await Vendor.countDocuments({ _id: { $in: req.body.vendors } });
+      if (vendorCount !== req.body.vendors.length) {
+        return res.status(400).json({ success: false, message: 'One or more vendors not found' });
+      }
+    }
+
+    // Validate linked PR is approved (if provided)
+    if (req.body.linkedPR) {
+      const PurchaseRequisition = (await import('../models/PurchaseRequisition.js')).default;
+      const pr = await PurchaseRequisition.findById(req.body.linkedPR);
+      if (!pr) {
+        return res.status(400).json({ success: false, message: 'Linked PR not found' });
+      }
+      if (pr.status !== 'Approved') {
+        return res.status(400).json({ success: false, message: `Cannot create RFQ: PR ${pr.prId} is not approved (current status: ${pr.status})` });
+      }
+    }
+
     const rfqId = await generateRFQId();
     
     const rfq = await RFQ.create({

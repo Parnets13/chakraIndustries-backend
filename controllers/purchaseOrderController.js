@@ -23,7 +23,7 @@ export const getAllPOs = async (req, res) => {
     if (vendor) filter.vendor = vendor;
 
     const pos = await PurchaseOrder.find(filter)
-      .populate('vendor', 'companyName')
+      .populate('vendor')
       .populate('linkedRFQ', 'rfqId title')
       .sort({ createdAt: -1 });
 
@@ -53,6 +53,31 @@ export const getPOById = async (req, res) => {
 // Create PO
 export const createPO = async (req, res) => {
   try {
+    // Validate vendor exists
+    const Vendor = (await import('../models/Vendor.js')).default;
+    const vendor = await Vendor.findById(req.body.vendor);
+    if (!vendor) {
+      return res.status(400).json({ success: false, message: 'Vendor not found' });
+    }
+    if (vendor.status === 'Blacklisted') {
+      return res.status(400).json({ success: false, message: 'Cannot create PO for blacklisted vendor' });
+    }
+
+    // If linked to an RFQ, validate the RFQ's linked PR is approved
+    if (req.body.linkedRFQ) {
+      const RFQ = (await import('../models/RFQ.js')).default;
+      const rfq = await RFQ.findById(req.body.linkedRFQ).populate('linkedPR');
+      if (!rfq) {
+        return res.status(400).json({ success: false, message: 'Linked RFQ not found' });
+      }
+      if (rfq.linkedPR && rfq.linkedPR.status !== 'Approved') {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot create PO: PR ${rfq.linkedPR.prId} linked to this RFQ is not approved (status: ${rfq.linkedPR.status}). Please approve the PR first.`,
+        });
+      }
+    }
+
     const poId = await generatePOId();
     
     // Calculate totals

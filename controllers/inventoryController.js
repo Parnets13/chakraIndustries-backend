@@ -1,280 +1,429 @@
-import Inventory from '../models/Inventory.js';
+import InventoryItem from '../models/InventoryItem.js';
 import Warehouse from '../models/Warehouse.js';
 import StockMovement from '../models/StockMovement.js';
 
-// Get all inventory items
+// ── ID generator ──────────────────────────────────────────────────────────────
+const genId = async (Model, field, prefix) => {
+  const last = await Model.findOne({ [field]: new RegExp(`^${prefix}-`) }).sort({ [field]: -1 });
+  if (!last) return `${prefix}-001`;
+  const num = parseInt(last[field].split('-').pop()) || 0;
+  return `${prefix}-${String(num + 1).padStart(3, '0')}`;
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INVENTORY ITEMS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/inventory
 export const getAllInventory = async (req, res) => {
   try {
-    const { status, warehouse, search } = req.query;
-    
-    let query = {};
-    
-    if (status && status !== 'All') {
-      query.status = status;
-    }
-    
-    if (warehouse) {
-      query.warehouse = warehouse;
-    }
-    
-    if (search) {
-      query.$or = [
-        { sku: { $regex: search, $options: 'i' } },
-        { name: { $regex: search, $options: 'i' } }
-      ];
-    }
-    
-    const inventory = await Inventory.find(query)
-      .populate('warehouse', 'warehouseId name location')
+    const { warehouse, status, search } = req.query;
+    const filter = {};
+    if (warehouse) filter.warehouse = warehouse;
+    if (status)    filter.status    = status;
+    if (search)    filter.$or = [
+      { sku:  { $regex: search, $options: 'i' } },
+      { name: { $regex: search, $options: 'i' } },
+    ];
+    const items = await InventoryItem.find(filter)
       .populate('category', 'name')
-      .sort({ createdAt: -1 });
+      .populate('grnId',    'grnId')
+      .populate('poId',     'poId')
+      .populate('vendorId', 'companyName')
+      .sort({ updatedAt: -1 });
     
-    res.json({
-      success: true,
-      data: inventory
+    console.log('Raw items from DB:', items.length, 'items');
+    if (items.length > 0) {
+      console.log('First item raw:', items[0]);
+    }
+    
+    // Ensure all items have name field - handle legacy data
+    const itemsWithName = items.map(item => {
+      const itemObj = item.toObject();
+      
+      // Ensure name exists
+      if (!itemObj.name || itemObj.name === '' || itemObj.name === null) {
+        itemObj.name = itemObj.sku || 'Unknown Item';
+      }
+      
+      // Ensure category is properly formatted
+      if (itemObj.category && typeof itemObj.category === 'object' && itemObj.category._id) {
+        // Category is already populated correctly
+      } else if (itemObj.category && typeof itemObj.category === 'string') {
+        // Category is just an ID, convert to object
+        itemObj.category = { _id: itemObj.category, name: 'Unknown' };
+      } else {
+        itemObj.category = null;
+      }
+      
+      return itemObj;
     });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching inventory',
-      error: error.message
-    });
+    
+    console.log('Items after processing:', itemsWithName.length);
+    if (itemsWithName.length > 0) {
+      console.log('First processed item:', itemsWithName[0]);
+    }
+    
+    res.json({ success: true, data: itemsWithName });
+  } catch (err) {
+    console.error('Error in getAllInventory:', err);
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// Get single inventory item
-export const getInventoryById = async (req, res) => {
+// GET /api/inventory/stats
+export const getInventoryStats = async (req, res) => {
   try {
-    const inventory = await Inventory.findById(req.params.id)
-      .populate('warehouse', 'warehouseId name location')
-      .populate('category', 'name');
-    
-    if (!inventory) {
-      return res.status(404).json({
-        success: false,
-        message: 'Inventory item not found'
-      });
-    }
-    
-    res.json({
-      success: true,
-      data: inventory
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching inventory item',
-      error: error.message
-    });
-  }
-};
+    const items      = await InventoryItem.find();
+    const warehouses = await Warehouse.find();
+    const movements  = await StockMovement.find();
 
-// Create inventory item
-export const createInventory = async (req, res) => {
-  try {
-    const inventory = new Inventory(req.body);
-    await inventory.save();
-    
-    // Update warehouse used capacity
-    if (inventory.warehouse) {
-      await Warehouse.findByIdAndUpdate(
-        inventory.warehouse,
-        { $inc: { used: inventory.quantity } }
-      );
-    }
-    
-    res.status(201).json({
-      success: true,
-      message: 'Inventory item created successfully',
-      data: inventory
-    });
-  } catch (error) {
-    res.status(400).json({
-      success: false,
-      message: 'Error creating inventory item',
-      error: error.message
-    });
-  }
-};
+    const total    = items.length;
+    const active   = items.filter(i => i.status === 'Active').length;
+    const critical = items.filter(i => i.status === 'Critical').length;
+    const dead     = items.filter(i => i.status === 'Dead').length;
+    const totalQty = items.reduce((s, i) => s + i.qty, 0);
 
-// Update inventory item
-export const updateInventory = async (req, res) => {
-  try {
-    const oldInventory = await Inventory.findById(req.params.id);
-    
-    if (!oldInventory) {
-      return res.status(404).json({
-        success: false,
-        message: 'Inventory item not found'
-      });
+    // Category breakdown by warehouse prefix (simple heuristic)
+    const byWarehouse = {};
+    for (const wh of warehouses) {
+      const whItems = items.filter(i => i.warehouse === wh.warehouseId);
+      byWarehouse[wh.warehouseId] = {
+        name: wh.name,
+        skus: whItems.length,
+        qty:  whItems.reduce((s, i) => s + i.qty, 0),
+      };
     }
-    
-    const inventory = await Inventory.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }
-    );
-    
-    // Update warehouse capacity if quantity changed
-    if (oldInventory.quantity !== inventory.quantity) {
-      const diff = inventory.quantity - oldInventory.quantity;
-      await Warehouse.findByIdAndUpdate(
-        inventory.warehouse,
-        { $inc: { used: diff } }
-      );
-    }
-    
-    res.json({
-      success: true,
-      message: 'Inventory item updated successfully',
-      data: inventory
-    });
-  } catch (error) {
-    res.status(400).json({
-      success: false,
-      message: 'Error updating inventory item',
-      error: error.message
-    });
-  }
-};
 
-// Delete inventory item
-export const deleteInventory = async (req, res) => {
-  try {
-    const inventory = await Inventory.findById(req.params.id);
-    
-    if (!inventory) {
-      return res.status(404).json({
-        success: false,
-        message: 'Inventory item not found'
-      });
-    }
-    
-    // Update warehouse capacity
-    await Warehouse.findByIdAndUpdate(
-      inventory.warehouse,
-      { $inc: { used: -inventory.quantity } }
-    );
-    
-    await Inventory.findByIdAndDelete(req.params.id);
-    
-    res.json({
-      success: true,
-      message: 'Inventory item deleted successfully'
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error deleting inventory item',
-      error: error.message
-    });
-  }
-};
+    // Today's movements
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const todayMov = movements.filter(m => new Date(m.createdAt) >= today);
 
-// Adjust stock quantity
-export const adjustStock = async (req, res) => {
-  try {
-    const { quantity, reason, reference } = req.body;
-    const inventory = await Inventory.findById(req.params.id);
-    
-    if (!inventory) {
-      return res.status(404).json({
-        success: false,
-        message: 'Inventory item not found'
-      });
-    }
-    
-    const oldQty = inventory.quantity;
-    inventory.quantity = quantity;
-    await inventory.save();
-    
-    // Create stock movement record
-    const movementId = `MV-${Date.now()}`;
-    await StockMovement.create({
-      movementId,
-      type: 'Adjustment',
-      inventory: inventory._id,
-      sku: inventory.sku,
-      itemName: inventory.name,
-      quantity: Math.abs(quantity - oldQty),
-      from: quantity < oldQty ? inventory.warehouse : 'Adjustment',
-      to: quantity > oldQty ? inventory.warehouse : 'Adjustment',
-      reference,
-      remarks: reason,
-      performedBy: req.user?._id
-    });
-    
-    // Update warehouse capacity
-    const diff = quantity - oldQty;
-    await Warehouse.findByIdAndUpdate(
-      inventory.warehouse,
-      { $inc: { used: diff } }
-    );
-    
-    res.json({
-      success: true,
-      message: 'Stock adjusted successfully',
-      data: inventory
-    });
-  } catch (error) {
-    res.status(400).json({
-      success: false,
-      message: 'Error adjusting stock',
-      error: error.message
-    });
-  }
-};
-
-// Get inventory dashboard stats
-export const getDashboardStats = async (req, res) => {
-  try {
-    const totalStock = await Inventory.aggregate([
-      { $group: { _id: null, total: { $sum: '$quantity' } } }
-    ]);
-    
-    const lowStock = await Inventory.countDocuments({
-      $expr: { $and: [{ $lt: ['$quantity', '$minQuantity'] }, { $gt: ['$quantity', 0] }] }
-    });
-    
-    const deadStock = await Inventory.countDocuments({ quantity: 0 });
-    
-    const activeSkus = await Inventory.countDocuments({ status: 'Active' });
-    
-    const stockByCategory = await Inventory.aggregate([
-      {
-        $lookup: {
-          from: 'categories',
-          localField: 'category',
-          foreignField: '_id',
-          as: 'categoryInfo'
-        }
-      },
-      { $unwind: { path: '$categoryInfo', preserveNullAndEmptyArrays: true } },
-      {
-        $group: {
-          _id: '$categoryInfo.name',
-          value: { $sum: '$quantity' }
-        }
-      },
-      { $project: { label: '$_id', value: 1, _id: 0 } }
-    ]);
-    
     res.json({
       success: true,
       data: {
-        totalStock: totalStock[0]?.total || 0,
-        lowStock,
-        deadStock,
-        activeSkus,
-        stockByCategory
+        total, active, critical, dead, totalQty,
+        byWarehouse,
+        inwardToday:   todayMov.filter(m => m.type === 'Inward').length,
+        outwardToday:  todayMov.filter(m => m.type === 'Outward').length,
+        transferToday: todayMov.filter(m => m.type === 'Transfer').length,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/inventory
+export const createInventoryItem = async (req, res) => {
+  try {
+    const { sku, name, qty, minQty, warehouse, unit, category, batch } = req.body;
+    if (!sku) return res.status(400).json({ success: false, message: 'SKU is required' });
+
+    const existing = await InventoryItem.findOne({ sku });
+    if (existing) return res.status(400).json({ success: false, message: `SKU ${sku} already exists` });
+
+    // Ensure name is provided and not empty
+    let finalName = name;
+    if (!finalName || finalName.trim() === '') {
+      finalName = `Item-${sku}`;
+    }
+
+    const q = parseInt(qty) || 0;
+    const m = parseInt(minQty) || 0;
+    const status = q === 0 ? 'Dead' : q < m ? 'Critical' : 'Active';
+
+    const item = await InventoryItem.create({ 
+      sku, 
+      name: finalName, 
+      qty: q, 
+      minQty: m, 
+      warehouse: warehouse || 'WH-01', 
+      unit: unit || 'Nos', 
+      category: category || null, 
+      status 
+    });
+    res.status(201).json({ success: true, data: item });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// PATCH /api/inventory/:id/adjust
+export const adjustInventoryQty = async (req, res) => {
+  try {
+    const { qty, reason } = req.body;
+    const item = await InventoryItem.findById(req.params.id);
+    if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
+
+    const newQty = parseInt(qty);
+    item.qty    = newQty;
+    item.status = newQty === 0 ? 'Dead' : newQty < item.minQty ? 'Critical' : 'Active';
+    await item.save();
+
+    // Log as movement
+    const movId = await genId(StockMovement, 'movementId', 'MV');
+    await StockMovement.create({
+      movementId: movId,
+      type: 'Inward',
+      sku: item.sku,
+      name: item.name,
+      qty: newQty,
+      from: 'Manual Adjustment',
+      to: item.warehouse,
+      ref: reason || 'Stock Adjustment',
+    });
+
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// PATCH /api/inventory/:id/move
+export const moveInventoryItem = async (req, res) => {
+  try {
+    const { toWarehouse } = req.body;
+    const item = await InventoryItem.findById(req.params.id);
+    if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
+
+    const fromWH = item.warehouse;
+    item.warehouse = toWarehouse;
+    await item.save();
+
+    // Log as transfer movement
+    const movId = await genId(StockMovement, 'movementId', 'MV');
+    await StockMovement.create({
+      movementId: movId,
+      type: 'Transfer',
+      sku: item.sku,
+      name: item.name,
+      qty: item.qty,
+      from: fromWH,
+      to: toWarehouse,
+      ref: 'Stock Transfer',
+    });
+
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// DELETE /api/inventory/:id
+export const deleteInventoryItem = async (req, res) => {
+  try {
+    await InventoryItem.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// WAREHOUSES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/inventory/warehouses
+export const getWarehouses = async (req, res) => {
+  try {
+    const warehouses = await Warehouse.find({ status: 'Active' }).sort({ createdAt: 1 });
+    // Compute used (total qty of items in each warehouse)
+    const items = await InventoryItem.find();
+    const result = warehouses.map(wh => {
+      const whItems = items.filter(i => i.warehouse === wh.warehouseId);
+      return {
+        ...wh.toObject(),
+        id:   wh.warehouseId,
+        used: whItems.reduce((s, i) => s + i.qty, 0),
+        skus: whItems.length,
+      };
+    });
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/inventory/warehouses
+export const createWarehouse = async (req, res) => {
+  try {
+    const { warehouseId, name, location, manager, capacity, phone, address, type } = req.body;
+    if (!warehouseId || !name || !location) {
+      return res.status(400).json({ success: false, message: 'ID, name and location are required' });
+    }
+    const existing = await Warehouse.findOne({ warehouseId });
+    if (existing) return res.status(400).json({ success: false, message: `Warehouse ${warehouseId} already exists` });
+
+    const wh = await Warehouse.create({ warehouseId, name, location, manager, capacity: parseInt(capacity) || 0, phone, address, type });
+    res.status(201).json({ success: true, data: { ...wh.toObject(), id: wh.warehouseId, used: 0, skus: 0 } });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /api/inventory/warehouses/:id
+export const updateWarehouse = async (req, res) => {
+  try {
+    const wh = await Warehouse.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!wh) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: wh });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// DELETE /api/inventory/warehouses/:id
+export const deleteWarehouse = async (req, res) => {
+  try {
+    await Warehouse.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STOCK MOVEMENTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/inventory/movements
+export const getMovements = async (req, res) => {
+  try {
+    const { type } = req.query;
+    const filter = type ? { type } : {};
+    const list = await StockMovement.find(filter).sort({ createdAt: -1 });
+    res.json({ success: true, data: list });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/inventory/movements
+export const createMovement = async (req, res) => {
+  try {
+    const { type, sku, qty, from, to, ref, notes } = req.body;
+    if (!type || !sku || !qty || !from || !to) {
+      return res.status(400).json({ success: false, message: 'type, sku, qty, from, to are required' });
+    }
+    const movementId = await genId(StockMovement, 'movementId', 'MV');
+
+    // Find item name
+    const item = await InventoryItem.findOne({ sku });
+    const movement = await StockMovement.create({
+      movementId, type, sku, name: item?.name || sku,
+      qty: parseInt(qty), from, to, ref: ref || '', notes: notes || '',
+    });
+
+    // Update stock qty for inward/outward
+    if (item) {
+      if (type === 'Inward')  item.qty += parseInt(qty);
+      if (type === 'Outward') item.qty = Math.max(0, item.qty - parseInt(qty));
+      if (type === 'Transfer') item.warehouse = to;
+      item.status = item.qty === 0 ? 'Dead' : item.qty < item.minQty ? 'Critical' : 'Active';
+      await item.save();
+    }
+
+    res.status(201).json({ success: true, data: movement });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// DELETE /api/inventory/movements/:id
+export const deleteMovement = async (req, res) => {
+  try {
+    await StockMovement.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INTERNAL — called after QC pass
+// ══════════════════════════════════════════════════════════════════════════════
+export const updateInventoryFromQC = async (qcData) => {
+  try {
+    const { items, grnId, poId, vendorId, warehouseId } = qcData;
+    
+    if (!items || items.length === 0) {
+      console.log('No items to process in QC');
+      return;
+    }
+
+    console.log(`[INVENTORY UPDATE] Starting inventory update for GRN: ${grnId}`);
+    console.log(`[INVENTORY UPDATE] Items to process: ${items.length}`);
+
+    for (const item of items) {
+      const passedQty = item.passedQty || 0;
+      if (passedQty <= 0) {
+        console.log(`[INVENTORY UPDATE] Skipping item ${item.itemName} - passedQty: ${passedQty}`);
+        continue;
       }
-    });
+
+      // Generate SKU from item name if not provided
+      const sku = item.sku || item.itemName?.replace(/\s+/g, '-').toUpperCase() || `SKU-${Date.now()}`;
+      const itemName = item.itemName || item.name || 'Item';
+      const unit = item.unit || 'Nos';
+      const warehouse = warehouseId || 'WH-01';
+
+      console.log(`[INVENTORY UPDATE] Processing item: ${itemName} (SKU: ${sku}, Qty: ${passedQty})`);
+
+      // Check if item already exists in inventory
+      const existing = await InventoryItem.findOne({ sku });
+
+      if (existing) {
+        // Update existing item
+        const oldQty = existing.qty;
+        existing.qty += passedQty;
+        existing.lastReceivedAt = new Date();
+        existing.status = existing.qty === 0 ? 'Dead' : existing.qty < existing.minQty ? 'Critical' : 'Active';
+        
+        // Link to GRN if not already linked
+        if (!existing.grnId) existing.grnId = grnId;
+        if (!existing.poId) existing.poId = poId;
+        if (!existing.vendorId) existing.vendorId = vendorId;
+        
+        await existing.save();
+        console.log(`[INVENTORY UPDATE] ✅ Updated inventory: ${sku} | ${oldQty} → ${existing.qty} units | Status: ${existing.status}`);
+      } else {
+        // Create new inventory item
+        const newItem = await InventoryItem.create({
+          sku,
+          name: itemName,
+          qty: passedQty,
+          unit,
+          warehouse,
+          minQty: 0,
+          grnId,
+          poId,
+          vendorId,
+          lastReceivedAt: new Date(),
+          status: 'Active',
+        });
+        console.log(`[INVENTORY UPDATE] ✅ Created new inventory: ${sku} | Qty: ${passedQty} | Warehouse: ${warehouse}`);
+      }
+
+      // Log inward movement
+      const movId = await genId(StockMovement, 'movementId', 'MV');
+      await StockMovement.create({
+        movementId: movId,
+        type: 'Inward',
+        sku,
+        name: itemName,
+        qty: passedQty,
+        from: 'GRN/QC',
+        to: warehouse,
+        ref: grnId?.toString() || '',
+      });
+      console.log(`[INVENTORY UPDATE] ✅ Logged movement: ${movId} | ${itemName} | ${passedQty} units`);
+    }
+
+    console.log(`[INVENTORY UPDATE] ✅ Inventory update completed for GRN: ${grnId}`);
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching dashboard stats',
-      error: error.message
-    });
+    console.error('[INVENTORY UPDATE] ❌ Error updating inventory from QC:', error);
+    throw error;
   }
 };
 
@@ -434,6 +583,115 @@ export const getAllStock = async (req, res) => {
       success: false,
       message: 'Error fetching stock',
       error: error.message
+    });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// NEW: Convert GRN items to inventory directly
+// ══════════════════════════════════════════════════════════════════════════════
+export const convertGRNToInventory = async (req, res) => {
+  try {
+    const { grnId } = req.params;
+    
+    // Import GRN model
+    const GRN = require('../models/GRN.js').default;
+    
+    // Get GRN with all details
+    const grn = await GRN.findById(grnId)
+      .populate('poId', 'items')
+      .populate('vendorId', '_id')
+      .populate('warehouseId', '_id');
+    
+    if (!grn) {
+      return res.status(404).json({ success: false, message: 'GRN not found' });
+    }
+
+    console.log(`[CONVERT GRN] Converting GRN ${grn.grnId} items to inventory`);
+    console.log(`[CONVERT GRN] Items count: ${grn.items.length}`);
+
+    const createdItems = [];
+
+    // Process each item in GRN
+    for (const item of grn.items) {
+      const receivedQty = item.receivedQty || 0;
+      if (receivedQty <= 0) continue;
+
+      const sku = item.sku || item.name?.replace(/\s+/g, '-').toUpperCase() || `SKU-${Date.now()}`;
+      const itemName = item.name || 'Item';
+      const unit = item.unit || 'Nos';
+      const warehouse = grn.warehouseId?._id || 'WH-01';
+
+      console.log(`[CONVERT GRN] Processing: ${itemName} (SKU: ${sku}, Qty: ${receivedQty})`);
+
+      // Check if exists
+      const existing = await InventoryItem.findOne({ sku });
+
+      if (existing) {
+        const oldQty = existing.qty;
+        existing.qty += receivedQty;
+        existing.lastReceivedAt = new Date();
+        existing.status = existing.qty === 0 ? 'Dead' : existing.qty < existing.minQty ? 'Critical' : 'Active';
+        
+        if (!existing.grnId) existing.grnId = grn._id;
+        if (!existing.poId) existing.poId = grn.poId;
+        if (!existing.vendorId) existing.vendorId = grn.vendorId;
+        
+        await existing.save();
+        console.log(`[CONVERT GRN] ✅ Updated: ${sku} | ${oldQty} → ${existing.qty}`);
+        createdItems.push({ sku, name: itemName, qty: receivedQty, action: 'updated' });
+      } else {
+        const newItem = await InventoryItem.create({
+          sku,
+          name: itemName,
+          qty: receivedQty,
+          unit,
+          warehouse,
+          minQty: 0,
+          grnId: grn._id,
+          poId: grn.poId,
+          vendorId: grn.vendorId,
+          lastReceivedAt: new Date(),
+          status: 'Active',
+        });
+        console.log(`[CONVERT GRN] ✅ Created: ${sku} | Qty: ${receivedQty}`);
+        createdItems.push({ sku, name: itemName, qty: receivedQty, action: 'created' });
+      }
+
+      // Log movement
+      const movId = await genId(StockMovement, 'movementId', 'MV');
+      await StockMovement.create({
+        movementId: movId,
+        type: 'Inward',
+        sku,
+        name: itemName,
+        qty: receivedQty,
+        from: 'GRN',
+        to: warehouse,
+        ref: grn.grnId,
+      });
+    }
+
+    // Update GRN status
+    await GRN.findByIdAndUpdate(grnId, { grnStatus: 'Inventory_Updated' });
+
+    console.log(`[CONVERT GRN] ✅ Conversion complete for GRN ${grn.grnId}`);
+
+    res.json({
+      success: true,
+      message: `${createdItems.length} items converted to inventory`,
+      data: {
+        grnId: grn.grnId,
+        itemsProcessed: createdItems.length,
+        items: createdItems,
+      },
+    });
+  } catch (error) {
+    console.error('[CONVERT GRN] ❌ Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error converting GRN to inventory',
+      error: error.message,
     });
   }
 };

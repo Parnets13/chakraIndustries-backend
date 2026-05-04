@@ -3,6 +3,9 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import connectDB from './config/database.js';
 import authRoutes from './routes/authRoutes.js';
+import userRoutes from './routes/userRoutes.js';
+import permissionRoutes from './routes/permissionRoutes.js';
+import activityLogRoutes from './routes/activityLogRoutes.js';
 import vendorRoutes from './routes/vendorRoutes.js';
 import categoryRoutes from './routes/categoryRoutes.js';
 import purchaseRequisitionRoutes from './routes/purchaseRequisitionRoutes.js';
@@ -10,20 +13,26 @@ import purchaseOrderRoutes from './routes/purchaseOrderRoutes.js';
 import rfqRoutes from './routes/rfqRoutes.js';
 import grnRoutes from './routes/grnRoutes.js';
 import departmentRoutes from './routes/departmentRoutes.js';
-import inventoryRoutes from './routes/inventoryRoutes.js';
-import warehouseRoutes from './routes/warehouseRoutes.js';
-import locationRoutes from './routes/locationRoutes.js';
-import stockMovementRoutes from './routes/stockMovementRoutes.js';
-import batchRoutes from './routes/batchRoutes.js';
-import pickingListRoutes from './routes/pickingListRoutes.js';
-import defectiveStockRoutes from './routes/defectiveStockRoutes.js';
-import creditNoteRoutes from './routes/creditNoteRoutes.js';
-import clientRoutes from './routes/clientRoutes.js';
-import corporateClientRoutes from './routes/corporateClientRoutes.js';
-import bulkQuotationRoutes from './routes/bulkQuotationRoutes.js';
-import deliveryScheduleRoutes from './routes/deliveryScheduleRoutes.js';
-import inventoryDataRoutes from './routes/inventoryDataRoutes.js';
 import qualityCheckRoutes from './routes/qualityCheckRoutes.js';
+import approvalRoutes from './routes/approvalRoutes.js';
+import notificationRoutes from './routes/notificationRoutes.js';
+import inventoryRoutes from './routes/inventoryRoutes.js';
+import materialReturnRoutes from './routes/materialReturnRoutes.js';
+import creditNoteRoutes from './routes/creditNoteRoutes.js';
+import taskRoutes from './routes/taskRoutes.js';
+import logisticsRoutes from './routes/logisticsRoutes.js';
+import bulkOrderRoutes from './routes/bulkOrderRoutes.js';
+import inventoryDataRoutes from './routes/inventoryDataRoutes.js';
+import pickingListRoutes from './routes/pickingListRoutes.js';
+import sortingJobRoutes from './routes/sortingJobRoutes.js';
+import packingJobRoutes from './routes/packingJobRoutes.js';
+import batchRoutes from './routes/batchRoutes.js';
+import defectiveStockRoutes from './routes/defectiveStockRoutes.js';
+import clientRoutes from './routes/clientRoutes.js';
+
+// Ensure new models are registered
+import './models/Warehouse.js';
+import './models/StockMovement.js';
 
 dotenv.config();
 
@@ -34,12 +43,23 @@ connectDB();
 
 // Middleware
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    /\.netlify\.app$/,
-    /\.netlify\.com$/,
-  ],
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    const allowed = [
+      'http://localhost:5173',
+      'http://localhost:3000',
+    ];
+    const allowedPatterns = [
+      /\.netlify\.app$/,
+      /\.netlify\.com$/,
+      /\.onrender\.com$/,
+    ];
+    if (allowed.includes(origin) || allowedPatterns.some(p => p.test(origin))) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS blocked: ${origin}`));
+  },
   credentials: true,
 }));
 
@@ -48,35 +68,41 @@ app.use(express.urlencoded({ extended: true }));
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/permissions', permissionRoutes);
+app.use('/api/activity-logs', activityLogRoutes);
 app.use('/api/vendors', vendorRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/purchase-requisitions', purchaseRequisitionRoutes);
 app.use('/api/purchase-orders', purchaseOrderRoutes);
 app.use('/api/rfqs', rfqRoutes);
-app.use('/api/grn', grnRoutes);
 app.use('/api/grns', grnRoutes);
 app.use('/api/departments', departmentRoutes);
-app.use('/api/inventory', inventoryRoutes);
-app.use('/api/warehouses', warehouseRoutes);
-app.use('/api/locations', locationRoutes);
-app.use('/api/stock-movements', stockMovementRoutes);
-app.use('/api/batches', batchRoutes);
-app.use('/api/picking-lists', pickingListRoutes);
-app.use('/api/defective-stock', defectiveStockRoutes);
-app.use('/api/credit-notes', creditNoteRoutes);
-app.use('/api/clients', clientRoutes);
-app.use('/api/corporate-clients', corporateClientRoutes);
-app.use('/api/bulk-quotations', bulkQuotationRoutes);
-app.use('/api/delivery-schedules', deliveryScheduleRoutes);
-app.use('/api/inventory-data', inventoryDataRoutes);
 app.use('/api/quality-checks', qualityCheckRoutes);
+app.use('/api/approvals', approvalRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/inventory', inventoryRoutes);
+app.use('/api/material-returns', materialReturnRoutes);
+app.use('/api/credit-notes', creditNoteRoutes);
+app.use('/api/tasks', taskRoutes);
+app.use('/api/logistics', logisticsRoutes);
+app.use('/api/bulk-orders', bulkOrderRoutes);
+app.use('/api/inventory-data', inventoryDataRoutes);
+app.use('/api/picking', pickingListRoutes);
+app.use('/api/sorting', sortingJobRoutes);
+app.use('/api/packing', packingJobRoutes);
+app.use('/api/batches', batchRoutes);
+app.use('/api/defective-stock', defectiveStockRoutes);
+app.use('/api/clients', clientRoutes);
 
 // Health check
+// eslint-disable-next-line no-unused-vars
 app.get('/api/health', (req, res) => {
   res.json({ status: 'Server is running' });
 });
 
 // Error handling middleware
+// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({

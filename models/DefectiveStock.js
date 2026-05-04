@@ -7,48 +7,32 @@ const defectiveStockSchema = new mongoose.Schema({
     unique: true,
     uppercase: true
   },
-  inventory: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Inventory',
-    required: true
-  },
   sku: {
     type: String,
     required: true
   },
-  itemName: {
-    type: String,
-    required: true
-  },
-  quantity: {
-    type: Number,
-    required: true
-  },
+  itemName: String,
+  quantity: Number,
   defectType: {
     type: String,
-    enum: ['Dimensional', 'Surface Defect', 'Packaging Damage', 'Material Defect', 'Other'],
-    required: true
+    enum: ['Dimensional', 'Surface Defect', 'Packaging Damage', 'Functional Failure', 'Other'],
+    default: 'Other'
   },
   source: {
     type: String,
     enum: ['GRN Inspection', 'Production', 'Customer Return', 'Internal Audit'],
-    required: true
+    default: 'GRN Inspection'
   },
   stage: {
     type: String,
-    enum: ['QC Hold', 'Defective Bin', 'Repair', 'Disposed', 'Returned'],
+    enum: ['QC Hold', 'Defective Bin', 'Repair', 'Scrap'],
     default: 'QC Hold'
   },
+  warehouse: String,
+  remarks: String,
   daysAged: {
     type: Number,
     default: 0
-  },
-  remarks: {
-    type: String
-  },
-  reportedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
   }
 }, {
   timestamps: true
