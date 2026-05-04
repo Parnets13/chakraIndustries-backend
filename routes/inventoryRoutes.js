@@ -2,7 +2,7 @@ import express from 'express';
 import {
   getAllInventory, getInventoryStats,
   createInventoryItem, adjustInventoryQty, moveInventoryItem, deleteInventoryItem,
-  getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse,
+  getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getNextWarehouseId,
   getMovements, createMovement, deleteMovement,
   convertGRNToInventory,
 } from '../controllers/inventoryController.js';
@@ -23,10 +23,11 @@ router.get('/flow/trends', getInventoryTrends);
 router.get('/flow/grn/:grnId', getGRNInventoryFlow);
 
 // Warehouses
-router.get('/warehouses',      getWarehouses);
-router.post('/warehouses',     createWarehouse);
-router.put('/warehouses/:id',  updateWarehouse);
-router.delete('/warehouses/:id', deleteWarehouse);
+router.get('/warehouses/next-id',    getNextWarehouseId);
+router.get('/warehouses',            getWarehouses);
+router.post('/warehouses',           createWarehouse);
+router.put('/warehouses/:id',        updateWarehouse);
+router.delete('/warehouses/:id',     deleteWarehouse);
 
 // Movements
 router.get('/movements',       getMovements);

@@ -248,17 +248,60 @@ export const getWarehouses = async (req, res) => {
 // POST /api/inventory/warehouses
 export const createWarehouse = async (req, res) => {
   try {
-    const { warehouseId, name, location, manager, capacity, phone, address, type } = req.body;
-    if (!warehouseId || !name || !location) {
-      return res.status(400).json({ success: false, message: 'ID, name and location are required' });
+    const { name, location, manager, capacity, phone, address, type } = req.body;
+    if (!name || !location) {
+      return res.status(400).json({ success: false, message: 'Name and location are required' });
     }
-    const existing = await Warehouse.findOne({ warehouseId });
-    if (existing) return res.status(400).json({ success: false, message: `Warehouse ${warehouseId} already exists` });
 
-    const wh = await Warehouse.create({ warehouseId, name, location, manager, capacity: parseInt(capacity) || 0, phone, address, type });
+    // Auto-generate warehouseId: find highest existing number and increment
+    const all = await Warehouse.find({}, 'warehouseId').sort({ createdAt: -1 });
+    let nextNum = 1;
+    if (all.length > 0) {
+      const nums = all
+        .map(w => { const m = w.warehouseId?.match(/(\d+)$/); return m ? parseInt(m[1]) : 0; })
+        .filter(n => !isNaN(n));
+      if (nums.length > 0) nextNum = Math.max(...nums) + 1;
+    }
+    let warehouseId = `WH-${String(nextNum).padStart(2, '0')}`;
+    // Guarantee uniqueness
+    while (await Warehouse.findOne({ warehouseId })) {
+      nextNum++;
+      warehouseId = `WH-${String(nextNum).padStart(2, '0')}`;
+    }
+
+    const wh = await Warehouse.create({
+      warehouseId, name, location,
+      manager:  manager  || '',
+      capacity: parseInt(capacity) || 0,
+      phone:    phone    || '',
+      address:  address  || '',
+      type:     type     || 'Raw Material',
+    });
     res.status(201).json({ success: true, data: { ...wh.toObject(), id: wh.warehouseId, used: 0, skus: 0 } });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/inventory/warehouses/next-id
+export const getNextWarehouseId = async (req, res) => {
+  try {
+    const all = await Warehouse.find({}, 'warehouseId');
+    let nextNum = 1;
+    if (all.length > 0) {
+      const nums = all
+        .map(w => { const m = w.warehouseId?.match(/(\d+)$/); return m ? parseInt(m[1]) : 0; })
+        .filter(n => !isNaN(n));
+      if (nums.length > 0) nextNum = Math.max(...nums) + 1;
+    }
+    let warehouseId = `WH-${String(nextNum).padStart(2, '0')}`;
+    while (await Warehouse.findOne({ warehouseId })) {
+      nextNum++;
+      warehouseId = `WH-${String(nextNum).padStart(2, '0')}`;
+    }
+    res.json({ success: true, data: { warehouseId } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
