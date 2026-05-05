@@ -129,7 +129,9 @@ export const createInventoryItem = async (req, res) => {
       finalName = `Item-${sku}`;
     }
 
-    const q = parseInt(qty) || 0;
+    const q = parseInt(qty);
+    if (isNaN(q) || q < 0) return res.status(400).json({ success: false, message: 'qty must be a valid non-negative number' });
+    
     const m = parseInt(minQty) || 0;
     const status = q === 0 ? 'Dead' : q < m ? 'Critical' : 'Active';
 

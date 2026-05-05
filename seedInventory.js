@@ -79,6 +79,7 @@ const seedInventoryData = async () => {
     
     // Create inventory items
     console.log('Creating inventory items...');
+    const now = new Date();
     const inventoryItems = await Inventory.insertMany([
       {
         sku: 'SKU-1042',
@@ -86,11 +87,15 @@ const seedInventoryData = async () => {
         category: category?._id,
         warehouse: warehouses[0]._id,
         quantity: 12,
+        totalQuantity: 12,
         minQuantity: 50,
         unit: 'units',
         batch: 'B-2024-04',
         unitPrice: 120,
-        location: { zone: 'Z-A', rack: 'R-A1', shelf: 'S-A1-1', bin: 'BIN-A1-1-01' }
+        location: { zone: 'Z-A', rack: 'R-A1', shelf: 'S-A1-1', bin: 'BIN-A1-1-01' },
+        lastMovementDate: new Date(now.getTime() - 15 * 24 * 60 * 60 * 1000), // 15 days ago
+        mfgDate: new Date('2024-04-01'),
+        createdDate: new Date('2024-04-01')
       },
       {
         sku: 'SKU-2187',
@@ -98,11 +103,15 @@ const seedInventoryData = async () => {
         category: category?._id,
         warehouse: warehouses[1]._id,
         quantity: 8,
+        totalQuantity: 8,
         minQuantity: 30,
         unit: 'units',
         batch: 'B-2024-03',
         unitPrice: 115,
-        location: { zone: 'Z-A', rack: 'R-A2', shelf: 'S-A2-1', bin: 'BIN-A2-1-01' }
+        location: { zone: 'Z-A', rack: 'R-A2', shelf: 'S-A2-1', bin: 'BIN-A2-1-01' },
+        lastMovementDate: new Date(now.getTime() - 45 * 24 * 60 * 60 * 1000), // 45 days ago
+        mfgDate: new Date('2024-03-01'),
+        createdDate: new Date('2024-03-01')
       },
       {
         sku: 'SKU-0934',
@@ -110,11 +119,15 @@ const seedInventoryData = async () => {
         category: category?._id,
         warehouse: warehouses[0]._id,
         quantity: 5,
+        totalQuantity: 5,
         minQuantity: 25,
         unit: 'units',
         batch: 'B-2024-04',
         unitPrice: 650,
-        location: { zone: 'Z-A', rack: 'R-A2', shelf: 'S-A2-1', bin: 'BIN-A2-1-01' }
+        location: { zone: 'Z-A', rack: 'R-A2', shelf: 'S-A2-1', bin: 'BIN-A2-1-01' },
+        lastMovementDate: new Date(now.getTime() - 75 * 24 * 60 * 60 * 1000), // 75 days ago
+        mfgDate: new Date('2024-02-01'),
+        createdDate: new Date('2024-02-01')
       },
       {
         sku: 'SKU-3301',
@@ -122,11 +135,15 @@ const seedInventoryData = async () => {
         category: category?._id,
         warehouse: warehouses[2]._id,
         quantity: 340,
+        totalQuantity: 340,
         minQuantity: 40,
         unit: 'units',
         batch: 'B-2024-02',
         unitPrice: 280,
-        location: { zone: 'Z-B', rack: 'R-B1', shelf: 'S-B1-1', bin: 'BIN-B1-1-01' }
+        location: { zone: 'Z-B', rack: 'R-B1', shelf: 'S-B1-1', bin: 'BIN-B1-1-01' },
+        lastMovementDate: new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000), // 5 days ago
+        mfgDate: new Date('2024-02-01'),
+        createdDate: new Date('2024-02-01')
       },
       {
         sku: 'SKU-4412',
@@ -134,11 +151,15 @@ const seedInventoryData = async () => {
         category: category?._id,
         warehouse: warehouses[0]._id,
         quantity: 220,
+        totalQuantity: 220,
         minQuantity: 20,
         unit: 'units',
         batch: 'B-2024-04',
         unitPrice: 450,
-        location: { zone: 'Z-A', rack: 'R-A1', shelf: 'S-A1-2', bin: 'BIN-A1-2-01' }
+        location: { zone: 'Z-A', rack: 'R-A1', shelf: 'S-A1-2', bin: 'BIN-A1-2-01' },
+        lastMovementDate: new Date(now.getTime() - 120 * 24 * 60 * 60 * 1000), // 120 days ago
+        mfgDate: new Date('2024-01-01'),
+        createdDate: new Date('2024-01-01')
       },
       {
         sku: 'SKU-5523',
@@ -146,11 +167,15 @@ const seedInventoryData = async () => {
         category: category?._id,
         warehouse: warehouses[1]._id,
         quantity: 180,
+        totalQuantity: 180,
         minQuantity: 30,
         unit: 'units',
         batch: 'B-2024-03',
         unitPrice: 320,
-        location: { zone: 'Z-B', rack: 'R-B1', shelf: 'S-B1-1', bin: 'BIN-B1-1-01' }
+        location: { zone: 'Z-B', rack: 'R-B1', shelf: 'S-B1-1', bin: 'BIN-B1-1-01' },
+        lastMovementDate: new Date(now.getTime() - 35 * 24 * 60 * 60 * 1000), // 35 days ago
+        mfgDate: new Date('2024-03-01'),
+        createdDate: new Date('2024-03-01')
       },
       {
         sku: 'SKU-6634',
@@ -158,11 +183,15 @@ const seedInventoryData = async () => {
         category: category?._id,
         warehouse: warehouses[2]._id,
         quantity: 0,
+        totalQuantity: 0,
         minQuantity: 10,
         unit: 'units',
         batch: 'B-2024-01',
         unitPrice: 1200,
-        location: { zone: 'Z-C', rack: 'R-C1', shelf: 'S-C1-1', bin: 'BIN-C1-1-01' }
+        location: { zone: 'Z-C', rack: 'R-C1', shelf: 'S-C1-1', bin: 'BIN-C1-1-01' },
+        lastMovementDate: new Date(now.getTime() - 150 * 24 * 60 * 60 * 1000), // 150 days ago
+        mfgDate: new Date('2024-01-01'),
+        createdDate: new Date('2024-01-01')
       },
       {
         sku: 'SKU-7745',
@@ -170,11 +199,15 @@ const seedInventoryData = async () => {
         category: category?._id,
         warehouse: warehouses[0]._id,
         quantity: 95,
+        totalQuantity: 95,
         minQuantity: 15,
         unit: 'units',
         batch: 'B-2024-04',
         unitPrice: 300,
-        location: { zone: 'Z-B', rack: 'R-B1', shelf: 'S-B1-2', bin: 'BIN-B1-2-01' }
+        location: { zone: 'Z-B', rack: 'R-B1', shelf: 'S-B1-2', bin: 'BIN-B1-2-01' },
+        lastMovementDate: new Date(now.getTime() - 25 * 24 * 60 * 60 * 1000), // 25 days ago
+        mfgDate: new Date('2024-04-01'),
+        createdDate: new Date('2024-04-01')
       }
     ]);
     
@@ -237,35 +270,32 @@ const seedInventoryData = async () => {
       {
         movementId: 'MV-001',
         type: 'Inward',
-        inventory: inventoryItems[3]._id,
         sku: inventoryItems[3].sku,
-        itemName: inventoryItems[3].name,
-        quantity: 200,
+        name: inventoryItems[3].name,
+        qty: 200,
         from: 'Supplier',
         to: 'WH-01',
-        reference: 'GRN-0234'
+        ref: 'GRN-0234'
       },
       {
         movementId: 'MV-002',
         type: 'Outward',
-        inventory: inventoryItems[4]._id,
         sku: inventoryItems[4].sku,
-        itemName: inventoryItems[4].name,
-        quantity: 50,
+        name: inventoryItems[4].name,
+        qty: 50,
         from: 'WH-01',
         to: 'Production',
-        reference: 'WO-0891'
+        ref: 'WO-0891'
       },
       {
         movementId: 'MV-003',
         type: 'Transfer',
-        inventory: inventoryItems[5]._id,
         sku: inventoryItems[5].sku,
-        itemName: inventoryItems[5].name,
-        quantity: 30,
+        name: inventoryItems[5].name,
+        qty: 30,
         from: 'WH-02',
         to: 'WH-01',
-        reference: 'TR-0045'
+        ref: 'TR-0045'
       }
     ]);
     

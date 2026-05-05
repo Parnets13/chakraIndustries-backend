@@ -27,11 +27,15 @@ export const getSortingJobById = async (req, res) => {
 export const createSortingJob = async (req, res) => {
   try {
     const { orderId, sku, itemName, quantity, grade } = req.body;
-    if (!orderId || !sku || !quantity) {
+    if (!orderId || !sku || quantity === undefined || quantity === null || quantity === '') {
       return res.status(400).json({ success: false, message: 'orderId, sku, and quantity are required' });
     }
+    const qty = parseInt(quantity);
+    if (isNaN(qty) || qty <= 0) {
+      return res.status(400).json({ success: false, message: 'quantity must be a valid positive number' });
+    }
     const sortId = `SRT-${String(await SortingJob.countDocuments() + 1).padStart(3, '0')}`;
-    const job = new SortingJob({ sortId, orderId, sku, itemName, quantity, grade: grade || 'Grade A', status: 'Pending' });
+    const job = new SortingJob({ sortId, orderId, sku, itemName, quantity: qty, grade: grade || 'Grade A', status: 'Pending' });
     await job.save();
     res.status(201).json({ success: true, message: 'Sorting job created', data: job });
   } catch (error) {

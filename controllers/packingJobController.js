@@ -27,11 +27,15 @@ export const getPackingJobById = async (req, res) => {
 export const createPackingJob = async (req, res) => {
   try {
     const { orderId, items, weight, boxType } = req.body;
-    if (!orderId || !items) {
+    if (!orderId || items === undefined || items === null || items === '') {
       return res.status(400).json({ success: false, message: 'orderId and items are required' });
     }
+    const itemCount = parseInt(items);
+    if (isNaN(itemCount) || itemCount <= 0) {
+      return res.status(400).json({ success: false, message: 'items must be a valid positive number' });
+    }
     const packId = `PKG-${String(await PackingJob.countDocuments() + 1).padStart(3, '0')}`;
-    const job = new PackingJob({ packId, orderId, items, weight, boxType: boxType || 'Standard Box', status: 'Pending' });
+    const job = new PackingJob({ packId, orderId, items: itemCount, weight, boxType: boxType || 'Standard Box', status: 'Pending' });
     await job.save();
     res.status(201).json({ success: true, message: 'Packing job created', data: job });
   } catch (error) {

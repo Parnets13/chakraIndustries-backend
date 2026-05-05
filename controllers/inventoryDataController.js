@@ -1,4 +1,5 @@
 import Inventory from '../models/Inventory.js';
+import InventoryItem from '../models/InventoryItem.js';
 import Warehouse from '../models/Warehouse.js';
 import Batch from '../models/Batch.js';
 import StockMovement from '../models/StockMovement.js';
@@ -157,84 +158,133 @@ export const getAgeingStockData = async (req, res) => {
   try {
     console.log('getAgeingStockData called');
     
-    // Fetch all inventory items (not just those with quantity > 0)
-    const inventoryItems = await Inventory.find()
-      .populate('warehouse', 'warehouseId name')
-      .populate('vendorId', 'name')
+    // Fetch all warehouses to create a mapping
+    const warehouses = await Warehouse.find().lean().exec();
+    const warehouseMap = {};
+    warehouses.forEach(wh => {
+      warehouseMap[wh.warehouseId] = wh.name;
+    });
+    console.log('Warehouse map:', warehouseMap);
+    
+    // Fetch all stock items from InventoryItem collection
+    const stockItems = await InventoryItem.find()
+      .populate('category', 'name')
+      .populate('grnId', 'receivedDate grnNo')
       .lean()
       .exec();
 
-    console.log(`Found ${inventoryItems.length} total inventory items`);
+    console.log(`Found ${stockItems.length} total stock items`);
 
-    if (!inventoryItems || inventoryItems.length === 0) {
-      console.log('No inventory items found');
+    if (!stockItems || stockItems.length === 0) {
+      console.log('No stock items found');
       return res.json({
         success: true,
         data: []
       });
     }
 
-    const ageingData = inventoryItems
-      .filter(item => {
-        // Include items that have a date reference
-        const hasDate = item.lastMovementDate || item.mfgDate || item.createdDate;
-        return hasDate;
-      })
+    // Fetch all stock movements to calculate last movement date
+    const movements = await StockMovement.find()
+      .lean()
+      .exec();
+
+    // Create a map of latest movement date per SKU
+    const latestMovementBySku = {};
+    movements.forEach(mov => {
+      if (!latestMovementBySku[mov.sku] || new Date(mov.createdAt) > new Date(latestMovementBySku[mov.sku])) {
+        latestMovementBySku[mov.sku] = mov.createdAt;
+      }
+    });
+
+    // Calculate ageing for each stock item
+    const ageingData = stockItems
       .map(item => {
         try {
-          // Use lastMovementDate if available, otherwise mfgDate, otherwise createdDate
-          const referenceDate = item.lastMovementDate || item.mfgDate || item.createdDate;
-          const daysSinceLastMovement = Math.floor((new Date() - new Date(referenceDate)) / (1000 * 60 * 60 * 24));
+          // Priority for reference date:
+          // 1. Last Stock Movement date (when stock was last used/moved)
+          // 2. GRN received date (when stock arrived)
+          // 3. Created date (when item was added to system)
+          
+          let referenceDate;
+          let dateSource = 'Created';
+          
+          if (latestMovementBySku[item.sku]) {
+            referenceDate = latestMovementBySku[item.sku];
+            dateSource = 'Last Movement';
+          } else if (item.grnId && item.grnId.receivedDate) {
+            referenceDate = item.grnId.receivedDate;
+            dateSource = 'GRN Received';
+          } else {
+            referenceDate = item.createdAt || new Date();
+            dateSource = 'Created';
+          }
 
+          const daysSinceReference = Math.floor((new Date() - new Date(referenceDate)) / (1000 * 60 * 60 * 24));
+
+          // Determine bucket based on days
           let bucket = '0–30';
-          if (daysSinceLastMovement > 90) bucket = '90+';
-          else if (daysSinceLastMovement > 60) bucket = '61–90';
-          else if (daysSinceLastMovement > 30) bucket = '31–60';
+          if (daysSinceReference > 90) bucket = '90+';
+          else if (daysSinceReference > 60) bucket = '61–90';
+          else if (daysSinceReference > 30) bucket = '31–60';
 
+          // Determine action based on age and remaining stock
           let action = 'No Action';
           let actionColor = '#22c55e';
 
-          if (daysSinceLastMovement > 90) {
-            action = item.totalQuantity === 0 ? 'Write-off' : 'Return to Supplier';
+          if (daysSinceReference > 90) {
+            action = item.qty === 0 ? 'Write-off' : 'Return to Supplier';
             actionColor = '#ef4444';
-          } else if (daysSinceLastMovement > 60) {
+          } else if (daysSinceReference > 60) {
             action = 'Offer Discount';
             actionColor = '#f59e0b';
-          } else if (daysSinceLastMovement > 30) {
+          } else if (daysSinceReference > 30) {
             action = 'Monitor';
             actionColor = '#f59e0b';
           }
 
-          // Calculate value
+          // Calculate value based on qty
           let value = '₹0';
-          if (item.unitPrice && item.unitPrice > 0) {
-            const totalValue = item.totalQuantity * item.unitPrice;
-            // Format number with commas for Indian locale
+          const unitPrice = item.unitPrice || 100;
+          if (unitPrice && unitPrice > 0) {
+            const totalValue = item.qty * unitPrice;
             const formattedValue = Math.round(totalValue).toString().replace(/\B(?=(\d{2})+(?!\d))/g, ',');
             value = `₹${formattedValue}`;
           }
 
+          // Ensure name exists
+          let itemName = item.name || item.sku || 'Unknown Item';
+          if (!itemName || itemName === '' || itemName === null) {
+            itemName = item.sku || 'Unknown Item';
+          }
+
+          // Get warehouse name from map
+          const warehouseName = warehouseMap[item.warehouse] || item.warehouse || 'N/A';
+
           return {
             sku: item.sku || 'N/A',
-            item: item.name || 'N/A',
-            wh: item.warehouse?.warehouseId || 'N/A',
-            qty: item.totalQuantity || 0,
-            lastMov: new Date(referenceDate).toLocaleDateString('en-IN', { month: 'short', year: '2-digit' }),
-            days: daysSinceLastMovement,
+            item: itemName,
+            wh: item.warehouse || 'N/A',
+            whName: warehouseName,
+            qty: item.qty || 0,
+            lastMov: new Date(referenceDate).toLocaleDateString('en-IN', { month: 'short', day: 'numeric', year: '2-digit' }),
+            dateSource,
+            days: daysSinceReference,
             bucket,
             value,
             action,
             actionColor
           };
         } catch (mapError) {
-          console.error('Error mapping inventory item:', item._id, mapError);
+          console.error('Error mapping stock item:', item._id, mapError);
           return null;
         }
       })
-      .filter(item => item !== null) // Remove any failed mappings
-      .sort((a, b) => b.days - a.days); // Sort by days descending
+      .filter(item => item !== null)
+      .sort((a, b) => b.days - a.days);
 
     console.log(`Returning ${ageingData.length} ageing stock items`);
+    console.log('Sample:', ageingData.slice(0, 2));
+    
     res.json({
       success: true,
       data: ageingData
