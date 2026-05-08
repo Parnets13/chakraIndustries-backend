@@ -1,7 +1,8 @@
 import express from 'express';
 import {
   getAllWorkOrders, getWorkOrderById, createWorkOrder,
-  updateWorkOrder, updateProgress, deleteWorkOrder,
+  updateWorkOrder, releaseWorkOrder, updateProgress,
+  recordConsumption, deductInventory, recordQC, deleteWorkOrder,
 } from '../controllers/workOrderController.js';
 import { protect } from '../middleware/authMiddleware.js';
 
@@ -11,7 +12,13 @@ router.get('/',    protect, getAllWorkOrders);
 router.get('/:id', protect, getWorkOrderById);
 router.post('/',   protect, createWorkOrder);
 router.put('/:id', protect, updateWorkOrder);
-router.patch('/:id/progress', protect, updateProgress);
 router.delete('/:id', protect, deleteWorkOrder);
+
+// Workflow
+router.patch('/:id/release',          protect, releaseWorkOrder);
+router.patch('/:id/progress',         protect, updateProgress);
+router.patch('/:id/consume',          protect, recordConsumption);
+router.post('/:id/deduct-inventory',  protect, deductInventory);
+router.patch('/:id/qc',               protect, recordQC);
 
 export default router;

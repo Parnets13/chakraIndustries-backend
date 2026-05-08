@@ -32,10 +32,26 @@ import clientRoutes from './routes/clientRoutes.js';
 import bomRoutes from './routes/bomRoutes.js';
 import workOrderRoutes from './routes/workOrderRoutes.js';
 import oemRoutes from './routes/oemRoutes.js';
+import mrpRoutes from './routes/mrpRoutes.js';
+import assetRoutes from './routes/assetRoutes.js';
+import warehouseRoutes from './routes/warehouseRoutes.js';
+import stockMovementRoutes from './routes/stockMovementRoutes.js';
+import itemMasterRoutes from './routes/itemMasterRoutes.js';
+import locationRoutes from './routes/locationRoutes.js';
+import deliveryScheduleRoutes from './routes/deliveryScheduleRoutes.js';
+import corporateClientRoutes from './routes/corporateClientRoutes.js';
+import bulkQuotationRoutes from './routes/bulkQuotationRoutes.js';
+import salesOrderRoutes from './routes/salesOrderRoutes.js';
+import tallyRoutes from './routes/tallyRoutes.js';
+import reportsRoutes from './routes/reportsRoutes.js';
+import forecastingRoutes from './routes/forecastingRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
 import './models/StockMovement.js';
+import './models/SalesOrder.js';
+import './models/TallyConfig.js';
+import './models/TallySyncLog.js';
 
 dotenv.config();
 
@@ -100,6 +116,19 @@ app.use('/api/clients', clientRoutes);
 app.use('/api/bom', bomRoutes);
 app.use('/api/workorders', workOrderRoutes);
 app.use('/api/oem', oemRoutes);
+app.use('/api/mrp', mrpRoutes);
+app.use('/api/assets', assetRoutes);
+app.use('/api/warehouses', warehouseRoutes);
+app.use('/api/stock-movements', stockMovementRoutes);
+app.use('/api/item-master', itemMasterRoutes);
+app.use('/api/locations', locationRoutes);
+app.use('/api/delivery-schedules', deliveryScheduleRoutes);
+app.use('/api/corporate-clients', corporateClientRoutes);
+app.use('/api/bulk-quotations', bulkQuotationRoutes);
+app.use('/api/sales-orders', salesOrderRoutes);
+app.use('/api/tally', tallyRoutes);
+app.use('/api/reports', reportsRoutes);
+app.use('/api/forecasting', forecastingRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars
