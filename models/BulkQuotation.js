@@ -54,4 +54,4 @@ const bulkQuotationSchema = new mongoose.Schema(
   }
 );
 
-export default mongoose.model('BulkQuotation', bulkQuotationSchema);
+export default mongoose.models.BulkQuotation || mongoose.model('BulkQuotation', bulkQuotationSchema);

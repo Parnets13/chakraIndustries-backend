@@ -52,4 +52,4 @@ const deliveryScheduleSchema = new mongoose.Schema(
   }
 );
 
-export default mongoose.model('DeliverySchedule', deliveryScheduleSchema);
+export default mongoose.models.DeliverySchedule || mongoose.model('DeliverySchedule', deliveryScheduleSchema);

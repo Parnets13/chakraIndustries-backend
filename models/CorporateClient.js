@@ -64,4 +64,4 @@ const corporateClientSchema = new mongoose.Schema(
   }
 );
 
-export default mongoose.model('CorporateClient', corporateClientSchema);
+export default mongoose.models.CorporateClient || mongoose.model('CorporateClient', corporateClientSchema);
