@@ -20,7 +20,8 @@ const clientSchema = new mongoose.Schema(
     },
     phone: {
       type: String,
-      required: [true, 'Phone is required']
+      required: [true, 'Phone is required'],
+      match: [/^\d{10}$/, 'Phone must be exactly 10 digits'],
     },
     email: {
       type: String,

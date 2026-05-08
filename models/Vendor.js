@@ -34,8 +34,12 @@ const vendorSchema = new mongoose.Schema(
     phone: {
       type: String,
       required: [true, 'Phone is required'],
+      match: [/^\d{10}$/, 'Phone must be exactly 10 digits'],
     },
-    alternatePhone: String,
+    alternatePhone: {
+      type: String,
+      match: [/^\d{10}$/, 'Alternate phone must be exactly 10 digits'],
+    },
     email: {
       type: String,
       required: [true, 'Email is required'],

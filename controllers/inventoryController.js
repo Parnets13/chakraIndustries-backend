@@ -321,8 +321,30 @@ export const updateWarehouse = async (req, res) => {
 // DELETE /api/inventory/warehouses/:id
 export const deleteWarehouse = async (req, res) => {
   try {
+    const { force } = req.query; // ?force=true to also delete linked inventory items
+
+    // First find the warehouse to get its warehouseId string
+    const warehouse = await Warehouse.findById(req.params.id);
+    if (!warehouse) {
+      return res.status(404).json({ success: false, message: 'Warehouse not found' });
+    }
+
+    // Check for linked inventory items (items store warehouse as warehouseId string)
+    const linkedItems = await InventoryItem.countDocuments({ warehouse: warehouse.warehouseId });
+    if (linkedItems > 0) {
+      if (force !== 'true') {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot delete warehouse — it has ${linkedItems} inventory item(s) linked to it. Move or delete those items first, or use force delete.`,
+          linkedItems
+        });
+      }
+      // Force delete: remove all linked inventory items first
+      await InventoryItem.deleteMany({ warehouse: warehouse.warehouseId });
+    }
+
     await Warehouse.findByIdAndDelete(req.params.id);
-    res.json({ success: true, message: 'Deleted' });
+    res.json({ success: true, message: 'Warehouse deleted successfully', deletedItems: force === 'true' ? linkedItems : 0 });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

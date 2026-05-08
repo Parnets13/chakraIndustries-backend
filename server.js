@@ -29,6 +29,9 @@ import packingJobRoutes from './routes/packingJobRoutes.js';
 import batchRoutes from './routes/batchRoutes.js';
 import defectiveStockRoutes from './routes/defectiveStockRoutes.js';
 import clientRoutes from './routes/clientRoutes.js';
+import bomRoutes from './routes/bomRoutes.js';
+import workOrderRoutes from './routes/workOrderRoutes.js';
+import oemRoutes from './routes/oemRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -94,6 +97,9 @@ app.use('/api/packing', packingJobRoutes);
 app.use('/api/batches', batchRoutes);
 app.use('/api/defective-stock', defectiveStockRoutes);
 app.use('/api/clients', clientRoutes);
+app.use('/api/bom', bomRoutes);
+app.use('/api/workorders', workOrderRoutes);
+app.use('/api/oem', oemRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars

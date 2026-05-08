@@ -4,7 +4,7 @@ const corporateClientSchema = new mongoose.Schema({
   clientId:     { type: String, unique: true, required: true },
   name:         { type: String, required: true },
   contact:      { type: String, required: true },
-  phone:        { type: String, default: '' },
+  phone:        { type: String, default: '', match: [/^(\d{10})?$/, 'Phone must be exactly 10 digits'] },
   email:        { type: String, default: '' },
   city:         { type: String, default: '' },
   address:      { type: String, default: '' },
