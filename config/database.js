@@ -12,13 +12,24 @@ const connectDB = async () => {
     }
 
     const trimmedUri = mongoUri.trim();
-    console.log('Connecting to MongoDB, URI starts with:', trimmedUri.substring(0, 20));
+    console.log('Connecting to MongoDB...');
 
-    await mongoose.connect(trimmedUri);
-    console.log('MongoDB connected successfully');
+    await mongoose.connect(trimmedUri, {
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+      retryWrites: true,
+      w: 'majority'
+    });
+    console.log('✓ MongoDB connected successfully');
   } catch (error) {
-    console.error('MongoDB connection error:', error.message);
-    console.warn('Continuing without database connection...');
+    console.error('✗ MongoDB connection error:', error.message);
+    console.warn('⚠ Continuing without database connection...');
+    
+    // Retry connection after 5 seconds
+    setTimeout(() => {
+      console.log('Retrying MongoDB connection...');
+      connectDB();
+    }, 5000);
   }
 };
 

@@ -55,7 +55,7 @@ export const createDefectiveStock = async (req, res) => {
 
 export const updateDefectiveStock = async (req, res) => {
   try {
-    const item = await DefectiveStock.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    const item = await DefectiveStock.findByIdAndUpdate(req.params.id, req.body, { new: true });
     if (!item) return res.status(404).json({ success: false, message: 'Defective stock item not found' });
     res.json({ success: true, message: 'Defective stock updated', data: item });
   } catch (error) {

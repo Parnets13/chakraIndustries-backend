@@ -29,10 +29,13 @@ import packingJobRoutes from './routes/packingJobRoutes.js';
 import batchRoutes from './routes/batchRoutes.js';
 import defectiveStockRoutes from './routes/defectiveStockRoutes.js';
 import clientRoutes from './routes/clientRoutes.js';
-
-// Ensure new models are registered
-import './models/Warehouse.js';
-import './models/StockMovement.js';
+import productionRoutes from './routes/productionRoutes.js';
+import bomRoutes from './routes/bomRoutes.js';
+import brandOrderRoutes from './routes/brandOrderRoutes.js';
+import oemOrderRoutes from './routes/oemOrderRoutes.js';
+import oemFinishedGoodsRoutes from './routes/oemFinishedGoodsRoutes.js';
+import oemInvoiceRoutes from './routes/oemInvoiceRoutes.js';
+import workOrderRoutes from './routes/workOrderRoutes.js';
 
 dotenv.config();
 
@@ -94,6 +97,13 @@ app.use('/api/packing', packingJobRoutes);
 app.use('/api/batches', batchRoutes);
 app.use('/api/defective-stock', defectiveStockRoutes);
 app.use('/api/clients', clientRoutes);
+app.use('/api/production', productionRoutes);
+app.use('/api/bom', bomRoutes);
+app.use('/api/brand-orders', brandOrderRoutes);
+app.use('/api/oem-orders', oemOrderRoutes);
+app.use('/api/oem-finished-goods', oemFinishedGoodsRoutes);
+app.use('/api/oem-invoices', oemInvoiceRoutes);
+app.use('/api/work-orders', workOrderRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars

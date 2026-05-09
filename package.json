@@ -9,6 +9,7 @@
     "dev": "nodemon server.js",
     "seed": "node scripts/seedInventory.js",
     "seed:ageing": "node scripts/seedAgeingData.js",
+    "seed:bom": "node scripts/seedBOM.js",
     "fix-bulk": "node scripts/fixBulkQuotations.js"
   },
   "dependencies": {

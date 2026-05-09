@@ -25,7 +25,6 @@ const defectiveStockSchema = new mongoose.Schema({
   },
   stage: {
     type: String,
-    enum: ['QC Hold', 'Defective Bin', 'Repair', 'Scrap'],
     default: 'QC Hold'
   },
   warehouse: String,

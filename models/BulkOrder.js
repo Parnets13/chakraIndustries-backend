@@ -1,19 +1,5 @@
 import mongoose from 'mongoose';
-
-const corporateClientSchema = new mongoose.Schema({
-  clientId:     { type: String, unique: true, required: true },
-  name:         { type: String, required: true },
-  contact:      { type: String, required: true },
-  phone:        { type: String, default: '' },
-  email:        { type: String, default: '' },
-  city:         { type: String, default: '' },
-  address:      { type: String, default: '' },
-  gstNumber:    { type: String, default: '' },
-  tier:         { type: String, enum: ['Silver', 'Gold', 'Platinum'], default: 'Silver' },
-  creditLimit:  { type: Number, default: 0 },
-  outstanding:  { type: Number, default: 0 },
-  status:       { type: String, enum: ['Active', 'Inactive'], default: 'Active' },
-}, { timestamps: true });
+import CorporateClient from './CorporateClient.js';
 
 const bulkQuotationSchema = new mongoose.Schema({
   quoteId:      { type: String, unique: true, required: true },
@@ -50,6 +36,6 @@ const deliveryScheduleSchema = new mongoose.Schema({
   status:       { type: String, enum: ['Draft', 'Confirmed', 'Pending', 'Dispatched', 'Delivered'], default: 'Pending' },
 }, { timestamps: true });
 
-export const CorporateClient  = mongoose.model('CorporateClient', corporateClientSchema);
 export const BulkQuotation    = mongoose.model('BulkQuotation', bulkQuotationSchema);
 export const DeliverySchedule = mongoose.model('DeliverySchedule', deliveryScheduleSchema);
+export { CorporateClient };
