@@ -1,390 +1,283 @@
 import BOM from '../models/BOM.js';
-import ItemMaster from '../models/ItemMaster.js';
-import Inventory from '../models/Inventory.js';
 
-// Get all raw materials for BOM dropdown - from Inventory stock table
-export const getRawMaterials = async (req, res) => {
+// ── Helpers ───────────────────────────────────────────────────────────────────
+async function generateBomId() {
+  const last = await BOM.findOne().sort({ createdAt: -1 }).select('bomId');
+  let n = 1;
+  if (last?.bomId) { const m = last.bomId.match(/(\d+)$/); if (m) n = parseInt(m[1]) + 1; }
+  let id = `BOM-${String(n).padStart(3, '0')}`;
+  while (await BOM.findOne({ bomId: id })) { n++; id = `BOM-${String(n).padStart(3, '0')}`; }
+  return id;
+}
+
+function calcCosts(bom) {
+  const mat = bom.components.reduce((s, c) => {
+    const qty = c.qty * (1 + (c.scrapFactor || 0) / 100);
+    return s + qty * (c.unitCost || 0);
+  }, 0);
+  const total = mat * (1 + (bom.overheadPct || 0) / 100) + (bom.labourCost || 0);
+  return { componentCount: bom.components.length, materialCost: Math.round(mat * 100) / 100, totalCost: Math.round(total * 100) / 100 };
+}
+
+// ── GET all BOMs ──────────────────────────────────────────────────────────────
+export const getAllBOMs = async (req, res) => {
   try {
-    // Get unique materials from Inventory (stock table) with active status
-    const inventoryMaterials = await Inventory.find({
-      status: { $ne: 'Dead' }
-    })
-    .select('_id itemMasterId sku name unit availableQuantity')
-    .populate('itemMasterId', '_id costPrice')
-    .lean();
+    const { status, oemBrand, type } = req.query;
+    const filter = {};
+    if (status)   filter.status = status;
+    if (oemBrand) filter.oemBrand = oemBrand;
+    if (type)     filter.type = type;
 
-    // Group by itemMasterId to get unique materials
-    const uniqueMaterials = {};
-    inventoryMaterials.forEach(inv => {
-      const key = inv.itemMasterId?._id || inv._id;
-      if (!uniqueMaterials[key]) {
-        uniqueMaterials[key] = {
-          _id: inv.itemMasterId?._id || inv._id,
-          sku: inv.sku,
-          name: inv.name,
-          unit: inv.unit,
-          costPrice: inv.itemMasterId?.costPrice || 0,
-          availableStock: inv.availableQuantity
-        };
-      }
-    });
-
-    // If no inventory materials, fallback to ItemMaster
-    let materials = Object.values(uniqueMaterials);
-    if (materials.length === 0) {
-      const itemMasterMaterials = await ItemMaster.find({
-        status: 'Active',
-        isActive: true
-      }).select('_id itemId sku name unit costPrice');
-
-      materials = itemMasterMaterials.map(m => ({
-        _id: m._id,
-        itemId: m.itemId,
-        sku: m.sku,
-        name: m.name,
-        unit: m.unit,
-        costPrice: m.costPrice,
-        availableStock: 0
-      }));
-    }
-
-    res.json({
-      success: true,
-      data: materials
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Get material details with inventory stock
-export const getMaterialWithStock = async (req, res) => {
-  try {
-    const { materialId } = req.params;
-
-    // First try to get from ItemMaster
-    const material = await ItemMaster.findById(materialId);
-    if (!material) {
-      return res.status(404).json({ success: false, message: 'Material not found' });
-    }
-
-    // Get available stock from inventory
-    const inventory = await Inventory.find({
-      itemMasterId: materialId,
-      status: { $ne: 'Dead' }
-    });
-
-    const totalStock = inventory.reduce((sum, inv) => sum + inv.availableQuantity, 0);
-
-    // Get material name from inventory if available, otherwise from ItemMaster
-    let materialName = material.name;
-    let materialSku = material.sku;
-    if (inventory.length > 0) {
-      materialName = inventory[0].name || material.name;
-      materialSku = inventory[0].sku || material.sku;
-    }
-
-    res.json({
-      success: true,
-      data: {
-        _id: material._id,
-        itemId: material.itemId,
-        sku: materialSku,
-        name: materialName,
-        unit: material.unit,
-        costPrice: material.costPrice,
-        availableStock: totalStock,
-        inventoryDetails: inventory.map(inv => ({
-          warehouse: inv.warehouse,
-          available: inv.availableQuantity,
-          total: inv.totalQuantity
-        }))
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Create BOM with materials
-export const createBOM = async (req, res) => {
-  try {
-    const { projectId, product, version, type, uom, description, materials } = req.body;
-
-    // Validate required fields
-    if (!projectId || !product || !materials || materials.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'projectId, product, and materials are required'
-      });
-    }
-
-    // Check for duplicate materials
-    const materialIds = materials.map(m => m.materialId);
-    if (new Set(materialIds).size !== materialIds.length) {
-      return res.status(400).json({
-        success: false,
-        message: 'Duplicate materials not allowed'
-      });
-    }
-
-    // Validate quantities
-    for (const material of materials) {
-      if (!material.quantity || material.quantity <= 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'All materials must have quantity greater than zero'
-        });
-      }
-    }
-
-    // Fetch material details and calculate costs
-    const enrichedMaterials = [];
-    let totalCost = 0;
-
-    for (const material of materials) {
-      const itemMaster = await ItemMaster.findById(material.materialId);
-      if (!itemMaster) {
-        return res.status(404).json({
-          success: false,
-          message: `Material ${material.materialId} not found`
-        });
-      }
-
-      // Get available stock
-      const inventory = await Inventory.find({
-        itemMasterId: material.materialId,
-        status: { $ne: 'Dead' }
-      });
-      const availableStock = inventory.reduce((sum, inv) => sum + inv.availableQuantity, 0);
-
-      const materialCost = material.quantity * (itemMaster.costPrice || 0);
-      totalCost += materialCost;
-
-      enrichedMaterials.push({
-        materialId: material.materialId,
-        materialName: itemMaster.name,
-        sku: itemMaster.sku,
-        quantity: material.quantity,
-        unit: material.unit || itemMaster.unit,
-        availableStock,
-        costPrice: itemMaster.costPrice,
-        totalCost: materialCost
-      });
-    }
-
-    // Create BOM
-    const bom = new BOM({
-      projectId,
-      product,
-      version: version || 'v1.0',
-      type: type || 'Finished Good',
-      uom: uom || 'Set',
-      description,
-      materials: enrichedMaterials,
-      totalMaterialCost: totalCost,
-      status: 'Active'
-    });
-
-    const saved = await bom.save();
-    const populated = await BOM.findById(saved._id).populate('materials.materialId', 'name sku unit');
-
-    res.status(201).json({
-      success: true,
-      message: 'BOM created successfully',
-      data: populated
-    });
-  } catch (error) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-};
-
-// Get all BOMs
-export const getBOMs = async (req, res) => {
-  try {
-    const boms = await BOM.find()
-      .populate('materials.materialId', 'name sku unit costPrice')
+    const boms = await BOM.find(filter)
+      .populate('oemBrand', 'brandId name code color')
       .sort({ createdAt: -1 });
 
-    res.json({ success: true, data: boms });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    const data = boms.map(b => ({ ...b.toObject(), ...calcCosts(b) }));
+    res.json({ success: true, data });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// Get BOM by ID
+// ── GET single BOM ────────────────────────────────────────────────────────────
 export const getBOMById = async (req, res) => {
   try {
     const bom = await BOM.findById(req.params.id)
-      .populate('materials.materialId', 'name sku unit costPrice');
+      .populate('oemBrand', 'brandId name code color')
+      .populate('components.vendorId', 'vendorId companyName')
+      .populate('components.oemBrand', 'brandId name code')
+      .populate('components.subBomId', 'bomId product version');
 
-    if (!bom) {
-      return res.status(404).json({ success: false, message: 'BOM not found' });
-    }
-
-    res.json({ success: true, data: bom });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    res.json({ success: true, data: { ...bom.toObject(), ...calcCosts(bom) } });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// Update BOM
+// ── GET BOM versions (all versions of same product) ───────────────────────────
+export const getBOMVersions = async (req, res) => {
+  try {
+    const bom = await BOM.findById(req.params.id).select('product productCode');
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    const versions = await BOM.find({ product: bom.product }).sort({ createdAt: -1 }).select('bomId version status approvalStatus createdAt');
+    res.json({ success: true, data: versions });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── CREATE BOM ────────────────────────────────────────────────────────────────
+export const createBOM = async (req, res) => {
+  try {
+    const { product } = req.body;
+    if (!product?.trim()) return res.status(400).json({ success: false, message: 'Product name is required' });
+    const bomId = await generateBomId();
+    const bom = await BOM.create({ bomId, ...req.body, status: 'Draft', approvalStatus: 'Draft' });
+    res.status(201).json({ success: true, message: 'BOM created', data: { ...bom.toObject(), componentCount: 0, materialCost: 0, totalCost: 0 } });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+// ── UPDATE BOM header ─────────────────────────────────────────────────────────
 export const updateBOM = async (req, res) => {
   try {
-    const { materials, ...updateData } = req.body;
-
-    // If materials are being updated, validate them
-    if (materials && materials.length > 0) {
-      // Check for duplicates
-      const materialIds = materials.map(m => m.materialId);
-      if (new Set(materialIds).size !== materialIds.length) {
-        return res.status(400).json({
-          success: false,
-          message: 'Duplicate materials not allowed'
-        });
-      }
-
-      // Validate quantities
-      for (const material of materials) {
-        if (!material.quantity || material.quantity <= 0) {
-          return res.status(400).json({
-            success: false,
-            message: 'All materials must have quantity greater than zero'
-          });
-        }
-      }
-
-      // Enrich materials with details
-      const enrichedMaterials = [];
-      let totalCost = 0;
-
-      for (const material of materials) {
-        const itemMaster = await ItemMaster.findById(material.materialId);
-        if (!itemMaster) {
-          return res.status(404).json({
-            success: false,
-            message: `Material ${material.materialId} not found`
-          });
-        }
-
-        const inventory = await Inventory.find({
-          itemMasterId: material.materialId,
-          status: { $ne: 'Dead' }
-        });
-        const availableStock = inventory.reduce((sum, inv) => sum + inv.availableQuantity, 0);
-
-        const materialCost = material.quantity * (itemMaster.costPrice || 0);
-        totalCost += materialCost;
-
-        enrichedMaterials.push({
-          materialId: material.materialId,
-          materialName: itemMaster.name,
-          sku: itemMaster.sku,
-          quantity: material.quantity,
-          unit: material.unit || itemMaster.unit,
-          availableStock,
-          costPrice: itemMaster.costPrice,
-          totalCost: materialCost
-        });
-      }
-
-      updateData.materials = enrichedMaterials;
-      updateData.totalMaterialCost = totalCost;
-    }
-
-    updateData.updatedAt = new Date();
-
-    const bom = await BOM.findByIdAndUpdate(req.params.id, updateData, {
-      new: true,
-      runValidators: true
-    }).populate('materials.materialId', 'name sku unit costPrice');
-
-    if (!bom) {
-      return res.status(404).json({ success: false, message: 'BOM not found' });
-    }
-
-    res.json({ success: true, message: 'BOM updated successfully', data: bom });
-  } catch (error) {
-    res.status(400).json({ success: false, message: error.message });
-  }
+    const bom = await BOM.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    res.json({ success: true, message: 'BOM updated', data: { ...bom.toObject(), ...calcCosts(bom) } });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// Delete BOM
+// ── DELETE BOM ────────────────────────────────────────────────────────────────
 export const deleteBOM = async (req, res) => {
   try {
     const bom = await BOM.findByIdAndDelete(req.params.id);
-    if (!bom) {
-      return res.status(404).json({ success: false, message: 'BOM not found' });
-    }
-
-    res.json({ success: true, message: 'BOM deleted successfully' });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    res.json({ success: true, message: 'BOM deleted' });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// Get BOM by project ID
-export const getBOMByProjectId = async (req, res) => {
+// ── CREATE new version of existing BOM ───────────────────────────────────────
+export const createVersion = async (req, res) => {
   try {
-    const { projectId } = req.params;
-    const bom = await BOM.findOne({ projectId })
-      .populate('materials.materialId', 'name sku unit costPrice');
+    const source = await BOM.findById(req.params.id);
+    if (!source) return res.status(404).json({ success: false, message: 'Source BOM not found' });
 
-    if (!bom) {
-      return res.status(404).json({ success: false, message: 'BOM not found for this project' });
-    }
+    const bomId = await generateBomId();
+    const { version = 'v2.0', changeNote = '' } = req.body;
 
-    res.json({ success: true, data: bom });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Validate material availability for BOM
-export const validateMaterialAvailability = async (req, res) => {
-  try {
-    const { materials } = req.body;
-
-    if (!materials || materials.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Materials array is required'
-      });
-    }
-
-    const validation = [];
-    let allAvailable = true;
-
-    for (const material of materials) {
-      const inventory = await Inventory.find({
-        itemMasterId: material.materialId,
-        status: { $ne: 'Dead' }
-      });
-
-      const totalStock = inventory.reduce((sum, inv) => sum + inv.availableQuantity, 0);
-      const isAvailable = totalStock >= material.quantity;
-
-      if (!isAvailable) {
-        allAvailable = false;
-      }
-
-      validation.push({
-        materialId: material.materialId,
-        requiredQuantity: material.quantity,
-        availableQuantity: totalStock,
-        isAvailable,
-        shortfall: Math.max(0, material.quantity - totalStock)
-      });
-    }
-
-    res.json({
-      success: true,
-      data: {
-        allAvailable,
-        materials: validation
-      }
+    const newBom = await BOM.create({
+      bomId,
+      product:     source.product,
+      productCode: source.productCode,
+      version,
+      type:        source.type,
+      uom:         source.uom,
+      description: source.description,
+      oemBrand:    source.oemBrand,
+      overheadPct: source.overheadPct,
+      labourCost:  source.labourCost,
+      components:  source.components.map(c => c.toObject()),
+      status:      'Draft',
+      approvalStatus: 'Draft',
+      versionHistory: [{
+        version:    source.version,
+        changedBy:  req.body.changedBy || '',
+        changeNote,
+        snapshot:   source.components.map(c => c.toObject()),
+      }],
     });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+
+    res.status(201).json({ success: true, message: `New version ${version} created`, data: { ...newBom.toObject(), ...calcCosts(newBom) } });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+// ── APPROVAL WORKFLOW ─────────────────────────────────────────────────────────
+// POST /api/bom/:id/submit — submit for approval
+export const submitForApproval = async (req, res) => {
+  try {
+    const bom = await BOM.findById(req.params.id);
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    if (bom.components.length === 0) return res.status(400).json({ success: false, message: 'Cannot submit BOM with no components' });
+
+    bom.approvalStatus = 'Pending Approval';
+    bom.status = 'Draft';
+    // Default approval step if none set
+    if (bom.approvalSteps.length === 0) {
+      bom.approvalSteps.push({ approver: req.body.approver || 'Production Manager', role: 'Manager', status: 'Pending' });
+    }
+    await bom.save();
+    res.json({ success: true, message: 'BOM submitted for approval', data: bom });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+// PATCH /api/bom/:id/approve — approve or reject
+export const approveBOM = async (req, res) => {
+  try {
+    const { action, approver, remarks } = req.body; // action: 'approve' | 'reject'
+    if (!['approve', 'reject'].includes(action)) return res.status(400).json({ success: false, message: 'action must be approve or reject' });
+
+    const bom = await BOM.findById(req.params.id);
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    if (bom.approvalStatus !== 'Pending Approval') return res.status(400).json({ success: false, message: 'BOM is not pending approval' });
+
+    // Update the pending step
+    const step = bom.approvalSteps.find(s => s.status === 'Pending');
+    if (step) {
+      step.status   = action === 'approve' ? 'Approved' : 'Rejected';
+      step.remarks  = remarks || '';
+      step.actionAt = new Date();
+      if (approver) step.approver = approver;
+    }
+
+    if (action === 'approve') {
+      bom.approvalStatus = 'Approved';
+      bom.status         = 'Active';
+      bom.approvedBy     = approver || '';
+      bom.approvedAt     = new Date();
+    } else {
+      bom.approvalStatus = 'Rejected';
+    }
+
+    await bom.save();
+    res.json({ success: true, message: `BOM ${action}d`, data: { ...bom.toObject(), ...calcCosts(bom) } });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+// ── COMPONENT CRUD ────────────────────────────────────────────────────────────
+export const addComponent = async (req, res) => {
+  try {
+    const bom = await BOM.findById(req.params.id);
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    const { itemName, qty } = req.body;
+    if (!itemName?.trim()) return res.status(400).json({ success: false, message: 'Item name is required' });
+    if (!qty || qty <= 0)  return res.status(400).json({ success: false, message: 'Quantity must be > 0' });
+
+    bom.components.push(req.body);
+    await bom.save();
+    res.status(201).json({ success: true, message: 'Component added', data: { ...bom.toObject(), ...calcCosts(bom) } });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const updateComponent = async (req, res) => {
+  try {
+    const bom = await BOM.findById(req.params.id);
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    const comp = bom.components.id(req.params.componentId);
+    if (!comp) return res.status(404).json({ success: false, message: 'Component not found' });
+    Object.assign(comp, req.body);
+    await bom.save();
+    res.json({ success: true, message: 'Component updated', data: { ...bom.toObject(), ...calcCosts(bom) } });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const deleteComponent = async (req, res) => {
+  try {
+    const bom = await BOM.findById(req.params.id);
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    const comp = bom.components.id(req.params.componentId);
+    if (!comp) return res.status(404).json({ success: false, message: 'Component not found' });
+    comp.deleteOne();
+    await bom.save();
+    res.json({ success: true, message: 'Component removed', data: { ...bom.toObject(), ...calcCosts(bom) } });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── ALTERNATE MATERIAL CRUD ───────────────────────────────────────────────────
+export const addAlternate = async (req, res) => {
+  try {
+    const bom = await BOM.findById(req.params.id);
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    const comp = bom.components.id(req.params.componentId);
+    if (!comp) return res.status(404).json({ success: false, message: 'Component not found' });
+    if (!req.body.itemName?.trim()) return res.status(400).json({ success: false, message: 'Alternate item name is required' });
+    comp.alternates.push(req.body);
+    await bom.save();
+    res.status(201).json({ success: true, message: 'Alternate added', data: comp });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const deleteAlternate = async (req, res) => {
+  try {
+    const bom = await BOM.findById(req.params.id);
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+    const comp = bom.components.id(req.params.componentId);
+    if (!comp) return res.status(404).json({ success: false, message: 'Component not found' });
+    const alt = comp.alternates.id(req.params.alternateId);
+    if (!alt) return res.status(404).json({ success: false, message: 'Alternate not found' });
+    alt.deleteOne();
+    await bom.save();
+    res.json({ success: true, message: 'Alternate removed' });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── EXPLODE BOM (multi-level) ─────────────────────────────────────────────────
+// GET /api/bom/:id/explode?qty=10
+// Returns flat list of all materials needed for qty units, including sub-BOMs
+export const explodeBOM = async (req, res) => {
+  try {
+    const qty = parseFloat(req.query.qty) || 1;
+    const result = [];
+
+    async function explode(bomId, multiplier, level) {
+      const bom = await BOM.findById(bomId).populate('components.subBomId', 'bomId product');
+      if (!bom) return;
+      for (const c of bom.components) {
+        const needed = c.qty * (1 + (c.scrapFactor || 0) / 100) * multiplier;
+        result.push({
+          level,
+          bomId:    bom.bomId,
+          itemName: c.itemName,
+          itemCode: c.itemCode,
+          type:     c.type,
+          unit:     c.unit,
+          qty:      Math.round(needed * 1000) / 1000,
+          unitCost: c.unitCost,
+          totalCost: Math.round(needed * c.unitCost * 100) / 100,
+          hasSubBom: !!c.subBomId,
+          alternates: c.alternates?.length || 0,
+        });
+        // Recurse into sub-BOM
+        if (c.subBomId?._id) {
+          await explode(c.subBomId._id, needed, level + 1);
+        }
+      }
+    }
+
+    await explode(req.params.id, qty, 1);
+    res.json({ success: true, data: result, totalLines: result.length });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

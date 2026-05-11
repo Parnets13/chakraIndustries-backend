@@ -1,48 +1,24 @@
 import express from 'express';
-import * as workOrderController from '../controllers/workOrderController.js';
+import {
+  getAllWorkOrders, getWorkOrderById, createWorkOrder,
+  updateWorkOrder, releaseWorkOrder, updateProgress,
+  recordConsumption, deductInventory, recordQC, deleteWorkOrder,
+} from '../controllers/workOrderController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// Auto-create from OEM Order
-router.post('/from-oem', workOrderController.createWorkOrderFromOEM);
+router.get('/',    protect, getAllWorkOrders);
+router.get('/:id', protect, getWorkOrderById);
+router.post('/',   protect, createWorkOrder);
+router.put('/:id', protect, updateWorkOrder);
+router.delete('/:id', protect, deleteWorkOrder);
 
-// Create Work Order manually
-router.post('/', workOrderController.createWorkOrder);
-
-// Get all Work Orders
-router.get('/', workOrderController.getWorkOrders);
-
-// Get Work Order by ID
-router.get('/:id', workOrderController.getWorkOrderById);
-
-// Approve Work Order
-router.post('/:id/approve', workOrderController.approveWorkOrder);
-
-// Validate Inventory
-router.post('/:id/validate-inventory', workOrderController.validateInventory);
-
-// Reserve Materials
-router.post('/:id/reserve-materials', workOrderController.reserveMaterials);
-
-// Start Production
-router.post('/:id/start-production', workOrderController.startProduction);
-
-// Update Produced Quantity
-router.put('/:id/produced-qty', workOrderController.updateProducedQty);
-
-// Complete Work Order
-router.post('/:id/complete', workOrderController.completeWorkOrder);
-
-// Hold Work Order
-router.post('/:id/hold', workOrderController.holdWorkOrder);
-
-// Cancel Work Order
-router.post('/:id/cancel', workOrderController.cancelWorkOrder);
-
-// Consume Materials
-router.post('/:id/consume-materials', workOrderController.consumeMaterials);
-
-// Get Work Order Summary
-router.get('/summary/all', workOrderController.getWorkOrderSummary);
+// Workflow
+router.patch('/:id/release',          protect, releaseWorkOrder);
+router.patch('/:id/progress',         protect, updateProgress);
+router.patch('/:id/consume',          protect, recordConsumption);
+router.post('/:id/deduct-inventory',  protect, deductInventory);
+router.patch('/:id/qc',               protect, recordQC);
 
 export default router;

@@ -1,21 +1,29 @@
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load .env from backend root directory
+dotenv.config({ path: path.join(__dirname, '../.env') });
 
 const connectDB = async () => {
   try {
-    const mongoUri = process.env.MONGO_URI;
+    const mongoUri = process.env.MONGODB_URI;
 
     if (!mongoUri) {
-      throw new Error('MONGO_URI is not defined in environment variables');
+      console.error('✗ MONGODB_URI is not defined in environment variables');
+      console.error('Available env vars:', Object.keys(process.env).filter(k => k.includes('MONGO') || k.includes('mongo')));
+      throw new Error('MONGODB_URI is not defined in environment variables');
     }
 
-    const trimmedUri = mongoUri.trim();
     console.log('Connecting to MongoDB...');
+    console.log('URI:', mongoUri.substring(0, 50) + '...');
 
-    await mongoose.connect(trimmedUri, {
-      serverSelectionTimeoutMS: 5000,
+    await mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: 10000,
       socketTimeoutMS: 45000,
       retryWrites: true,
       w: 'majority'

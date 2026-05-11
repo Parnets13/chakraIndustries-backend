@@ -1,453 +1,232 @@
-import WorkOrder from '../models/WorkOrder.js';
-import OEMOrder from '../models/OEMOrder.js';
-import BOM from '../models/BOM.js';
-import Inventory from '../models/Inventory.js';
+import WorkOrder  from '../models/WorkOrder.js';
+import BOM        from '../models/BOM.js';
+import InventoryItem from '../models/InventoryItem.js';
 
-// Generate unique Work Order ID
-const generateWorkOrderId = async () => {
-  const count = await WorkOrder.countDocuments();
-  return `WO-${Date.now()}-${count + 1}`;
-};
+async function generateWoId() {
+  const last = await WorkOrder.findOne().sort({ createdAt: -1 }).select('woId');
+  let n = 1;
+  if (last?.woId) { const m = last.woId.match(/(\d+)$/); if (m) n = parseInt(m[1]) + 1; }
+  let id = `WO-${String(n).padStart(4, '0')}`;
+  while (await WorkOrder.findOne({ woId: id })) { n++; id = `WO-${String(n).padStart(4, '0')}`; }
+  return id;
+}
 
-// Auto-create Work Order from OEM Order
-export const createWorkOrderFromOEM = async (req, res) => {
+// ── GET all ───────────────────────────────────────────────────────────────────
+export const getAllWorkOrders = async (req, res) => {
   try {
-    const { oemOrderId } = req.body;
-
-    // Verify OEM order exists
-    const oemOrder = await OEMOrder.findById(oemOrderId).populate('bomId');
-    if (!oemOrder) {
-      return res.status(404).json({ success: false, message: 'OEM order not found' });
-    }
-
-    // Verify BOM exists
-    const bom = await BOM.findById(oemOrder.bomId);
-    if (!bom) {
-      return res.status(404).json({ success: false, message: 'BOM not found' });
-    }
-
-    const woId = await generateWorkOrderId();
-    const startDate = new Date();
-    const endDate = new Date(startDate.getTime() + 7 * 24 * 60 * 60 * 1000); // 7 days default
-
-    // Extract materials from BOM
-    const requiredMaterials = bom.materials.map(mat => ({
-      itemId: mat.materialId,
-      itemName: mat.materialName,
-      sku: mat.sku,
-      requiredQty: mat.quantity * oemOrder.quantity,
-      unit: mat.unit,
-      availableQty: mat.availableStock || 0,
-      shortfall: Math.max(0, (mat.quantity * oemOrder.quantity) - (mat.availableStock || 0)),
-      status: (mat.availableStock || 0) >= (mat.quantity * oemOrder.quantity) ? 'Available' : 'Partial'
-    }));
-
-    const workOrder = new WorkOrder({
-      woId,
-      product: bom.product,
-      qty: oemOrder.quantity,
-      bom: oemOrder.bomId,
-      startDate,
-      endDate,
-      priority: 'Normal',
-      status: 'Scheduled',
-      approvalStatus: 'Pending',
-      requiredMaterials,
-      inventoryStatus: 'Pending',
-      remarks: `Auto-generated from OEM Order: ${oemOrder.oemOrderId}`
-    });
-
-    await workOrder.save();
-
-    // Update OEM order with work order reference
-    await OEMOrder.findByIdAndUpdate(oemOrderId, {
-      workOrderId: workOrder._id,
-      status: 'BOM-Loaded'
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Work order created successfully from OEM order',
-      data: workOrder
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Create Work Order manually
-export const createWorkOrder = async (req, res) => {
-  try {
-    const { product, qty, bomId, shift, priority, startDate, endDate, remarks } = req.body;
-
-    // Verify BOM exists
-    const bom = await BOM.findById(bomId);
-    if (!bom) {
-      return res.status(404).json({ success: false, message: 'BOM not found' });
-    }
-
-    const woId = await generateWorkOrderId();
-
-    // Extract materials from BOM
-    const requiredMaterials = bom.materials.map(mat => ({
-      itemId: mat.materialId,
-      itemName: mat.materialName,
-      sku: mat.sku,
-      requiredQty: mat.quantity * qty,
-      unit: mat.unit,
-      availableQty: mat.availableStock || 0,
-      shortfall: Math.max(0, (mat.quantity * qty) - (mat.availableStock || 0)),
-      status: (mat.availableStock || 0) >= (mat.quantity * qty) ? 'Available' : 'Partial'
-    }));
-
-    const workOrder = new WorkOrder({
-      woId,
-      product,
-      qty,
-      bom: bomId,
-      shift: shift || 'Morning',
-      priority: priority || 'Normal',
-      startDate: startDate || new Date(),
-      endDate: endDate || new Date(new Date().getTime() + 7 * 24 * 60 * 60 * 1000),
-      requiredMaterials,
-      remarks
-    });
-
-    await workOrder.save();
-
-    res.status(201).json({
-      success: true,
-      message: 'Work order created successfully',
-      data: workOrder
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Get all Work Orders
-export const getWorkOrders = async (req, res) => {
-  try {
-    const { status, approvalStatus, priority } = req.query;
+    const { status, oemBrand } = req.query;
     const filter = {};
+    if (status)   filter.status = status;
+    if (oemBrand) filter.oemBrand = oemBrand;
 
-    if (status) filter.status = status;
-    if (approvalStatus) filter.approvalStatus = approvalStatus;
-    if (priority) filter.priority = priority;
-
-    const workOrders = await WorkOrder.find(filter)
-      .populate('bom', 'product materials')
-      .sort({ startDate: -1 });
-
-    res.json({ success: true, data: workOrders });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    const wos = await WorkOrder.find(filter)
+      .populate('bomId', 'bomId product version')
+      .populate('oemBrand', 'brandId name code color')
+      .sort({ createdAt: -1 });
+    res.json({ success: true, data: wos });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// Get Work Order by ID
+// ── GET single ────────────────────────────────────────────────────────────────
 export const getWorkOrderById = async (req, res) => {
   try {
-    const workOrder = await WorkOrder.findById(req.params.id)
-      .populate('bom', 'product materials');
-
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
-    }
-
-    res.json({ success: true, data: workOrder });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    const wo = await WorkOrder.findById(req.params.id)
+      .populate('bomId', 'bomId product version components overheadPct labourCost')
+      .populate('oemBrand', 'brandId name code color')
+      .populate('materialConsumption.vendorId', 'vendorId companyName')
+      .populate('materialConsumption.oemBrand', 'brandId name');
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    res.json({ success: true, data: wo });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// Approve Work Order
-export const approveWorkOrder = async (req, res) => {
+// ── CREATE ────────────────────────────────────────────────────────────────────
+export const createWorkOrder = async (req, res) => {
   try {
-    const { id } = req.params;
+    const { product, bomId, qty } = req.body;
+    if (!product?.trim()) return res.status(400).json({ success: false, message: 'Product is required' });
+    if (!qty || qty < 1)  return res.status(400).json({ success: false, message: 'Quantity must be at least 1' });
 
-    const workOrder = await WorkOrder.findByIdAndUpdate(
-      id,
-      { approvalStatus: 'Approved', status: 'Scheduled' },
-      { new: true }
-    );
-
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
+    let plannedCost = 0;
+    if (bomId) {
+      const bom = await BOM.findById(bomId);
+      if (!bom) return res.status(400).json({ success: false, message: 'Referenced BOM not found' });
+      const mat = bom.components.reduce((s, c) => s + c.qty * (1 + (c.scrapFactor || 0) / 100) * (c.unitCost || 0), 0);
+      plannedCost = (mat * (1 + (bom.overheadPct || 0) / 100) + (bom.labourCost || 0)) * qty;
     }
 
-    res.json({ success: true, message: 'Work order approved', data: workOrder });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    const woId = await generateWoId();
+    const wo = await WorkOrder.create({ woId, plannedCost, ...req.body, status: 'Pending' });
+    const populated = await wo.populate('bomId', 'bomId product version');
+    res.status(201).json({ success: true, message: 'Work order created', data: populated });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// Validate Inventory for Work Order
-export const validateInventory = async (req, res) => {
+// ── UPDATE header ─────────────────────────────────────────────────────────────
+export const updateWorkOrder = async (req, res) => {
   try {
-    const { id } = req.params;
-
-    const workOrder = await WorkOrder.findById(id);
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
-    }
-
-    // Check inventory for all required materials
-    let allAvailable = true;
-    const updatedMaterials = [];
-
-    for (const material of workOrder.requiredMaterials) {
-      const inventory = await Inventory.findOne({
-        itemId: material.itemId,
-        quantity: { $gte: material.requiredQty }
-      });
-
-      const status = inventory ? 'Available' : 'Partial';
-      const availableQty = inventory ? inventory.quantity : 0;
-      const shortfall = Math.max(0, material.requiredQty - availableQty);
-
-      updatedMaterials.push({
-        ...material,
-        availableQty,
-        shortfall,
-        status
-      });
-
-      if (!inventory) allAvailable = false;
-    }
-
-    workOrder.requiredMaterials = updatedMaterials;
-    workOrder.inventoryStatus = allAvailable ? 'Reserved' : 'Partial';
-    await workOrder.save();
-
-    res.json({
-      success: true,
-      message: allAvailable ? 'All materials available' : 'Some materials unavailable',
-      data: workOrder
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    const wo = await WorkOrder.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true })
+      .populate('bomId', 'bomId product version')
+      .populate('oemBrand', 'brandId name code color');
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    res.json({ success: true, message: 'Work order updated', data: wo });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// Reserve Materials for Work Order
-export const reserveMaterials = async (req, res) => {
+// ── RELEASE WO — populate material consumption from BOM ───────────────────────
+// PATCH /api/workorders/:id/release
+export const releaseWorkOrder = async (req, res) => {
   try {
-    const { id } = req.params;
+    const wo = await WorkOrder.findById(req.params.id);
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (wo.status !== 'Pending') return res.status(400).json({ success: false, message: 'Only Pending WOs can be released' });
+    if (!wo.bomId) return res.status(400).json({ success: false, message: 'WO must have a BOM to be released' });
 
-    const workOrder = await WorkOrder.findById(id);
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
-    }
+    const bom = await BOM.findById(wo.bomId);
+    if (!bom) return res.status(400).json({ success: false, message: 'BOM not found' });
 
-    const reservedInventory = [];
+    // Build material consumption plan from BOM components
+    wo.materialConsumption = bom.components.map(c => ({
+      itemName:    c.itemName,
+      itemCode:    c.itemCode,
+      plannedQty:  Math.round(c.qty * (1 + (c.scrapFactor || 0) / 100) * wo.qty * 1000) / 1000,
+      consumedQty: 0,
+      unit:        c.unit,
+      vendorId:    c.vendorId || null,
+      oemBrand:    c.oemBrand || null,
+      unitCost:    c.unitCost || 0,
+    }));
 
-    for (const material of workOrder.requiredMaterials) {
-      const inventory = await Inventory.findOne({ itemId: material.itemId });
+    wo.status     = 'Released';
+    wo.actualStart = new Date();
+    await wo.save();
 
-      if (inventory && inventory.quantity >= material.requiredQty) {
-        inventory.quantity -= material.requiredQty;
-        await inventory.save();
-
-        reservedInventory.push({
-          itemId: material.itemId,
-          inventoryId: inventory._id,
-          qty: material.requiredQty,
-          reservedAt: new Date()
-        });
-      }
-    }
-
-    workOrder.reservedInventory = reservedInventory;
-    workOrder.inventoryStatus = 'Reserved';
-    workOrder.status = 'Scheduled';
-    await workOrder.save();
-
-    res.json({
-      success: true,
-      message: 'Materials reserved successfully',
-      data: workOrder
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    res.json({ success: true, message: 'Work order released — material plan created', data: wo });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// Start Production
-export const startProduction = async (req, res) => {
+// ── UPDATE PROGRESS ───────────────────────────────────────────────────────────
+export const updateProgress = async (req, res) => {
   try {
-    const { id } = req.params;
-
-    const workOrder = await WorkOrder.findByIdAndUpdate(
-      id,
-      { status: 'In-Progress' },
-      { new: true }
-    );
-
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
-    }
-
-    res.json({ success: true, message: 'Production started', data: workOrder });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Update Production Quantity
-export const updateProducedQty = async (req, res) => {
-  try {
-    const { id } = req.params;
     const { produced } = req.body;
+    const wo = await WorkOrder.findById(req.params.id);
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
 
-    const workOrder = await WorkOrder.findById(id);
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
-    }
+    const newProduced = Math.min(parseInt(produced), wo.qty);
+    wo.produced = newProduced;
+    wo.status   = newProduced >= wo.qty ? 'QC Pending' : 'In-Progress';
+    if (wo.status === 'In-Progress' && !wo.actualStart) wo.actualStart = new Date();
+    await wo.save();
 
-    if (produced > workOrder.qty) {
-      return res.status(400).json({ success: false, message: 'Produced quantity cannot exceed required quantity' });
-    }
-
-    workOrder.produced = produced;
-
-    // Auto-complete if all produced
-    if (produced === workOrder.qty) {
-      workOrder.status = 'Completed';
-      workOrder.endDate = new Date();
-    }
-
-    await workOrder.save();
-
-    res.json({ success: true, message: 'Production quantity updated', data: workOrder });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    res.json({ success: true, message: 'Progress updated', data: wo });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// Complete Work Order
-export const completeWorkOrder = async (req, res) => {
+// ── RECORD MATERIAL CONSUMPTION ───────────────────────────────────────────────
+// PATCH /api/workorders/:id/consume
+// body: { consumptions: [{ consumptionId, consumedQty, batchNo, isAlternate, alternateFor, alternateItemName }] }
+export const recordConsumption = async (req, res) => {
   try {
-    const { id } = req.params;
+    const wo = await WorkOrder.findById(req.params.id);
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (!['Released', 'In-Progress', 'WIP'].includes(wo.status))
+      return res.status(400).json({ success: false, message: 'WO must be Released or In-Progress to record consumption' });
 
-    const workOrder = await WorkOrder.findByIdAndUpdate(
-      id,
-      { status: 'Completed', endDate: new Date() },
-      { new: true }
-    );
-
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
+    const { consumptions = [] } = req.body;
+    for (const c of consumptions) {
+      const line = wo.materialConsumption.id(c.consumptionId);
+      if (!line) continue;
+      line.consumedQty  = parseFloat(c.consumedQty) || 0;
+      line.batchNo      = c.batchNo || '';
+      line.isAlternate  = c.isAlternate || false;
+      line.alternateFor = c.alternateFor || '';
+      if (c.isAlternate && c.alternateItemName) line.itemName = c.alternateItemName;
+      line.consumedAt   = new Date();
+      line.consumedBy   = c.consumedBy || '';
     }
 
-    res.json({ success: true, message: 'Work order completed', data: workOrder });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    wo.status = 'In-Progress';
+    await wo.save();
+    res.json({ success: true, message: 'Consumption recorded', data: wo });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// Hold Work Order
-export const holdWorkOrder = async (req, res) => {
+// ── DEDUCT INVENTORY ──────────────────────────────────────────────────────────
+// POST /api/workorders/:id/deduct-inventory
+// Deducts consumed quantities from InventoryItem stock
+export const deductInventory = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { remarks } = req.body;
+    const wo = await WorkOrder.findById(req.params.id);
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (wo.inventoryDeducted) return res.status(400).json({ success: false, message: 'Inventory already deducted for this WO' });
 
-    const workOrder = await WorkOrder.findByIdAndUpdate(
-      id,
-      { status: 'On-Hold', remarks },
-      { new: true }
-    );
+    const errors = [];
+    let totalActualCost = 0;
 
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
+    for (const line of wo.materialConsumption) {
+      const qty = line.consumedQty || line.plannedQty;
+      if (!qty) continue;
+
+      // Find inventory item by itemCode or itemName
+      const invItem = await InventoryItem.findOne(
+        line.itemCode
+          ? { $or: [{ sku: line.itemCode }, { name: new RegExp(line.itemName, 'i') }] }
+          : { name: new RegExp(line.itemName, 'i') }
+      );
+
+      if (!invItem) {
+        errors.push(`Item not found in inventory: ${line.itemName}`);
+        continue;
+      }
+
+      if (invItem.qty < qty) {
+        errors.push(`Insufficient stock for ${line.itemName}: need ${qty}, have ${invItem.qty}`);
+        continue;
+      }
+
+      invItem.qty -= qty;
+      await invItem.save();
+      totalActualCost += qty * (line.unitCost || 0);
     }
 
-    res.json({ success: true, message: 'Work order on hold', data: workOrder });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Cancel Work Order
-export const cancelWorkOrder = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const workOrder = await WorkOrder.findByIdAndUpdate(
-      id,
-      { status: 'Cancelled' },
-      { new: true }
-    );
-
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
-    }
-
-    res.json({ success: true, message: 'Work order cancelled', data: workOrder });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Get Work Order Summary
-export const getWorkOrderSummary = async (req, res) => {
-  try {
-    const summary = {
-      totalWorkOrders: await WorkOrder.countDocuments(),
-      byStatus: await WorkOrder.aggregate([
-        { $group: { _id: '$status', count: { $sum: 1 } } }
-      ]),
-      byApprovalStatus: await WorkOrder.aggregate([
-        { $group: { _id: '$approvalStatus', count: { $sum: 1 } } }
-      ]),
-      byPriority: await WorkOrder.aggregate([
-        { $group: { _id: '$priority', count: { $sum: 1 } } }
-      ]),
-      totalQtyRequired: await WorkOrder.aggregate([
-        { $group: { _id: null, total: { $sum: '$qty' } } }
-      ]),
-      totalQtyProduced: await WorkOrder.aggregate([
-        { $group: { _id: null, total: { $sum: '$produced' } } }
-      ])
-    };
-
-    res.json({ success: true, data: summary });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Consume Materials
-export const consumeMaterials = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const workOrder = await WorkOrder.findById(id);
-    if (!workOrder) {
-      return res.status(404).json({ success: false, message: 'Work order not found' });
-    }
-
-    const consumedInventory = [];
-
-    for (const reserved of workOrder.reservedInventory) {
-      consumedInventory.push({
-        itemId: reserved.itemId,
-        inventoryId: reserved.inventoryId,
-        qty: reserved.qty,
-        consumedAt: new Date()
-      });
-    }
-
-    workOrder.consumedInventory = consumedInventory;
-    workOrder.inventoryStatus = 'Consumed';
-    await workOrder.save();
+    wo.inventoryDeducted = true;
+    wo.actualCost = totalActualCost;
+    wo.status = 'WIP';
+    await wo.save();
 
     res.json({
       success: true,
-      message: 'Materials consumed successfully',
-      data: workOrder
+      message: errors.length ? `Inventory deducted with ${errors.length} warning(s)` : 'Inventory deducted successfully',
+      warnings: errors,
+      data: wo,
     });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── QC RESULT ─────────────────────────────────────────────────────────────────
+// PATCH /api/workorders/:id/qc
+export const recordQC = async (req, res) => {
+  try {
+    const { passedQty, rejectedQty, defectType, inspectedBy, remarks } = req.body;
+    const wo = await WorkOrder.findById(req.params.id);
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+
+    wo.qcResult = { passedQty: passedQty || 0, rejectedQty: rejectedQty || 0, defectType, inspectedBy, inspectedAt: new Date(), remarks };
+    wo.produced  = passedQty || 0;
+    wo.rejected  = rejectedQty || 0;
+    wo.status    = (passedQty || 0) >= wo.qty ? 'Completed' : 'QC Pending';
+    if (wo.status === 'Completed') wo.actualEnd = new Date();
+    await wo.save();
+
+    res.json({ success: true, message: 'QC result recorded', data: wo });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+// ── DELETE ────────────────────────────────────────────────────────────────────
+export const deleteWorkOrder = async (req, res) => {
+  try {
+    const wo = await WorkOrder.findByIdAndDelete(req.params.id);
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    res.json({ success: true, message: 'Work order deleted' });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

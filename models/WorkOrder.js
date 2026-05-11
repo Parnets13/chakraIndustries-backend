@@ -1,98 +1,91 @@
 import mongoose from 'mongoose';
 
-const workOrderSchema = new mongoose.Schema({
-  woId: {
-    type: String,
-    unique: true,
-    required: true
-  },
-  product: {
-    type: String,
-    required: true
-  },
-  qty: {
-    type: Number,
-    required: true
-  },
-  produced: {
-    type: Number,
-    default: 0
-  },
-  shift: {
-    type: String,
-    enum: ['Morning', 'General', 'Night'],
-    default: 'Morning'
-  },
-  startDate: {
-    type: Date,
-    required: true
-  },
-  endDate: Date,
-  bom: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'BOM'
-  },
-  priority: {
-    type: String,
-    enum: ['Normal', 'High', 'Urgent'],
-    default: 'Normal'
-  },
-  status: {
-    type: String,
-    enum: ['Scheduled', 'In-Progress', 'Completed', 'On-Hold', 'Cancelled'],
-    default: 'Scheduled'
-  },
-  approvalStatus: {
-    type: String,
-    enum: ['Pending', 'Approved', 'Rejected'],
-    default: 'Pending'
-  },
-  remarks: String,
-  // Inventory tracking
-  requiredMaterials: [{
-    itemId: mongoose.Schema.Types.ObjectId,
-    itemName: String,
-    sku: String,
-    requiredQty: Number,
-    unit: String,
-    availableQty: Number,
-    shortfall: Number,
-    status: {
-      type: String,
-      enum: ['Available', 'Partial', 'Unavailable'],
-      default: 'Available'
-    }
-  }],
-  inventoryStatus: {
-    type: String,
-    enum: ['Pending', 'Reserved', 'Consumed', 'Partial'],
-    default: 'Pending'
-  },
-  reservedInventory: [{
-    itemId: mongoose.Schema.Types.ObjectId,
-    inventoryId: mongoose.Schema.Types.ObjectId,
-    qty: Number,
-    reservedAt: Date
-  }],
-  consumedInventory: [{
-    itemId: mongoose.Schema.Types.ObjectId,
-    inventoryId: mongoose.Schema.Types.ObjectId,
-    qty: Number,
-    consumedAt: Date
-  }],
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
-  updatedAt: {
-    type: Date,
-    default: Date.now
-  }
-});
+// ── Material consumption line ─────────────────────────────────────────────────
+const consumptionSchema = new mongoose.Schema({
+  itemName:        { type: String, required: true },
+  itemCode:        { type: String, default: '' },
+  inventoryItemId: { type: mongoose.Schema.Types.ObjectId, ref: 'InventoryItem', default: null },
+  plannedQty:      { type: Number, default: 0 },
+  consumedQty:     { type: Number, default: 0 },
+  unit:            { type: String, default: 'Nos' },
+  batchNo:         { type: String, default: '' },
+  // Which OEM/vendor supplied this material
+  vendorId:        { type: mongoose.Schema.Types.ObjectId, ref: 'Vendor', default: null },
+  oemBrand:        { type: mongoose.Schema.Types.ObjectId, ref: 'OEMBrand', default: null },
+  // Was an alternate used?
+  isAlternate:     { type: Boolean, default: false },
+  alternateFor:    { type: String, default: '' },  // original item name
+  unitCost:        { type: Number, default: 0 },
+  consumedAt:      { type: Date },
+  consumedBy:      { type: String, default: '' },
+}, { _id: true });
 
-workOrderSchema.index({ woId: 1 });
-workOrderSchema.index({ status: 1 });
-workOrderSchema.index({ approvalStatus: 1 });
-workOrderSchema.index({ startDate: -1 });
+// ── WIP stage ─────────────────────────────────────────────────────────────────
+const wipStageSchema = new mongoose.Schema({
+  stage:       { type: String, required: true },   // e.g. 'Assembly', 'Testing', 'Packing'
+  status:      { type: String, enum: ['Pending', 'In-Progress', 'Done', 'Rejected'], default: 'Pending' },
+  qty:         { type: Number, default: 0 },
+  rejectedQty: { type: Number, default: 0 },
+  remarks:     { type: String, default: '' },
+  startedAt:   { type: Date },
+  completedAt: { type: Date },
+  operator:    { type: String, default: '' },
+}, { _id: true });
+
+// ── QC result on WO ───────────────────────────────────────────────────────────
+const woQcSchema = new mongoose.Schema({
+  passedQty:   { type: Number, default: 0 },
+  rejectedQty: { type: Number, default: 0 },
+  defectType:  { type: String, default: '' },
+  inspectedBy: { type: String, default: '' },
+  inspectedAt: { type: Date },
+  remarks:     { type: String, default: '' },
+}, { _id: false });
+
+// ── Work Order ────────────────────────────────────────────────────────────────
+const workOrderSchema = new mongoose.Schema({
+  woId:       { type: String, required: true, unique: true, index: true },
+  product:    { type: String, required: true, trim: true },
+  bomId:      { type: mongoose.Schema.Types.ObjectId, ref: 'BOM', default: null },
+  oemBrand:   { type: mongoose.Schema.Types.ObjectId, ref: 'OEMBrand', default: null },
+  oemProduct: { type: mongoose.Schema.Types.ObjectId, ref: 'OEMProduct', default: null },
+
+  // Quantities
+  qty:        { type: Number, required: true, min: 1 },
+  produced:   { type: Number, default: 0 },
+  rejected:   { type: Number, default: 0 },
+  wip:        { type: Number, default: 0 },   // in-process qty
+
+  // Scheduling
+  shift:      { type: String, enum: ['Morning', 'General', 'Night'], default: 'General' },
+  priority:   { type: String, enum: ['Normal', 'High', 'Urgent'], default: 'Normal' },
+  startDate:  { type: Date },
+  endDate:    { type: Date },
+  actualStart:{ type: Date },
+  actualEnd:  { type: Date },
+
+  // Status
+  status:     { type: String, enum: ['Pending', 'Released', 'In-Progress', 'WIP', 'QC Pending', 'Completed', 'Cancelled'], default: 'Pending' },
+
+  // Material consumption (auto-populated from BOM when WO is released)
+  materialConsumption: [consumptionSchema],
+  inventoryDeducted:   { type: Boolean, default: false },
+
+  // WIP stages
+  wipStages:  [wipStageSchema],
+
+  // QC
+  qcResult:   woQcSchema,
+
+  // MRP linkage — was this WO created by MRP?
+  mrpRunId:   { type: String, default: '' },
+  prId:       { type: String, default: '' },   // linked PR if materials needed
+
+  // Costing
+  plannedCost:  { type: Number, default: 0 },
+  actualCost:   { type: Number, default: 0 },
+
+  remarks:    { type: String, default: '' },
+}, { timestamps: true });
 
 export default mongoose.model('WorkOrder', workOrderSchema);

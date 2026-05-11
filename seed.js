@@ -8,8 +8,8 @@ dotenv.config();
 const SEED_USERS = [
   {
     name:     process.env.SUPER_ADMIN_NAME     || 'Super Admin',
-    email:    process.env.SUPER_ADMIN_EMAIL    || 'admin@chakra.in',
-    password: process.env.SUPER_ADMIN_PASSWORD || 'admin123',
+    email:    process.env.SUPER_ADMIN_EMAIL    || 'chakra@admin.com',
+    password: process.env.SUPER_ADMIN_PASSWORD || 'chakra123',
     role:     'super_admin',
   },
   { name: 'Priya Sharma', email: 'ceo@chakra.in',        password: 'mgmt123',     role: 'management' },

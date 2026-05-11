@@ -1,6 +1,22 @@
 import mongoose from 'mongoose';
-import CorporateClient from './CorporateClient.js';
 
+// ── Corporate Client ──────────────────────────────────────────────────────────
+const corporateClientSchema = new mongoose.Schema({
+  clientId:     { type: String, unique: true, required: true },
+  name:         { type: String, required: true },
+  contact:      { type: String, required: true },
+  phone:        { type: String, default: '', match: [/^(\d{10})?$/, 'Phone must be exactly 10 digits'] },
+  email:        { type: String, default: '' },
+  city:         { type: String, default: '' },
+  address:      { type: String, default: '' },
+  gstNumber:    { type: String, default: '' },
+  tier:         { type: String, enum: ['Silver', 'Gold', 'Platinum'], default: 'Silver' },
+  creditLimit:  { type: Number, default: 0 },
+  outstanding:  { type: Number, default: 0 },
+  status:       { type: String, enum: ['Active', 'Inactive'], default: 'Active' },
+}, { timestamps: true });
+
+// ── Bulk Quotation ────────────────────────────────────────────────────────────
 const bulkQuotationSchema = new mongoose.Schema({
   quoteId:      { type: String, unique: true, required: true },
   clientId:     { type: mongoose.Schema.Types.ObjectId, ref: 'CorporateClient', required: true },
@@ -23,6 +39,7 @@ const bulkQuotationSchema = new mongoose.Schema({
   remarks:      { type: String, default: '' },
 }, { timestamps: true });
 
+// ── Delivery Schedule ─────────────────────────────────────────────────────────
 const deliveryScheduleSchema = new mongoose.Schema({
   scheduleId:   { type: String, unique: true, required: true },
   quoteId:      { type: mongoose.Schema.Types.ObjectId, ref: 'BulkQuotation' },
@@ -36,6 +53,8 @@ const deliveryScheduleSchema = new mongoose.Schema({
   status:       { type: String, enum: ['Draft', 'Confirmed', 'Pending', 'Dispatched', 'Delivered'], default: 'Pending' },
 }, { timestamps: true });
 
-export const BulkQuotation    = mongoose.model('BulkQuotation', bulkQuotationSchema);
-export const DeliverySchedule = mongoose.model('DeliverySchedule', deliveryScheduleSchema);
-export { CorporateClient };
+// Use mongoose.models guard to prevent OverwriteModelError when the module
+// is imported multiple times (e.g. via both bulkOrderRoutes and deliveryScheduleRoutes).
+export const CorporateClient  = mongoose.models.CorporateClient  || mongoose.model('CorporateClient',  corporateClientSchema);
+export const BulkQuotation    = mongoose.models.BulkQuotation    || mongoose.model('BulkQuotation',    bulkQuotationSchema);
+export const DeliverySchedule = mongoose.models.DeliverySchedule || mongoose.model('DeliverySchedule', deliveryScheduleSchema);
