@@ -134,3 +134,40 @@ export const getBulkStats = async (req, res) => {
     }});
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
+
+// ── CONVERT QUOTATION TO DISPATCH ─────────────────────────────────────────────
+export const convertToDispatch = async (req, res) => {
+  try {
+    const { Dispatch } = await import('../models/Logistics.js');
+
+    const quote = await BulkQuotation.findById(req.params.id);
+    if (!quote) return res.status(404).json({ success: false, message: 'Quotation not found' });
+    if (quote.status !== 'Approved') return res.status(400).json({ success: false, message: 'Only Approved quotations can be converted' });
+
+    // Generate dispatch ID
+    const year = new Date().getFullYear();
+    const prefix = `DSP-${year}-`;
+    const last = await Dispatch.findOne({ dispatchId: new RegExp(`^${prefix}`) }).sort({ dispatchId: -1 });
+    const num = last ? (parseInt(last.dispatchId.split('-').pop()) || 0) : 0;
+    const dispatchId = `${prefix}${String(num + 1).padStart(3, '0')}`;
+
+    const dispatch = await Dispatch.create({
+      dispatchId,
+      orderRef: quote.quoteId,
+      customer: quote.clientName,
+      destination: '',
+      items: quote.items?.length || 0,
+      value: quote.grandTotal || 0,
+      status: 'Pending',
+      instructions: `Converted from Bulk Quotation ${quote.quoteId}`,
+    });
+
+    // Update quotation status
+    quote.status = 'Converted';
+    await quote.save();
+
+    res.status(201).json({ success: true, data: dispatch, message: `Dispatch ${dispatchId} created` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};

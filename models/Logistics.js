@@ -26,6 +26,8 @@ const dispatchSchema = new mongoose.Schema({
   deliveredAt:  { type: Date },
   status:       { type: String, enum: ['Pending', 'Dispatched', 'In Transit', 'Delivered', 'Cancelled'], default: 'Pending' },
   instructions: { type: String, default: '' },
+  regularized:  { type: Boolean, default: false },
+  regularizedAt: { type: Date },
   timeline: [{
     event:    { type: String },
     time:     { type: Date, default: Date.now },

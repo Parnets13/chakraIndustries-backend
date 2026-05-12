@@ -3,7 +3,7 @@ import {
   getClients, createClient, updateClient, deleteClient,
   getQuotations, createQuotation, updateQuotation, updateQuotationStatus, deleteQuotation,
   getSchedules, createSchedule, updateSchedule, deleteSchedule,
-  getBulkStats,
+  getBulkStats, convertToDispatch,
 } from '../controllers/bulkOrderController.js';
 
 const router = express.Router();
@@ -23,6 +23,7 @@ router.post('/quotations', createQuotation);
 router.put('/quotations/:id', updateQuotation);
 router.patch('/quotations/:id/status', updateQuotationStatus);
 router.delete('/quotations/:id', deleteQuotation);
+router.post('/quotations/:id/convert-to-dispatch', convertToDispatch);
 
 // Delivery Schedules
 router.get('/schedules', getSchedules);

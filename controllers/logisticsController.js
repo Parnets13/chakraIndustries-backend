@@ -1,4 +1,5 @@
 import { Vehicle, Dispatch, CourierShipment } from '../models/Logistics.js';
+import { courierService } from '../utils/courierService.js';
 
 // ── ID generators ─────────────────────────────────────────────────────────────
 const genId = async (Model, field, prefix) => {
@@ -141,4 +142,63 @@ export const deleteShipment = async (req, res) => {
     await CourierShipment.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: 'Deleted' });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── COURIER TRACKING ──────────────────────────────────────────────────────────
+export const trackCourier = async (req, res) => {
+  try {
+    const { awbNo } = req.params;
+    const { courier } = req.query;
+    const tracking = await courierService.track(awbNo, courier);
+    res.json({ success: true, data: tracking });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── DC REGULARIZATION ─────────────────────────────────────────────────────────
+export const regularizeDispatch = async (req, res) => {
+  try {
+    const dispatch = await Dispatch.findById(req.params.id);
+    if (!dispatch) return res.status(404).json({ success: false, message: 'Dispatch not found' });
+    if (dispatch.regularized) return res.status(400).json({ success: false, message: 'Already regularized' });
+
+    dispatch.regularized = true;
+    dispatch.regularizedAt = new Date();
+    await dispatch.save();
+
+    res.json({ success: true, data: dispatch, message: 'Dispatch regularized successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── PENDENCY REPORT ───────────────────────────────────────────────────────────
+export const getPendencyReport = async (req, res) => {
+  try {
+    const pending = await Dispatch.find({
+      status: { $in: ['Pending', 'Dispatched', 'In Transit'] }
+    }).sort({ createdAt: 1 });
+
+    const now = Date.now();
+    const report = pending.map(d => ({
+      ...d.toObject(),
+      ageDays: Math.floor((now - new Date(d.createdAt)) / 86400000),
+      urgency: Math.floor((now - new Date(d.createdAt)) / 86400000) > 14 ? 'critical'
+               : Math.floor((now - new Date(d.createdAt)) / 86400000) > 7 ? 'high' : 'normal'
+    }));
+
+    res.json({
+      success: true,
+      data: report,
+      summary: {
+        total: report.length,
+        overdue: report.filter(r => r.ageDays > 7).length,
+        critical: report.filter(r => r.ageDays > 14).length,
+        totalValue: report.reduce((s, r) => s + (r.value || 0), 0)
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };

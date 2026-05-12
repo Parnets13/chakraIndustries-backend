@@ -1,13 +1,16 @@
 import Invoice from '../models/Invoice.js';
+import { sendInvoiceEmail } from '../utils/emailService.js';
 
 // ── ID generator ──────────────────────────────────────────────────────────────
 const genInvoiceNo = async () => {
   const year = new Date().getFullYear();
   const prefix = `INV-${year}-`;
-  const last = await Invoice.findOne({ invoiceNo: new RegExp(`^${prefix}`) }).sort({ invoiceNo: -1 });
-  if (!last) return `${prefix}001`;
-  const num = parseInt(last.invoiceNo.split('-')[2]) || 0;
-  return `${prefix}${String(num + 1).padStart(3, '0')}`;
+  const last = await Invoice.findOne({ invoiceNo: new RegExp(`^${prefix}`) })
+    .sort({ createdAt: -1 });
+  if (!last) return `${prefix}0001`;
+  const parts = last.invoiceNo.split('-');
+  const num = parseInt(parts[parts.length - 1]) || 0;
+  return `${prefix}${String(num + 1).padStart(4, '0')}`;
 };
 
 // ── Compute totals from items ─────────────────────────────────────────────────
@@ -46,7 +49,7 @@ export const getAll = async (req, res) => {
     ];
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [list, total] = await Promise.all([
-      Invoice.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)),
+      Invoice.find(filter).sort({ serialNo: 1, createdAt: 1 }).skip(skip).limit(parseInt(limit)),
       Invoice.countDocuments(filter),
     ]);
     res.json({ success: true, data: list, total, page: parseInt(page), limit: parseInt(limit) });
@@ -56,19 +59,27 @@ export const getAll = async (req, res) => {
 // ── GET /api/invoices/stats ───────────────────────────────────────────────────
 export const getStats = async (req, res) => {
   try {
-    const all = await Invoice.find();
-    const stats = {
-      total:       all.length,
-      draft:       all.filter(i => i.status === 'Draft').length,
-      sent:        all.filter(i => i.status === 'Sent').length,
-      paid:        all.filter(i => i.status === 'Paid').length,
-      overdue:     all.filter(i => i.status === 'Overdue').length,
-      cancelled:   all.filter(i => i.status === 'Cancelled').length,
-      totalValue:  all.reduce((s, i) => s + (i.grandTotal || 0), 0),
-      paidValue:   all.filter(i => i.status === 'Paid').reduce((s, i) => s + (i.grandTotal || 0), 0),
-      pendingValue:all.filter(i => ['Draft','Sent','Overdue'].includes(i.status)).reduce((s, i) => s + (i.grandTotal || 0), 0),
-    };
-    res.json({ success: true, data: stats });
+    const [total, draft, sent, paid, overdue, cancelled, totalValueAgg, paidValueAgg, pendingValueAgg] =
+      await Promise.all([
+        Invoice.countDocuments(),
+        Invoice.countDocuments({ status: 'Draft' }),
+        Invoice.countDocuments({ status: 'Sent' }),
+        Invoice.countDocuments({ status: 'Paid' }),
+        Invoice.countDocuments({ status: 'Overdue' }),
+        Invoice.countDocuments({ status: 'Cancelled' }),
+        Invoice.aggregate([{ $group: { _id: null, v: { $sum: '$grandTotal' } } }]),
+        Invoice.aggregate([{ $match: { status: 'Paid' } }, { $group: { _id: null, v: { $sum: '$grandTotal' } } }]),
+        Invoice.aggregate([{ $match: { status: { $in: ['Draft','Sent','Overdue'] } } }, { $group: { _id: null, v: { $sum: '$grandTotal' } } }]),
+      ]);
+    res.json({
+      success: true,
+      data: {
+        total, draft, sent, paid, overdue, cancelled,
+        totalValue:   totalValueAgg[0]?.v   || 0,
+        paidValue:    paidValueAgg[0]?.v    || 0,
+        pendingValue: pendingValueAgg[0]?.v || 0,
+      },
+    });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
@@ -93,39 +104,74 @@ export const create = async (req, res) => {
 };
 
 // ── POST /api/invoices/bulk-upload ────────────────────────────────────────────
-// Accepts array of invoice objects parsed from Excel on the frontend
+// Accepts array of invoice objects parsed from Excel on the frontend.
+// Uses insertMany (single DB round-trip) instead of a sequential loop —
+// handles 1000+ rows without hitting body-size or timeout limits.
 export const bulkUpload = async (req, res) => {
   try {
     const { invoices = [] } = req.body;
-    if (!invoices.length) return res.status(400).json({ success: false, message: 'No invoices provided' });
+    if (!invoices.length)
+      return res.status(400).json({ success: false, message: 'No invoices provided' });
 
     const batchId = `BATCH-${Date.now()}`;
-    const created = [];
-    const errors  = [];
+    const year    = new Date().getFullYear();
+    const prefix  = `INV-${year}-`;
 
-    for (let i = 0; i < invoices.length; i++) {
+    // One query to find the current highest number
+    const last = await Invoice.findOne({ invoiceNo: new RegExp(`^${prefix}`) })
+      .sort({ createdAt: -1 })
+      .select('invoiceNo');
+    const lastNum = last ? (parseInt(last.invoiceNo.split('-').pop()) || 0) : 0;
+
+    // Build all docs in memory — no per-row DB calls
+    const docs   = [];
+    const errors = [];
+
+    invoices.forEach((inv, i) => {
       try {
-        const invoiceNo = await genInvoiceNo();
-        const { items = [], ...rest } = invoices[i];
+        const invoiceNo = `${prefix}${String(lastNum + i + 1).padStart(4, '0')}`;
+        const { items = [], ...rest } = inv;
         const totals = computeTotals(items);
-        const inv = await Invoice.create({
+        docs.push({
           invoiceNo,
           ...rest,
           ...totals,
-          source: 'excel_upload',
+          source:      'excel_upload',
           uploadBatch: batchId,
+          serialNo:    i + 1,
+          status:      rest.status || 'Draft',
         });
-        created.push(inv);
       } catch (e) {
         errors.push({ row: i + 1, error: e.message });
       }
+    });
+
+    if (!docs.length) {
+      return res.status(400).json({ success: false, message: 'All rows failed validation', errors });
+    }
+
+    // Single insertMany — ordered:false means valid docs still insert even if some fail
+    let inserted = [];
+    try {
+      inserted = await Invoice.insertMany(docs, { ordered: false });
+    } catch (bulkErr) {
+      // BulkWriteError: partial success — some docs inserted, some failed
+      if (bulkErr.insertedDocs) inserted = bulkErr.insertedDocs;
+      else if (bulkErr.result?.insertedIds) {
+        // Mongoose may not populate insertedDocs; fetch them by batchId
+        inserted = await Invoice.find({ uploadBatch: batchId });
+      }
+      errors.push({ row: 'multiple', error: bulkErr.message });
     }
 
     res.status(201).json({
       success: true,
-      data: { created: created.length, errors, batchId, invoices: created },
+      data: { created: inserted.length, errors, batchId, invoices: inserted },
     });
-  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+  } catch (err) {
+    console.error('[bulkUpload]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 // ── PUT /api/invoices/:id ─────────────────────────────────────────────────────
@@ -153,6 +199,14 @@ export const updateStatus = async (req, res) => {
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
+// ── DELETE /api/invoices (delete all) ────────────────────────────────────────
+export const removeAll = async (req, res) => {
+  try {
+    const result = await Invoice.deleteMany({});
+    res.json({ success: true, deleted: result.deletedCount });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
 // ── DELETE /api/invoices/:id ──────────────────────────────────────────────────
 export const remove = async (req, res) => {
   try {
@@ -160,4 +214,39 @@ export const remove = async (req, res) => {
     if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
     res.json({ success: true, message: 'Invoice deleted' });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── POST /api/invoices/:id/send-email ─────────────────────────────────────────
+// Frontend sends pdfBase64 (jsPDF output); backend attaches it and emails via Nodemailer.
+export const sendEmail = async (req, res) => {
+  try {
+    const inv = await Invoice.findById(req.params.id);
+    if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+    const { pdfBase64 } = req.body;
+    if (!pdfBase64)
+      return res.status(400).json({ success: false, message: 'pdfBase64 is required' });
+
+    const to = inv.partyEmail;
+    if (!to)
+      return res.status(400).json({ success: false, message: 'Invoice has no recipient email address' });
+
+    await sendInvoiceEmail({
+      to,
+      partyName:   inv.partyName,
+      invoice:     inv.toObject(),
+      pdfBase64,
+      pdfFilename: `${inv.invoiceNo}.pdf`,
+    });
+
+    // Auto-advance status from Draft → Sent
+    if (inv.status === 'Draft') {
+      await Invoice.findByIdAndUpdate(req.params.id, { status: 'Sent' });
+    }
+
+    res.json({ success: true, message: `Invoice emailed to ${to}` });
+  } catch (err) {
+    console.error('[sendEmail]', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
