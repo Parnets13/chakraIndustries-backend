@@ -45,6 +45,7 @@ import salesOrderRoutes from './routes/salesOrderRoutes.js';
 import tallyRoutes from './routes/tallyRoutes.js';
 import reportsRoutes from './routes/reportsRoutes.js';
 import forecastingRoutes from './routes/forecastingRoutes.js';
+import invoiceRoutes from './routes/invoiceRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -66,8 +67,11 @@ app.use(cors({
     // Allow requests with no origin (mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
     const allowed = [
-      'http://localhost:5173',
+      'https://chakraindustries-backend.onrender.com',
       'http://localhost:3000',
+      'http://localhost:5173',
+      'http://localhost:5174',
+      'http://localhost:4173',
     ];
     const allowedPatterns = [
       /\.netlify\.app$/,
@@ -129,6 +133,7 @@ app.use('/api/sales-orders', salesOrderRoutes);
 app.use('/api/tally', tallyRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/forecasting', forecastingRoutes);
+app.use('/api/invoices',    invoiceRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars
