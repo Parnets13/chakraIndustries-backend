@@ -1,21 +1,38 @@
 import express from 'express';
-import * as oemFinishedGoodsController from '../controllers/oemFinishedGoodsController.js';
+import {
+  getAllOEMFinishedGoods, getOEMFinishedGoodsByOrder, getOEMFinishedGoodsByBrand,
+  getOEMFinishedGoodsById, createOEMFinishedGoods, updateOEMFinishedGoods,
+  updateOEMFinishedGoodsStatus, deleteOEMFinishedGoods, getOEMFinishedGoodsStats,
+} from '../controllers/oemFinishedGoodsController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// Create Finished Goods
-router.post('/', oemFinishedGoodsController.createFinishedGoods);
+// Stats
+router.get('/stats/dashboard', protect, getOEMFinishedGoodsStats);
 
-// Get all Finished Goods
-router.get('/', oemFinishedGoodsController.getFinishedGoods);
+// All finished goods
+router.get('/', protect, getAllOEMFinishedGoods);
 
-// Get Finished Goods by ID
-router.get('/:id', oemFinishedGoodsController.getFinishedGoodsById);
+// Finished goods by brand
+router.get('/brand/:brandId', protect, getOEMFinishedGoodsByBrand);
 
-// Update Finished Goods Status
-router.put('/:id/status', oemFinishedGoodsController.updateFinishedGoodsStatus);
+// Finished goods by order
+router.get('/order/:orderId', protect, getOEMFinishedGoodsByOrder);
 
-// Get Finished Goods Summary
-router.get('/summary/all', oemFinishedGoodsController.getFinishedGoodsSummary);
+// Single finished goods
+router.get('/:id', protect, getOEMFinishedGoodsById);
+
+// Create finished goods
+router.post('/', protect, createOEMFinishedGoods);
+
+// Update finished goods
+router.put('/:id', protect, updateOEMFinishedGoods);
+
+// Update status
+router.put('/:id/status', protect, updateOEMFinishedGoodsStatus);
+
+// Delete finished goods
+router.delete('/:id', protect, deleteOEMFinishedGoods);
 
 export default router;

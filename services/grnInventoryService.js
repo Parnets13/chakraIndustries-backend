@@ -28,8 +28,8 @@ export const createBatchFromGRN = async (grn) => {
       
       batch = new Batch({
         batchNo: grn.batchNo,
-        sku: grn.items?.[0]?.name || 'UNKNOWN',
-        itemName: grn.items?.[0]?.name || 'Unknown Item',
+        sku: grn.items?.[0]?.itemName || 'UNKNOWN',
+        itemName: grn.items?.[0]?.itemName || 'Unknown Item',
         quantity: grn.acceptedQuantity || grn.receivedQuantity,
         mfgDate: grn.mfgDate,
         expiryDate: grn.expiryDate,
@@ -75,15 +75,15 @@ export const createInventoryFromGRN = async (grn) => {
 
     // Check if inventory already exists for this batch
     let inventory = await Inventory.findOne({
-      sku: grn.items?.[0]?.name,
+      sku: grn.items?.[0]?.itemName,
       warehouse: grn.warehouseId,
       batch: grn.batchNo
     });
 
     if (!inventory) {
       inventory = new Inventory({
-        sku: grn.items?.[0]?.name || 'UNKNOWN',
-        name: grn.items?.[0]?.name || 'Unknown Item',
+        sku: grn.items?.[0]?.itemName || 'UNKNOWN',
+        name: grn.items?.[0]?.itemName || 'Unknown Item',
         warehouse: grn.warehouseId,
         totalQuantity: grn.acceptedQuantity,
         availableQuantity: grn.acceptedQuantity,

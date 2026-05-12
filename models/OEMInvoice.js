@@ -7,6 +7,10 @@ const oemInvoiceSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  oemBrand: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'OEMBrand'
+  },
   oemOrderId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'OEMOrder',
@@ -53,6 +57,13 @@ const oemInvoiceSchema = new mongoose.Schema({
   },
   paymentDate: Date,
   paymentMethod: String,
+  paymentHistory: [{
+    amount: Number,
+    date: Date,
+    method: String,
+    reference: String,
+    remarks: String
+  }],
   notes: String,
   tallyDocumentId: String,
   tallyStatus: {

@@ -20,10 +20,25 @@ export const getAllWorkOrders = async (req, res) => {
     if (oemBrand) filter.oemBrand = oemBrand;
 
     const wos = await WorkOrder.find(filter)
-      .populate('bomId', 'bomId product version')
-      .populate('oemBrand', 'brandId name code color')
+      .populate({
+        path: 'bomId',
+        select: 'bomId product version components overheadPct labourCost status'
+      })
+      .populate('oemBrand', 'brandId name code color status')
       .sort({ createdAt: -1 });
-    res.json({ success: true, data: wos });
+    
+    const data = wos.map(wo => {
+      const woData = wo.toObject();
+      
+      // Calculate efficiency percentage
+      if (woData.qty > 0) {
+        woData.efficiency = Math.round((woData.produced / woData.qty) * 100);
+      }
+      
+      return woData;
+    });
+    
+    res.json({ success: true, data });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
@@ -31,35 +46,106 @@ export const getAllWorkOrders = async (req, res) => {
 export const getWorkOrderById = async (req, res) => {
   try {
     const wo = await WorkOrder.findById(req.params.id)
-      .populate('bomId', 'bomId product version components overheadPct labourCost')
-      .populate('oemBrand', 'brandId name code color')
-      .populate('materialConsumption.vendorId', 'vendorId companyName')
-      .populate('materialConsumption.oemBrand', 'brandId name');
+      .populate({
+        path: 'bomId',
+        select: 'bomId product version components overheadPct labourCost status',
+        populate: [
+          {
+            path: 'components.vendorId',
+            select: 'vendorId companyName'
+          },
+          {
+            path: 'components.oemBrand',
+            select: 'brandId name code'
+          }
+        ]
+      })
+      .populate('oemBrand', 'brandId name code color status')
+      .populate({
+        path: 'materialConsumption.vendorId',
+        select: 'vendorId companyName'
+      })
+      .populate({
+        path: 'materialConsumption.oemBrand',
+        select: 'brandId name code'
+      });
+    
     if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
-    res.json({ success: true, data: wo });
+    
+    const woData = wo.toObject();
+    
+    // Enhance material consumption with calculated costs
+    if (woData.materialConsumption) {
+      woData.materialConsumption = woData.materialConsumption.map(mat => ({
+        ...mat,
+        totalCost: Math.round((mat.plannedQty || 0) * (mat.unitCost || 0) * 100) / 100,
+        consumedCost: Math.round((mat.consumedQty || 0) * (mat.unitCost || 0) * 100) / 100,
+      }));
+    }
+    
+    res.json({ success: true, data: woData });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
 // ── CREATE ────────────────────────────────────────────────────────────────────
 export const createWorkOrder = async (req, res) => {
   try {
-    const { product, bomId, qty } = req.body;
-    if (!product?.trim()) return res.status(400).json({ success: false, message: 'Product is required' });
-    if (!qty || qty < 1)  return res.status(400).json({ success: false, message: 'Quantity must be at least 1' });
+    const { product, bomId, qty, woId, shift, startDate, endDate, priority, remarks, oemBrand, oemProduct } = req.body;
+    
+    console.log('Create WO Request Body:', req.body);
+    
+    // Validate required fields
+    if (!product || !product.trim()) {
+      return res.status(400).json({ success: false, message: 'Product name is required' });
+    }
+    if (!qty || parseInt(qty) < 1) {
+      return res.status(400).json({ success: false, message: 'Quantity must be at least 1' });
+    }
+    if (!startDate) {
+      return res.status(400).json({ success: false, message: 'Start date is required' });
+    }
+    
+    // Auto-generate woId if not provided
+    const finalWoId = woId || await generateWoId();
+    
+    // Parse startDate properly
+    const parsedStartDate = new Date(startDate);
+    if (isNaN(parsedStartDate.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid start date format' });
+    }
+    
+    const parsedEndDate = endDate ? new Date(endDate) : parsedStartDate;
 
     let plannedCost = 0;
     if (bomId) {
       const bom = await BOM.findById(bomId);
       if (!bom) return res.status(400).json({ success: false, message: 'Referenced BOM not found' });
       const mat = bom.components.reduce((s, c) => s + c.qty * (1 + (c.scrapFactor || 0) / 100) * (c.unitCost || 0), 0);
-      plannedCost = (mat * (1 + (bom.overheadPct || 0) / 100) + (bom.labourCost || 0)) * qty;
+      plannedCost = (mat * (1 + (bom.overheadPct || 0) / 100) + (bom.labourCost || 0)) * parseInt(qty);
     }
 
-    const woId = await generateWoId();
-    const wo = await WorkOrder.create({ woId, plannedCost, ...req.body, status: 'Pending' });
+    const wo = await WorkOrder.create({
+      woId: finalWoId,
+      product: product.trim(),
+      bomId: bomId || null,
+      oemBrand: oemBrand || null,
+      oemProduct: oemProduct || null,
+      qty: parseInt(qty),
+      shift: shift || 'General',
+      startDate: parsedStartDate,
+      endDate: parsedEndDate,
+      priority: priority || 'Normal',
+      remarks: remarks || '',
+      plannedCost,
+      status: 'Pending'
+    });
+    
     const populated = await wo.populate('bomId', 'bomId product version');
     res.status(201).json({ success: true, message: 'Work order created', data: populated });
-  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+  } catch (err) {
+    console.error('Create Work Order Error:', err.message, err.stack);
+    res.status(400).json({ success: false, message: err.message });
+  }
 };
 
 // ── UPDATE header ─────────────────────────────────────────────────────────────

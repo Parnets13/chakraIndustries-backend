@@ -73,12 +73,15 @@ export const deleteBrand = async (req, res) => {
 
 export const getProductsByBrand = async (req, res) => {
   try {
-    const products = await OEMProduct.find({ oemBrand: req.params.brandId })
+    const { brandId } = req.params;
+    const products = await OEMProduct.find({ oemBrand: brandId })
       .populate('bom', 'bomId product version')
-      .populate('masterProduct', 'sku name')
       .sort({ createdAt: -1 });
     res.json({ success: true, data: products });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+  } catch (err) { 
+    console.error('getProductsByBrand error:', err.message);
+    res.status(500).json({ success: false, message: err.message }); 
+  }
 };
 
 export const getAllProducts = async (req, res) => {
@@ -86,10 +89,12 @@ export const getAllProducts = async (req, res) => {
     const products = await OEMProduct.find()
       .populate('oemBrand', 'brandId name code color')
       .populate('bom', 'bomId product version')
-      .populate('masterProduct', 'sku name')
       .sort({ createdAt: -1 });
     res.json({ success: true, data: products });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+  } catch (err) { 
+    console.error('getAllProducts error:', err.message);
+    res.status(500).json({ success: false, message: err.message }); 
+  }
 };
 
 export const createProduct = async (req, res) => {
@@ -104,20 +109,24 @@ export const createProduct = async (req, res) => {
     const product = await OEMProduct.create(req.body);
     const populated = await product.populate([
       { path: 'bom', select: 'bomId product version' },
-      { path: 'masterProduct', select: 'sku name' },
     ]);
     res.status(201).json({ success: true, message: 'OEM product mapping created', data: populated });
-  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+  } catch (err) { 
+    console.error('createProduct error:', err.message);
+    res.status(400).json({ success: false, message: err.message }); 
+  }
 };
 
 export const updateProduct = async (req, res) => {
   try {
     const product = await OEMProduct.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true })
-      .populate('bom', 'bomId product version')
-      .populate('masterProduct', 'sku name');
+      .populate('bom', 'bomId product version');
     if (!product) return res.status(404).json({ success: false, message: 'OEM product not found' });
     res.json({ success: true, message: 'OEM product updated', data: product });
-  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+  } catch (err) { 
+    console.error('updateProduct error:', err.message);
+    res.status(400).json({ success: false, message: err.message }); 
+  }
 };
 
 export const deleteProduct = async (req, res) => {

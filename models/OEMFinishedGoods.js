@@ -7,6 +7,10 @@ const oemFinishedGoodsSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  oemBrand: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'OEMBrand'
+  },
   oemOrderId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'OEMOrder',

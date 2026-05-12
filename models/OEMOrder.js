@@ -100,6 +100,9 @@ const oemOrderSchema = new mongoose.Schema({
   materialCost: Number,
   laborCost: Number,
   overheadCost: Number,
+  actualMaterialCost: Number,
+  actualLaborCost: Number,
+  actualOverheadCost: Number,
   // QC Details
   qcCheckId: mongoose.Schema.Types.ObjectId,
   qcResult: String,
@@ -118,6 +121,11 @@ const oemOrderSchema = new mongoose.Schema({
   tallyDocumentId: String,
   tallyReference: String,
   tallyError: String,
+  // Linked Documents
+  linkedPRId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PurchaseRequisition'
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

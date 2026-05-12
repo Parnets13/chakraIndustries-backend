@@ -1,214 +1,203 @@
 import OEMInvoice from '../models/OEMInvoice.js';
 import OEMOrder from '../models/OEMOrder.js';
-import BrandOrder from '../models/BrandOrder.js';
+import OEMBrand from '../models/OEMBrand.js';
 
-// Generate unique Invoice Number
-const generateInvoiceNumber = async () => {
-  const count = await OEMInvoice.countDocuments();
-  const year = new Date().getFullYear();
-  return `INV-${year}-${String(count + 1).padStart(5, '0')}`;
+// ── ID generator ──────────────────────────────────────────────────────────────
+async function genInvoiceNumber() {
+  const last = await OEMInvoice.findOne().sort({ createdAt: -1 }).select('invoiceNumber');
+  let n = 1;
+  if (last?.invoiceNumber) { const m = last.invoiceNumber.match(/(\d+)$/); if (m) n = parseInt(m[1]) + 1; }
+  let id = `OEMINV-${String(n).padStart(5, '0')}`;
+  while (await OEMInvoice.findOne({ invoiceNumber: id })) { n++; id = `OEMINV-${String(n).padStart(5, '0')}`; }
+  return id;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// OEM INVOICE CRUD
+// ══════════════════════════════════════════════════════════════════════════════
+
+export const getAllOEMInvoices = async (req, res) => {
+  try {
+    const { paymentStatus, brandId, skip = 0, limit = 50 } = req.query;
+    const query = {};
+    if (paymentStatus) query.paymentStatus = paymentStatus;
+    if (brandId) query.oemBrand = brandId;
+
+    const invoices = await OEMInvoice.find(query)
+      .populate('oemOrderId', 'oemOrderId product quantity')
+      .populate('corporateClientId', 'clientName email')
+      .sort({ createdAt: -1 })
+      .skip(parseInt(skip))
+      .limit(parseInt(limit));
+
+    const total = await OEMInvoice.countDocuments(query);
+    res.json({ success: true, data: invoices, total });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// Create Invoice from OEM Order
-export const createInvoice = async (req, res) => {
+export const getOEMInvoicesByBrand = async (req, res) => {
   try {
-    const { oemOrderId, unitPrice, taxRate, paymentTerms, notes } = req.body;
+    const { brandId } = req.params;
+    const { paymentStatus, skip = 0, limit = 50 } = req.query;
+    const query = { oemBrand: brandId };
+    if (paymentStatus) query.paymentStatus = paymentStatus;
 
-    // Verify OEM order exists
-    const oemOrder = await OEMOrder.findById(oemOrderId).populate('brandOrderId');
-    if (!oemOrder) {
-      return res.status(404).json({ success: false, message: 'OEM order not found' });
-    }
+    const invoices = await OEMInvoice.find(query)
+      .populate('oemOrderId', 'oemOrderId product quantity')
+      .populate('corporateClientId', 'clientName email')
+      .sort({ createdAt: -1 })
+      .skip(parseInt(skip))
+      .limit(parseInt(limit));
 
-    const brandOrder = oemOrder.brandOrderId;
+    const total = await OEMInvoice.countDocuments(query);
+    res.json({ success: true, data: invoices, total });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
 
-    // Calculate amounts
-    const subtotal = unitPrice * oemOrder.quantity;
-    const taxAmount = (subtotal * (taxRate || 18)) / 100;
+export const getOEMInvoiceById = async (req, res) => {
+  try {
+    const invoice = await OEMInvoice.findById(req.params.id)
+      .populate('oemOrderId', 'oemOrderId product quantity bomId')
+      .populate('corporateClientId', 'clientName email contactPerson');
+    if (!invoice) return res.status(404).json({ success: false, message: 'OEM invoice not found' });
+    res.json({ success: true, data: invoice });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+export const createOEMInvoice = async (req, res) => {
+  try {
+    const { oemOrderId, corporateClientId, quantity, unitPrice, taxRate = 18 } = req.body;
+    if (!oemOrderId) return res.status(400).json({ success: false, message: 'OEM order is required' });
+    if (!corporateClientId) return res.status(400).json({ success: false, message: 'Corporate client is required' });
+    if (!quantity || quantity < 1) return res.status(400).json({ success: false, message: 'Quantity must be at least 1' });
+    if (!unitPrice || unitPrice < 0) return res.status(400).json({ success: false, message: 'Unit price is required' });
+
+    const order = await OEMOrder.findById(oemOrderId);
+    if (!order) return res.status(400).json({ success: false, message: 'OEM order not found' });
+
+    const invoiceNumber = await genInvoiceNumber();
+    const subtotal = quantity * unitPrice;
+    const taxAmount = (subtotal * taxRate) / 100;
     const totalAmount = subtotal + taxAmount;
 
-    const invoiceNumber = await generateInvoiceNumber();
-    const dueDate = new Date();
-    dueDate.setDate(dueDate.getDate() + 30); // 30 days payment terms
-
-    const invoice = new OEMInvoice({
+    const invoice = await OEMInvoice.create({
       invoiceNumber,
       oemOrderId,
-      brandOrderId: brandOrder._id,
-      corporateClientId: brandOrder.corporateClientId,
-      product: oemOrder.product,
-      quantity: oemOrder.quantity,
-      unit: oemOrder.unit,
+      corporateClientId,
+      quantity,
       unitPrice,
       subtotal,
-      taxRate: taxRate || 18,
+      taxRate,
       taxAmount,
       totalAmount,
-      dueDate,
-      paymentTerms,
-      notes,
-      createdBy: req.user?.id
+      ...req.body,
+    });
+
+    const populated = await invoice.populate([
+      { path: 'oemOrderId', select: 'oemOrderId product quantity' },
+      { path: 'corporateClientId', select: 'clientName email' },
+    ]);
+
+    res.status(201).json({ success: true, message: 'OEM invoice created', data: populated });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const updateOEMInvoice = async (req, res) => {
+  try {
+    const invoice = await OEMInvoice.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true })
+      .populate('oemOrderId', 'oemOrderId product quantity')
+      .populate('corporateClientId', 'clientName email');
+    if (!invoice) return res.status(404).json({ success: false, message: 'OEM invoice not found' });
+    res.json({ success: true, message: 'OEM invoice updated', data: invoice });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const updateOEMInvoicePaymentStatus = async (req, res) => {
+  try {
+    const { paymentStatus } = req.body;
+    if (!paymentStatus) return res.status(400).json({ success: false, message: 'Payment status is required' });
+
+    const invoice = await OEMInvoice.findByIdAndUpdate(req.params.id, { paymentStatus }, { new: true })
+      .populate('oemOrderId', 'oemOrderId product quantity')
+      .populate('corporateClientId', 'clientName email');
+    if (!invoice) return res.status(404).json({ success: false, message: 'OEM invoice not found' });
+    res.json({ success: true, message: 'Payment status updated', data: invoice });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+export const recordOEMInvoicePayment = async (req, res) => {
+  try {
+    const { amount, method, reference, remarks } = req.body;
+    if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
+
+    const invoice = await OEMInvoice.findById(req.params.id);
+    if (!invoice) return res.status(404).json({ success: false, message: 'OEM invoice not found' });
+
+    const newAmountPaid = (invoice.amountPaid || 0) + amount;
+    const newPaymentStatus = newAmountPaid >= invoice.totalAmount ? 'Paid' : 'Partial';
+
+    invoice.amountPaid = newAmountPaid;
+    invoice.paymentStatus = newPaymentStatus;
+    invoice.paymentDate = new Date();
+    invoice.paymentHistory.push({
+      amount,
+      date: new Date(),
+      method,
+      reference,
+      remarks,
     });
 
     await invoice.save();
+    const populated = await invoice.populate([
+      { path: 'oemOrderId', select: 'oemOrderId product quantity' },
+      { path: 'corporateClientId', select: 'clientName email' },
+    ]);
 
-    // Update OEM order
-    await OEMOrder.findByIdAndUpdate(oemOrderId, {
-      billingStatus: 'Invoiced',
-      invoiceNumber,
-      invoiceDate: new Date(),
-      invoiceAmount: totalAmount,
-      status: 'Invoiced'
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Invoice created successfully',
-      data: invoice
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    res.json({ success: true, message: 'Payment recorded', data: populated });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// Get all Invoices
-export const getInvoices = async (req, res) => {
+export const deleteOEMInvoice = async (req, res) => {
   try {
-    const { paymentStatus, oemOrderId, corporateClientId } = req.query;
-    const filter = {};
-
-    if (paymentStatus) filter.paymentStatus = paymentStatus;
-    if (oemOrderId) filter.oemOrderId = oemOrderId;
-    if (corporateClientId) filter.corporateClientId = corporateClientId;
-
-    const invoices = await OEMInvoice.find(filter)
-      .populate('oemOrderId', 'oemOrderId product quantity')
-      .populate('brandOrderId', 'brandOrderId product')
-      .populate('corporateClientId', 'name email')
-      .populate('createdBy', 'name email')
-      .sort({ invoiceDate: -1 });
-
-    res.json({ success: true, data: invoices });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    const invoice = await OEMInvoice.findByIdAndDelete(req.params.id);
+    if (!invoice) return res.status(404).json({ success: false, message: 'OEM invoice not found' });
+    res.json({ success: true, message: 'OEM invoice deleted' });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// Get Invoice by ID
-export const getInvoiceById = async (req, res) => {
+// ══════════════════════════════════════════════════════════════════════════════
+// OEM INVOICE STATS
+// ══════════════════════════════════════════════════════════════════════════════
+export const getOEMInvoiceStats = async (req, res) => {
   try {
-    const invoice = await OEMInvoice.findById(req.params.id)
-      .populate('oemOrderId')
-      .populate('brandOrderId')
-      .populate('corporateClientId')
-      .populate('createdBy', 'name email');
+    const { brandId } = req.query;
+    const query = brandId ? { oemBrand: brandId } : {};
 
-    if (!invoice) {
-      return res.status(404).json({ success: false, message: 'Invoice not found' });
-    }
+    const total = await OEMInvoice.countDocuments(query);
+    const byStatus = await OEMInvoice.aggregate([
+      { $match: query },
+      { $group: { _id: '$paymentStatus', count: { $sum: 1 } } },
+    ]);
 
-    res.json({ success: true, data: invoice });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
+    const totalAmount = await OEMInvoice.aggregate([
+      { $match: query },
+      { $group: { _id: null, total: { $sum: '$totalAmount' } } },
+    ]);
 
-// Record Payment
-export const recordPayment = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { amountPaid, paymentMethod, paymentDate } = req.body;
-
-    const invoice = await OEMInvoice.findById(id);
-    if (!invoice) {
-      return res.status(404).json({ success: false, message: 'Invoice not found' });
-    }
-
-    const totalPaid = invoice.amountPaid + amountPaid;
-    let paymentStatus = 'Partial';
-
-    if (totalPaid >= invoice.totalAmount) {
-      paymentStatus = 'Paid';
-    }
-
-    const updatedInvoice = await OEMInvoice.findByIdAndUpdate(
-      id,
-      {
-        amountPaid: totalPaid,
-        paymentStatus,
-        paymentMethod,
-        paymentDate: paymentDate || new Date()
-      },
-      { new: true }
-    );
+    const totalPaid = await OEMInvoice.aggregate([
+      { $match: query },
+      { $group: { _id: null, total: { $sum: '$amountPaid' } } },
+    ]);
 
     res.json({
       success: true,
-      message: 'Payment recorded successfully',
-      data: updatedInvoice
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Sync Invoice to Tally
-export const syncToTally = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { tallyDocumentId } = req.body;
-
-    const invoice = await OEMInvoice.findByIdAndUpdate(
-      id,
-      {
-        tallyDocumentId,
-        tallyStatus: 'Synced'
+      data: {
+        totalInvoices: total,
+        byStatus: byStatus.reduce((acc, s) => ({ ...acc, [s._id]: s.count }), {}),
+        totalAmount: totalAmount[0]?.total || 0,
+        totalPaid: totalPaid[0]?.total || 0,
+        totalPending: (totalAmount[0]?.total || 0) - (totalPaid[0]?.total || 0),
       },
-      { new: true }
-    );
-
-    if (!invoice) {
-      return res.status(404).json({ success: false, message: 'Invoice not found' });
-    }
-
-    // Update OEM order
-    await OEMOrder.findByIdAndUpdate(invoice.oemOrderId, {
-      tallyStatus: 'Synced',
-      tallyDocumentId,
-      status: 'Tally-Synced'
     });
-
-    res.json({
-      success: true,
-      message: 'Invoice synced to Tally successfully',
-      data: invoice
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// Get Invoice Summary
-export const getInvoiceSummary = async (req, res) => {
-  try {
-    const summary = {
-      totalInvoices: await OEMInvoice.countDocuments(),
-      byPaymentStatus: await OEMInvoice.aggregate([
-        { $group: { _id: '$paymentStatus', count: { $sum: 1 } } }
-      ]),
-      totalRevenue: await OEMInvoice.aggregate([
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }
-      ]),
-      totalPaid: await OEMInvoice.aggregate([
-        { $group: { _id: null, total: { $sum: '$amountPaid' } } }
-      ]),
-      tallySync: await OEMInvoice.aggregate([
-        { $group: { _id: '$tallyStatus', count: { $sum: 1 } } }
-      ])
-    };
-
-    res.json({ success: true, data: summary });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

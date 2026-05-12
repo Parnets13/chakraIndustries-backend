@@ -1,36 +1,34 @@
 import express from 'express';
-import * as oemOrderController from '../controllers/oemOrderController.js';
+import {
+  getAllOEMOrders, getOEMOrdersByBrand, getOEMOrderById, createOEMOrder,
+  updateOEMOrder, updateOEMOrderStatus, deleteOEMOrder, getOEMOrderStats,
+} from '../controllers/oemOrderController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// Create OEM Order
-router.post('/', oemOrderController.createOEMOrder);
+// Stats
+router.get('/stats/dashboard', protect, getOEMOrderStats);
 
-// Get all OEM Orders
-router.get('/', oemOrderController.getOEMOrders);
+// All orders
+router.get('/', protect, getAllOEMOrders);
 
-// Get OEM Order Summary
-router.get('/summary/all', oemOrderController.getOEMOrderSummary);
+// Orders by brand
+router.get('/brand/:brandId', protect, getOEMOrdersByBrand);
 
-// Get OEM Order by ID
-router.get('/:id', oemOrderController.getOEMOrderById);
+// Single order
+router.get('/:id', protect, getOEMOrderById);
 
-// Validate Inventory
-router.post('/:id/validate-inventory', oemOrderController.validateInventory);
+// Create order
+router.post('/', protect, createOEMOrder);
 
-// Reserve Materials
-router.post('/:id/reserve-materials', oemOrderController.reserveMaterials);
+// Update order
+router.put('/:id', protect, updateOEMOrder);
 
-// Update OEM Order Status
-router.put('/:id/status', oemOrderController.updateOEMOrderStatus);
+// Update status
+router.put('/:id/status', protect, updateOEMOrderStatus);
 
-// Get Workflow Status
-router.get('/:id/workflow-status', oemOrderController.getOEMWorkflowStatus);
-
-// Complete OEM Workflow
-router.post('/:id/complete-workflow', oemOrderController.completeOEMWorkflow);
-
-// Trigger Auto Workflows
-router.post('/:id/trigger-workflow', oemOrderController.triggerAutoWorkflows);
+// Delete order
+router.delete('/:id', protect, deleteOEMOrder);
 
 export default router;

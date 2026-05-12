@@ -53,7 +53,7 @@ const grnSchema = new mongoose.Schema({
     default: Date.now
   },
   items: [{
-    name:     { type: String },
+    itemName:     { type: String },
     orderedQty:  { type: Number },
     receivedQty: { type: Number },
     unit:     { type: String },

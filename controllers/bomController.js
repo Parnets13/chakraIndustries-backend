@@ -29,10 +29,32 @@ export const getAllBOMs = async (req, res) => {
     if (type)     filter.type = type;
 
     const boms = await BOM.find(filter)
-      .populate('oemBrand', 'brandId name code color')
+      .populate('oemBrand', 'brandId name code color status')
+      .populate({
+        path: 'components.vendorId',
+        select: 'vendorId companyName'
+      })
+      .populate({
+        path: 'components.oemBrand',
+        select: 'brandId name code'
+      })
       .sort({ createdAt: -1 });
 
-    const data = boms.map(b => ({ ...b.toObject(), ...calcCosts(b) }));
+    const data = boms.map(b => {
+      const bomObj = b.toObject();
+      const costs = calcCosts(b);
+      
+      // Enhance components with calculated costs
+      if (bomObj.components) {
+        bomObj.components = bomObj.components.map(comp => ({
+          ...comp,
+          totalCost: Math.round((comp.qty || 0) * (comp.unitCost || 0) * 100) / 100,
+        }));
+      }
+      
+      return { ...bomObj, ...costs };
+    });
+    
     res.json({ success: true, data });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -41,13 +63,35 @@ export const getAllBOMs = async (req, res) => {
 export const getBOMById = async (req, res) => {
   try {
     const bom = await BOM.findById(req.params.id)
-      .populate('oemBrand', 'brandId name code color')
-      .populate('components.vendorId', 'vendorId companyName')
-      .populate('components.oemBrand', 'brandId name code')
-      .populate('components.subBomId', 'bomId product version');
+      .populate('oemBrand', 'brandId name code color status')
+      .populate({
+        path: 'components.vendorId',
+        select: 'vendorId companyName contactPerson email phone'
+      })
+      .populate({
+        path: 'components.oemBrand',
+        select: 'brandId name code color status'
+      })
+      .populate({
+        path: 'components.subBomId',
+        select: 'bomId product version status components'
+      });
 
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
-    res.json({ success: true, data: { ...bom.toObject(), ...calcCosts(bom) } });
+    
+    const bomData = bom.toObject();
+    const costs = calcCosts(bom);
+    
+    // Enhance components with calculated costs
+    if (bomData.components) {
+      bomData.components = bomData.components.map(comp => ({
+        ...comp,
+        totalCost: Math.round((comp.qty || 0) * (comp.unitCost || 0) * 100) / 100,
+        scrapQty: Math.round((comp.qty || 0) * ((comp.scrapFactor || 0) / 100) * 1000) / 1000,
+      }));
+    }
+    
+    res.json({ success: true, data: { ...bomData, ...costs } });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 

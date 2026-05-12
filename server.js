@@ -45,6 +45,10 @@ import salesOrderRoutes from './routes/salesOrderRoutes.js';
 import tallyRoutes from './routes/tallyRoutes.js';
 import reportsRoutes from './routes/reportsRoutes.js';
 import forecastingRoutes from './routes/forecastingRoutes.js';
+import packagingRoutes from './routes/packagingRoutes.js';
+import oemOrderRoutes from './routes/oemOrderRoutes.js';
+import oemInvoiceRoutes from './routes/oemInvoiceRoutes.js';
+import oemFinishedGoodsRoutes from './routes/oemFinishedGoodsRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -52,6 +56,12 @@ import './models/StockMovement.js';
 import './models/SalesOrder.js';
 import './models/TallyConfig.js';
 import './models/TallySyncLog.js';
+import './models/OEMBrand.js';
+import './models/OEMProduct.js';
+import './models/OEMOrder.js';
+import './models/OEMInvoice.js';
+import './models/OEMFinishedGoods.js';
+import './models/Packaging.js';
 
 dotenv.config();
 
@@ -129,6 +139,10 @@ app.use('/api/sales-orders', salesOrderRoutes);
 app.use('/api/tally', tallyRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/forecasting', forecastingRoutes);
+app.use('/api/packaging', packagingRoutes);
+app.use('/api/oem-orders', oemOrderRoutes);
+app.use('/api/oem-invoices', oemInvoiceRoutes);
+app.use('/api/oem-finished-goods', oemFinishedGoodsRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars

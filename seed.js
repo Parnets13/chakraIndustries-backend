@@ -8,15 +8,15 @@ dotenv.config();
 const SEED_USERS = [
   {
     name:     process.env.SUPER_ADMIN_NAME     || 'Super Admin',
-    email:    process.env.SUPER_ADMIN_EMAIL    || 'chakra@admin.com',
-    password: process.env.SUPER_ADMIN_PASSWORD || 'chakra123',
+    email:    process.env.SUPER_ADMIN_EMAIL    || 'admin@chakra.com',
+    password: process.env.SUPER_ADMIN_PASSWORD || 'admin123',
     role:     'super_admin',
   },
-  { name: 'Priya Sharma', email: 'ceo@chakra.in',        password: 'mgmt123',     role: 'management' },
-  { name: 'Ramesh Gupta', email: 'purchase@chakra.in',   password: 'purchase123', role: 'purchase_manager' },
-  { name: 'Sunil Das',    email: 'production@chakra.in', password: 'prod123',     role: 'production_manager' },
-  { name: 'Vijay Rao',    email: 'dealer@chakra.in',     password: 'dealer123',   role: 'dealer' },
-  { name: 'Meera Patel',  email: 'client@chakra.in',     password: 'client123',   role: 'corporate_client' },
+  { name: 'Priya Sharma', email: 'ceo@chakra.com',        password: 'mgmt123',     role: 'management' },
+  { name: 'Ramesh Gupta', email: 'purchase@chakra.com',   password: 'purchase123', role: 'purchase_manager' },
+  { name: 'Sunil Das',    email: 'production@chakra.com', password: 'prod123',     role: 'production_manager' },
+  { name: 'Vijay Rao',    email: 'dealer@chakra.com',     password: 'dealer123',   role: 'dealer' },
+  { name: 'Meera Patel',  email: 'client@chakra.com',     password: 'client123',   role: 'corporate_client' },
 ];
 
 const DEFAULT_PERMISSIONS = {

@@ -1,5 +1,6 @@
 import express from 'express';
 import {
+  getPickingStats,
   getAllPickingLists,
   getPickingListById,
   createPickingList,
@@ -11,6 +12,7 @@ import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
+router.get('/stats', getPickingStats);
 router.get('/', getAllPickingLists);
 router.get('/:id', getPickingListById);
 router.post('/', createPickingList);

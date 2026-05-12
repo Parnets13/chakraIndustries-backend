@@ -1,24 +1,38 @@
 import express from 'express';
-import * as oemInvoiceController from '../controllers/oemInvoiceController.js';
+import {
+  getAllOEMInvoices, getOEMInvoicesByBrand, getOEMInvoiceById, createOEMInvoice,
+  updateOEMInvoice, updateOEMInvoicePaymentStatus, recordOEMInvoicePayment,
+  deleteOEMInvoice, getOEMInvoiceStats,
+} from '../controllers/oemInvoiceController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// Create Invoice
-router.post('/', oemInvoiceController.createInvoice);
+// Stats
+router.get('/stats/dashboard', protect, getOEMInvoiceStats);
 
-// Get all Invoices
-router.get('/', oemInvoiceController.getInvoices);
+// All invoices
+router.get('/', protect, getAllOEMInvoices);
 
-// Get Invoice by ID
-router.get('/:id', oemInvoiceController.getInvoiceById);
+// Invoices by brand
+router.get('/brand/:brandId', protect, getOEMInvoicesByBrand);
 
-// Record Payment
-router.post('/:id/payment', oemInvoiceController.recordPayment);
+// Single invoice
+router.get('/:id', protect, getOEMInvoiceById);
 
-// Sync to Tally
-router.post('/:id/sync-tally', oemInvoiceController.syncToTally);
+// Create invoice
+router.post('/', protect, createOEMInvoice);
 
-// Get Invoice Summary
-router.get('/summary/all', oemInvoiceController.getInvoiceSummary);
+// Update invoice
+router.put('/:id', protect, updateOEMInvoice);
+
+// Update payment status
+router.put('/:id/payment-status', protect, updateOEMInvoicePaymentStatus);
+
+// Record payment
+router.post('/:id/payment', protect, recordOEMInvoicePayment);
+
+// Delete invoice
+router.delete('/:id', protect, deleteOEMInvoice);
 
 export default router;
