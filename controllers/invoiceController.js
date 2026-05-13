@@ -20,12 +20,29 @@ const computeTotals = (items = []) => {
     const base     = (item.qty || 0) * (item.rate || 0);
     const discAmt  = base * ((item.discount || 0) / 100);
     const amount   = base - discAmt;
-    const taxAmt   = amount * ((item.taxRate || 0) / 100);
+
+    // Use stored tax amounts if provided (from Excel), otherwise compute from taxRate
+    const storedCGST = item.cgst || 0;
+    const storedSGST = item.sgst || 0;
+    const storedIGST = item.igst || 0;
+    const storedTax  = storedCGST + storedSGST + storedIGST;
+
+    const taxAmt   = storedTax > 0 ? storedTax : amount * ((item.taxRate || 0) / 100);
     const total    = amount + taxAmt;
+
     subtotal      += base;
     totalDiscount += discAmt;
     totalTax      += taxAmt;
-    return { ...item, amount: +amount.toFixed(2), taxAmount: +taxAmt.toFixed(2), total: +total.toFixed(2) };
+
+    return {
+      ...item,
+      amount:    +amount.toFixed(2),
+      taxAmount: +taxAmt.toFixed(2),
+      total:     +total.toFixed(2),
+      cgst:      storedCGST,
+      sgst:      storedSGST,
+      igst:      storedIGST,
+    };
   });
   const grandTotal = subtotal - totalDiscount + totalTax;
   return {

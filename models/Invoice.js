@@ -11,6 +11,10 @@ const invoiceItemSchema = new mongoose.Schema({
   amount:      { type: Number, required: true },   // qty * rate after discount
   taxAmount:   { type: Number, default: 0 },
   total:       { type: Number, required: true },   // amount + taxAmount
+  // Explicit tax breakdown (from Excel or manual entry)
+  cgst:        { type: Number, default: 0 },       // CGST amount
+  sgst:        { type: Number, default: 0 },       // SGST amount
+  igst:        { type: Number, default: 0 },       // IGST amount (inter-state)
 }, { _id: false });
 
 const invoiceSchema = new mongoose.Schema({
