@@ -1,5 +1,20 @@
 import PickingList from '../models/PickingList.js';
-import Inventory from '../models/Inventory.js';
+import InventoryItem from '../models/InventoryItem.js';
+
+// Get picking stats
+export const getPickingStats = async (req, res) => {
+  try {
+    const [total, pending, inProgress, completed] = await Promise.all([
+      PickingList.countDocuments(),
+      PickingList.countDocuments({ status: 'Pending' }),
+      PickingList.countDocuments({ status: 'In Progress' }),
+      PickingList.countDocuments({ status: 'Completed' }),
+    ]);
+    res.json({ success: true, data: { total, pending, inProgress, completed } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
 
 // Get all picking lists
 export const getAllPickingLists = async (req, res) => {

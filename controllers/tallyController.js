@@ -1,7 +1,6 @@
 import TallyConfig from '../models/TallyConfig.js';
 import TallySyncLog from '../models/TallySyncLog.js';
 import PurchaseOrder from '../models/PurchaseOrder.js';
-import Inventory from '../models/Inventory.js';
 import ItemMaster from '../models/ItemMaster.js';
 
 // ── Config ────────────────────────────────────────────────────────────────────

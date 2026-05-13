@@ -5,8 +5,10 @@ import {
   getShipments, createShipment, updateShipment, markPOD, deleteShipment,
   trackCourier, regularizeDispatch, getPendencyReport,
 } from '../controllers/logisticsController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
+router.use(protect);
 
 // Vehicles
 router.get('/vehicles', getVehicles);
@@ -15,8 +17,8 @@ router.put('/vehicles/:id', updateVehicle);
 router.delete('/vehicles/:id', deleteVehicle);
 
 // Dispatches
-router.get('/dispatches', getDispatches);
 router.get('/dispatches/stats', getDispatchStats);
+router.get('/dispatches', getDispatches);
 router.post('/dispatches', createDispatch);
 router.patch('/dispatches/:id/status', updateDispatchStatus);
 router.delete('/dispatches/:id', deleteDispatch);

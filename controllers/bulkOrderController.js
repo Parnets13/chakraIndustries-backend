@@ -135,7 +135,58 @@ export const getBulkStats = async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// ── CONVERT QUOTATION TO DISPATCH ─────────────────────────────────────────────
+// ── CONVERT QUOTATION TO PURCHASE ORDER ──────────────────────────────────────
+export const convertToPO = async (req, res) => {
+  try {
+    const PurchaseOrder = (await import('../models/PurchaseOrder.js')).default;
+
+    const quote = await BulkQuotation.findById(req.params.id);
+    if (!quote) return res.status(404).json({ success: false, message: 'Quotation not found' });
+    if (quote.status === 'Converted') return res.status(400).json({ success: false, message: 'Already converted to PO' });
+
+    // Generate PO ID
+    const year = new Date().getFullYear();
+    const prefix = `PO-${year}-`;
+    const last = await PurchaseOrder.findOne({ poId: new RegExp(`^${prefix}`) }).sort({ poId: -1 });
+    const num = last ? (parseInt(last.poId.split('-').pop()) || 0) : 0;
+    const poId = `${prefix}${String(num + 1).padStart(3, '0')}`;
+
+    // Map quotation items to PO items
+    const items = (quote.items || []).map(it => ({
+      name:      it.item || it.description || 'Item',
+      qty:       it.qty  || 1,
+      unit:      it.unit || 'Nos',
+      basePrice: it.unitPrice || 0,
+      gst:       18,
+      total:     it.total || (it.qty * it.unitPrice) || 0,
+    }));
+
+    const subtotal   = items.reduce((s, i) => s + (i.basePrice * i.qty), 0);
+    const gstTotal   = Math.round(subtotal * 0.18);
+    const grandTotal = subtotal + gstTotal;
+
+    // PO requires a vendor — use a placeholder if none linked
+    // In a real flow the user would select a vendor; here we use the client as reference
+    const po = await PurchaseOrder.create({
+      poId,
+      vendor:       req.body.vendorId || quote.clientId,  // caller can pass vendorId
+      items,
+      subtotal,
+      gstTotal,
+      grandTotal:   quote.grandTotal || grandTotal,
+      paymentTerms: quote.paymentTerms || 'Net 30',
+      remarks:      `Converted from Bulk Quotation ${quote.quoteId}`,
+      status:       'Draft',
+    });
+
+    // Mark quotation as converted
+    await BulkQuotation.findByIdAndUpdate(req.params.id, { status: 'Converted' });
+
+    res.status(201).json({ success: true, data: po, message: `Purchase Order ${poId} created` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 export const convertToDispatch = async (req, res) => {
   try {
     const { Dispatch } = await import('../models/Logistics.js');

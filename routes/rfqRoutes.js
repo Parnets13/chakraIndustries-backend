@@ -1,15 +1,9 @@
 import express from 'express';
-import {
-  getAllRFQs,
-  getRFQById,
-  createRFQ,
-  updateRFQ,
-  updateRFQStatus,
-  addQuotation,
-  deleteRFQ
-} from '../controllers/rfqController.js';
+import { getAllRFQs, getRFQById, createRFQ, updateRFQ, updateRFQStatus, addQuotation, deleteRFQ } from '../controllers/rfqController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
+router.use(protect);
 
 router.get('/', getAllRFQs);
 router.get('/:id', getRFQById);

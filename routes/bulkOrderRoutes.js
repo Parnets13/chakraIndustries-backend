@@ -3,10 +3,12 @@ import {
   getClients, createClient, updateClient, deleteClient,
   getQuotations, createQuotation, updateQuotation, updateQuotationStatus, deleteQuotation,
   getSchedules, createSchedule, updateSchedule, deleteSchedule,
-  getBulkStats, convertToDispatch,
+  getBulkStats, convertToDispatch, convertToPO,
 } from '../controllers/bulkOrderController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
+router.use(protect);
 
 // Stats
 router.get('/stats', getBulkStats);
@@ -24,6 +26,7 @@ router.put('/quotations/:id', updateQuotation);
 router.patch('/quotations/:id/status', updateQuotationStatus);
 router.delete('/quotations/:id', deleteQuotation);
 router.post('/quotations/:id/convert-to-dispatch', convertToDispatch);
+router.post('/quotations/:id/convert-to-po', convertToPO);
 
 // Delivery Schedules
 router.get('/schedules', getSchedules);

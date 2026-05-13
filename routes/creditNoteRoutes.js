@@ -1,7 +1,9 @@
 import express from 'express';
+import { protect } from '../middleware/authMiddleware.js';
 import { getAll, getStats, create, updateStatus, sendReminder, remove } from '../controllers/creditNoteController.js';
 
 const router = express.Router();
+router.use(protect);
 router.get('/', getAll);
 router.get('/stats', getStats);
 router.post('/', create);

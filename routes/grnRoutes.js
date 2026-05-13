@@ -1,14 +1,15 @@
 import express from 'express';
 import * as grnController from '../controllers/grnController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
+router.use(protect);
 
-// CRUD Operations
-router.post('/', grnController.createGRN);                    // CREATE
-router.get('/stats', grnController.getGRNStats);              // READ STATS — must be before /:id
-router.get('/', grnController.getAllGRNs);                    // READ ALL
-router.get('/:id', grnController.getGRNById);                 // READ ONE
-router.put('/:id', grnController.updateGRN);                  // UPDATE
-router.delete('/:id', grnController.deleteGRN);               // DELETE
+router.post('/', grnController.createGRN);
+router.get('/stats', grnController.getGRNStats);
+router.get('/', grnController.getAllGRNs);
+router.get('/:id', grnController.getGRNById);
+router.put('/:id', grnController.updateGRN);
+router.delete('/:id', grnController.deleteGRN);
 
 export default router;
