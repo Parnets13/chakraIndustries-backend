@@ -54,6 +54,24 @@ export const getRFQById = async (req, res) => {
   }
 };
 
+// GET /api/rfqs/public/:id - Public access for vendors
+export const getPublicRFQ = async (req, res) => {
+  try {
+    const rfq = await RFQ.findById(req.params.id)
+      .populate('vendors', 'companyName vendorId contactPerson email phone')
+      .populate('quotations.vendor', 'companyName vendorId')
+      .select('-createdBy'); // Hide internal fields
+    
+    if (!rfq) {
+      return res.status(404).json({ success: false, message: 'RFQ not found' });
+    }
+    
+    res.json({ success: true, data: rfq });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // POST /api/rfqs
 export const createRFQ = async (req, res) => {
   try {
@@ -157,6 +175,48 @@ export const addQuotation = async (req, res) => {
       .populate('quotations.vendor', 'companyName vendorId');
     
     res.json({ success: true, data: populated });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/rfqs/public/:id/quotations - Public quotation submission
+export const addPublicQuotation = async (req, res) => {
+  try {
+    const rfq = await RFQ.findById(req.params.id)
+      .populate('vendors', '_id companyName');
+    
+    if (!rfq) {
+      return res.status(404).json({ success: false, message: 'RFQ not found' });
+    }
+
+    // Verify vendor is authorized for this RFQ
+    const vendorId = req.body.vendor;
+    const isAuthorized = rfq.vendors.some(v => v._id.toString() === vendorId);
+    
+    if (!isAuthorized) {
+      return res.status(403).json({ success: false, message: 'Vendor not authorized for this RFQ' });
+    }
+
+    // Check if quotation already exists from this vendor
+    const existingQuote = rfq.quotations.find(q => q.vendor.toString() === vendorId);
+    if (existingQuote) {
+      return res.status(400).json({ success: false, message: 'Quotation already submitted by this vendor' });
+    }
+
+    // Add quotation
+    rfq.quotations.push({
+      ...req.body,
+      submittedAt: new Date()
+    });
+    rfq.status = 'Quoted';
+    await rfq.save();
+    
+    res.json({ 
+      success: true, 
+      message: 'Quotation submitted successfully',
+      data: { rfqId: rfq.rfqId }
+    });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
   }

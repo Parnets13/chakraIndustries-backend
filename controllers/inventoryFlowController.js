@@ -94,7 +94,6 @@ export const getInventoryFlowDashboard = async (req, res) => {
 
     // 6. Material Returns - Track returns
     const returns = await MaterialReturn.find()
-      .populate('inventoryId', 'name sku')
       .sort({ createdAt: -1 });
 
     const returnStats = {

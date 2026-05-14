@@ -1,11 +1,49 @@
 import express from 'express';
-import { getAll, getStats, create, updateStage, issueCreditNote, remove } from '../controllers/materialReturnController.js';
+import { 
+  getAll, 
+  getStats, 
+  create, 
+  updateStage, 
+  issueCreditNote, 
+  remove,
+  getWarehouseQueue,
+  warehouseReceive,
+  qcReceive,
+  updateTransportStatus,
+  getWorkflowStatus,
+  processWorkflowStage,
+  getWarehouseReturns,
+  receiveAtWarehouse,
+  processQC,
+  updateTracking
+} from '../controllers/materialReturnController.js';
 
 const router = express.Router();
+
+// Existing routes
 router.get('/', getAll);
 router.get('/stats', getStats);
 router.post('/', create);
 router.patch('/:id/stage', updateStage);
 router.patch('/:id/credit-note', issueCreditNote);
 router.delete('/:id', remove);
+
+// New warehouse workflow routes
+router.get('/warehouse/queue', getWarehouseQueue);
+router.patch('/:id/warehouse/receive', warehouseReceive);
+router.patch('/:id/qc/receive', qcReceive);
+router.patch('/:id/transport/status', updateTransportStatus);
+
+// Workflow tracking routes
+router.get('/:id/workflow/status', getWorkflowStatus);
+router.patch('/:id/workflow/process', processWorkflowStage);
+
+// Warehouse receive routes
+router.get('/warehouse/returns', getWarehouseReturns);
+router.patch('/:id/warehouse/receive', receiveAtWarehouse);
+router.patch('/:id/qc/process', processQC);
+
+// Tracking update route
+router.patch('/:id/tracking', updateTracking);
+
 export default router;

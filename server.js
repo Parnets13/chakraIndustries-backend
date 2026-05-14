@@ -40,15 +40,23 @@ import itemMasterRoutes from './routes/itemMasterRoutes.js';
 import locationRoutes from './routes/locationRoutes.js';
 import deliveryScheduleRoutes from './routes/deliveryScheduleRoutes.js';
 import corporateClientRoutes from './routes/corporateClientRoutes.js';
+import quotationClientRoutes from './routes/quotationClientRoutes.js';
+import invoiceClientRoutes from './routes/invoiceClientRoutes.js';
+import accountsLedgerRoutes from './routes/accountsLedgerRoutes.js';
+import dispatchClientRoutes from './routes/dispatchClientRoutes.js';
 import bulkQuotationRoutes from './routes/bulkQuotationRoutes.js';
+import bulkQuotationRequestRoutes from './routes/bulkQuotationRequestRoutes.js';
+import bulkOrderApprovalRoutes from './routes/bulkOrderApprovalRoutes.js';
+import bulkOrderInventoryRoutes from './routes/bulkOrderInventoryRoutes.js';
+import bulkOrderInvoiceRoutes from './routes/bulkOrderInvoiceRoutes.js';
+import bulkOrderCreditRoutes from './routes/bulkOrderCreditRoutes.js';
 import salesOrderRoutes from './routes/salesOrderRoutes.js';
 import tallyRoutes from './routes/tallyRoutes.js';
 import reportsRoutes from './routes/reportsRoutes.js';
 import forecastingRoutes from './routes/forecastingRoutes.js';
-import packagingRoutes from './routes/packagingRoutes.js';
-import oemOrderRoutes from './routes/oemOrderRoutes.js';
-import oemInvoiceRoutes from './routes/oemInvoiceRoutes.js';
-import oemFinishedGoodsRoutes from './routes/oemFinishedGoodsRoutes.js';
+import invoiceRoutes from './routes/invoiceRoutes.js';
+import returnsRoutes from './routes/returnsRoutes.js';
+import reconciliationRoutes from './routes/reconciliationRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -62,6 +70,13 @@ import './models/OEMOrder.js';
 import './models/OEMInvoice.js';
 import './models/OEMFinishedGoods.js';
 import './models/Packaging.js';
+import './models/BulkOrder.js';
+import './models/BulkOrderApproval.js';
+import './models/CorporateClient.js';
+import './models/QuotationClient.js';
+import './models/InvoiceClient.js';
+import './models/AccountsLedger.js';
+import './models/DispatchClient.js';
 
 dotenv.config();
 
@@ -76,8 +91,11 @@ app.use(cors({
     // Allow requests with no origin (mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
     const allowed = [
-      'http://localhost:5173',
+      'https://chakraindustries-backend.onrender.com',
       'http://localhost:3000',
+      'http://localhost:5173',
+      'http://localhost:5174',
+      'http://localhost:4173',
     ];
     const allowedPatterns = [
       /\.netlify\.app$/,
@@ -116,6 +134,7 @@ app.use('/api/credit-notes', creditNoteRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/logistics', logisticsRoutes);
 app.use('/api/bulk-orders', bulkOrderRoutes);
+app.use('/api/bulk-order-approvals', bulkOrderApprovalRoutes);
 app.use('/api/inventory-data', inventoryDataRoutes);
 app.use('/api/picking', pickingListRoutes);
 app.use('/api/sorting', sortingJobRoutes);
@@ -134,15 +153,23 @@ app.use('/api/item-master', itemMasterRoutes);
 app.use('/api/locations', locationRoutes);
 app.use('/api/delivery-schedules', deliveryScheduleRoutes);
 app.use('/api/corporate-clients', corporateClientRoutes);
+app.use('/api/quotation-clients', quotationClientRoutes);
+app.use('/api/invoice-clients', invoiceClientRoutes);
+app.use('/api/accounts-ledgers', accountsLedgerRoutes);
+app.use('/api/dispatch-clients', dispatchClientRoutes);
 app.use('/api/bulk-quotations', bulkQuotationRoutes);
+app.use('/api/bulk-quotation-requests', bulkQuotationRequestRoutes);
+app.use('/api/bulk-order-approvals', bulkOrderApprovalRoutes);
+app.use('/api/bulk-order-inventory', bulkOrderInventoryRoutes);
+app.use('/api/bulk-order-invoices', bulkOrderInvoiceRoutes);
+app.use('/api/bulk-order-credit', bulkOrderCreditRoutes);
 app.use('/api/sales-orders', salesOrderRoutes);
 app.use('/api/tally', tallyRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/forecasting', forecastingRoutes);
-app.use('/api/packaging', packagingRoutes);
-app.use('/api/oem-orders', oemOrderRoutes);
-app.use('/api/oem-invoices', oemInvoiceRoutes);
-app.use('/api/oem-finished-goods', oemFinishedGoodsRoutes);
+app.use('/api/invoices', invoiceRoutes);
+app.use('/api/returns', returnsRoutes);
+app.use('/api/reconciliation', reconciliationRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars

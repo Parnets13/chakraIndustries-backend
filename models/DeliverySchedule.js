@@ -12,18 +12,37 @@ const deliveryScheduleSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Quotation ID is required']
     },
+    orderId: {
+      type: String,
+      index: true
+    },
+    clientId: {
+      type: String,
+      index: true
+    },
     client: {
       type: String,
       required: [true, 'Client name is required'],
       trim: true
     },
-    items: {
-      type: Number,
-      required: [true, 'Number of items is required']
+    clientTier: {
+      type: String,
+      enum: ['Silver', 'Gold', 'Platinum']
     },
-    qty: {
+    items: [{
+      sku: String,
+      itemName: String,
+      qty: Number,
+      unitPrice: Number,
+      total: Number
+    }],
+    totalItems: {
       type: Number,
-      required: [true, 'Quantity is required']
+      default: 0
+    },
+    totalQty: {
+      type: Number,
+      default: 0
     },
     deliveryDate: {
       type: Date,
@@ -43,9 +62,13 @@ const deliveryScheduleSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['Draft', 'Pending', 'Confirmed', 'Delivered'],
+      enum: ['Draft', 'Pending', 'Confirmed', 'Dispatched', 'Delivered'],
       default: 'Draft'
-    }
+    },
+    podSignature: String,
+    podPhoto: String,
+    deliveredAt: Date,
+    notes: String
   },
   {
     timestamps: true

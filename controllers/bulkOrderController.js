@@ -1,13 +1,13 @@
-import { CorporateClient, BulkQuotation, DeliverySchedule } from '../models/BulkOrder.js';
+import BulkOrder from '../models/BulkOrder.js';
+import BulkQuotation from '../models/BulkQuotation.js';
+import CorporateClient from '../models/CorporateClient.js';
+import DeliverySchedule from '../models/DeliverySchedule.js';
 
-// ── ID generators ─────────────────────────────────────────────────────────────
-const genId = async (Model, field, prefix) => {
-  const year = new Date().getFullYear();
-  const p = `${prefix}-${year}-`;
-  const last = await Model.findOne({ [field]: new RegExp(`^${p}`) }).sort({ [field]: -1 });
-  if (!last) return `${p}001`;
-  const num = parseInt(last[field].split('-').pop()) || 0;
-  return `${p}${String(num + 1).padStart(3, '0')}`;
+const generateOrderId = async () => {
+  const last = await BulkOrder.findOne({}, {}, { sort: { createdAt: -1 } });
+  if (!last) return 'BO-2024-001';
+  const num = parseInt(last.orderId?.split('-')[2] || '0') + 1;
+  return `BO-2024-${String(num).padStart(3, '0')}`;
 };
 
 // ── CORPORATE CLIENTS ─────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ export const getClients = async (req, res) => {
 
 export const createClient = async (req, res) => {
   try {
-    const clientId = await genId(CorporateClient, 'clientId', 'CC');
+    const clientId = `CC-${Date.now()}`;
     const client = await CorporateClient.create({ ...req.body, clientId });
     res.status(201).json({ success: true, data: client });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
@@ -50,15 +50,15 @@ export const getQuotations = async (req, res) => {
     const filter = {};
     if (status) filter.status = status;
     if (clientId) filter.clientId = clientId;
-    const list = await BulkQuotation.find(filter).populate('clientId', 'name tier').sort({ createdAt: -1 });
+    const list = await BulkQuotation.find(filter).sort({ createdAt: -1 });
     res.json({ success: true, data: list });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
 export const createQuotation = async (req, res) => {
   try {
-    const quoteId = await genId(BulkQuotation, 'quoteId', 'BQ');
-    const quotation = await BulkQuotation.create({ ...req.body, quoteId });
+    const quoteId = `BQ-${Date.now()}`;
+    const quotation = await BulkQuotation.create({ ...req.body, quotationId: quoteId });
     res.status(201).json({ success: true, data: quotation });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
@@ -90,14 +90,14 @@ export const deleteQuotation = async (req, res) => {
 // ── DELIVERY SCHEDULES ────────────────────────────────────────────────────────
 export const getSchedules = async (req, res) => {
   try {
-    const list = await DeliverySchedule.find().populate('quoteId', 'quoteId').sort({ createdAt: -1 });
+    const list = await DeliverySchedule.find().sort({ createdAt: -1 });
     res.json({ success: true, data: list });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
 export const createSchedule = async (req, res) => {
   try {
-    const scheduleId = await genId(DeliverySchedule, 'scheduleId', 'SCH');
+    const scheduleId = `SCH-${Date.now()}`;
     const schedule = await DeliverySchedule.create({ ...req.body, scheduleId });
     res.status(201).json({ success: true, data: schedule });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
@@ -121,16 +121,16 @@ export const deleteSchedule = async (req, res) => {
 // ── STATS ─────────────────────────────────────────────────────────────────────
 export const getBulkStats = async (req, res) => {
   try {
-    const activeClients   = await CorporateClient.countDocuments({ status: 'Active' });
-    const activeQuotes    = await BulkQuotation.countDocuments({ status: 'Sent' });
-    const approvedQuotes  = await BulkQuotation.countDocuments({ status: 'Approved' });
-    const pipeline        = await BulkQuotation.aggregate([
+    const activeClients = await CorporateClient.countDocuments({ status: 'Active' });
+    const activeQuotes = await BulkQuotation.countDocuments({ status: 'Sent' });
+    const approvedQuotes = await BulkQuotation.countDocuments({ status: 'Approved' });
+    const pipeline = await BulkQuotation.aggregate([
       { $match: { status: { $in: ['Sent', 'Approved'] } } },
-      { $group: { _id: null, total: { $sum: '$grandTotal' } } },
+      { $group: { _id: null, total: { $sum: '$value' } } }
     ]);
     res.json({ success: true, data: {
       activeClients, activeQuotes, approvedQuotes,
-      pipeline: pipeline[0]?.total || 0,
+      pipeline: pipeline[0]?.total || 0
     }});
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };

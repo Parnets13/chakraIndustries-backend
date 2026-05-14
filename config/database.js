@@ -11,12 +11,12 @@ dotenv.config({ path: path.join(__dirname, '../.env') });
 
 const connectDB = async () => {
   try {
-    const mongoUri = process.env.MONGODB_URI;
+    const mongoUri = process.env.MONGO_URI;
 
     if (!mongoUri) {
-      console.error('✗ MONGODB_URI is not defined in environment variables');
+      console.error('✗ MONGO_URI is not defined in environment variables');
       console.error('Available env vars:', Object.keys(process.env).filter(k => k.includes('MONGO') || k.includes('mongo')));
-      throw new Error('MONGODB_URI is not defined in environment variables');
+      throw new Error('MONGO_URI is not defined in environment variables');
     }
 
     console.log('Connecting to MongoDB...');
