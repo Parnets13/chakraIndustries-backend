@@ -1,4 +1,5 @@
 import InventoryItem from '../models/InventoryItem.js';
+import GRN from '../models/GRN.js';
 import Warehouse from '../models/Warehouse.js';
 import StockMovement from '../models/StockMovement.js';
 
@@ -498,21 +499,11 @@ export const updateInventoryFromQC = async (qcData) => {
 export const getStockByWarehouse = async (req, res) => {
   try {
     const { warehouseId } = req.params;
-    
-    const stock = await Inventory.find({ warehouse: warehouseId })
-      .populate('warehouse', 'warehouseId name')
+    const stock = await InventoryItem.find({ warehouse: warehouseId })
       .populate('category', 'name');
-    
-    res.json({
-      success: true,
-      data: stock
-    });
+    res.json({ success: true, data: stock });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching warehouse stock',
-      error: error.message
-    });
+    res.status(500).json({ success: false, message: 'Error fetching warehouse stock', error: error.message });
   }
 };
 
@@ -520,21 +511,11 @@ export const getStockByWarehouse = async (req, res) => {
 export const getStockByLocation = async (req, res) => {
   try {
     const { locationId } = req.params;
-    
-    const stock = await Inventory.find({
-      'location.zone': locationId
-    }).populate('warehouse', 'warehouseId name');
-    
-    res.json({
-      success: true,
-      data: stock
-    });
+    const stock = await InventoryItem.find({ warehouse: locationId })
+      .populate('category', 'name');
+    res.json({ success: true, data: stock });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching location stock',
-      error: error.message
-    });
+    res.status(500).json({ success: false, message: 'Error fetching location stock', error: error.message });
   }
 };
 
@@ -542,28 +523,12 @@ export const getStockByLocation = async (req, res) => {
 export const getStockBySKU = async (req, res) => {
   try {
     const { sku } = req.params;
-    
-    const stock = await Inventory.findOne({ sku: sku.toUpperCase() })
-      .populate('warehouse', 'warehouseId name')
+    const stock = await InventoryItem.findOne({ sku: sku.toUpperCase() })
       .populate('category', 'name');
-    
-    if (!stock) {
-      return res.status(404).json({
-        success: false,
-        message: 'SKU not found'
-      });
-    }
-    
-    res.json({
-      success: true,
-      data: stock
-    });
+    if (!stock) return res.status(404).json({ success: false, message: 'SKU not found' });
+    res.json({ success: true, data: stock });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching stock by SKU',
-      error: error.message
-    });
+    res.status(500).json({ success: false, message: 'Error fetching stock by SKU', error: error.message });
   }
 };
 
@@ -571,86 +536,41 @@ export const getStockBySKU = async (req, res) => {
 export const getStockTypeBreakdown = async (req, res) => {
   try {
     const { sku } = req.params;
-    
-    const inventory = await Inventory.findOne({ sku: sku.toUpperCase() });
-    
-    if (!inventory) {
-      return res.status(404).json({
-        success: false,
-        message: 'SKU not found'
-      });
-    }
-    
-    // Calculate stock breakdown based on status and quantity
+    const item = await InventoryItem.findOne({ sku: sku.toUpperCase() });
+    if (!item) return res.status(404).json({ success: false, message: 'SKU not found' });
     const breakdown = {
-      sku: inventory.sku,
-      itemName: inventory.name,
-      total: inventory.quantity,
-      available: inventory.status === 'Active' ? inventory.quantity : 0,
-      reserved: 0,
-      damaged: 0,
-      expired: 0,
-      transit: 0
+      sku: item.sku,
+      itemName: item.name,
+      total: item.qty,
+      available: item.status === 'Active' ? item.qty : 0,
+      reserved: 0, damaged: 0, expired: 0, transit: 0,
     };
-    
-    res.json({
-      success: true,
-      data: breakdown
-    });
+    res.json({ success: true, data: breakdown });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching stock breakdown',
-      error: error.message
-    });
+    res.status(500).json({ success: false, message: 'Error fetching stock breakdown', error: error.message });
   }
 };
 
 // Get all stock with filters
 export const getAllStock = async (req, res) => {
   try {
-    const { sku, type, warehouse, status } = req.query;
-    
-    let query = {};
-    
-    if (sku) {
-      query.sku = { $regex: sku, $options: 'i' };
-    }
-    
-    if (warehouse) {
-      query.warehouse = warehouse;
-    }
-    
-    if (status) {
-      query.status = status;
-    }
-    
-    const stock = await Inventory.find(query)
-      .populate('warehouse', 'warehouseId name')
+    const { sku, warehouse, status } = req.query;
+    const query = {};
+    if (sku)       query.sku       = { $regex: sku, $options: 'i' };
+    if (warehouse) query.warehouse = warehouse;
+    if (status)    query.status    = status;
+    const stock = await InventoryItem.find(query)
       .populate('category', 'name')
       .sort({ sku: 1 });
-    
-    // Add stock type breakdown
     const stockWithBreakdown = stock.map(item => ({
       ...item.toObject(),
-      available: item.status === 'Active' ? item.quantity : 0,
-      reserved: 0,
-      damaged: 0,
-      expired: 0,
-      transit: 0,
-      total: item.quantity
+      available: item.status === 'Active' ? item.qty : 0,
+      reserved: 0, damaged: 0, expired: 0, transit: 0,
+      total: item.qty,
     }));
-    
-    res.json({
-      success: true,
-      data: stockWithBreakdown
-    });
+    res.json({ success: true, data: stockWithBreakdown });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching stock',
-      error: error.message
-    });
+    res.status(500).json({ success: false, message: 'Error fetching stock', error: error.message });
   }
 };
 
@@ -660,9 +580,6 @@ export const getAllStock = async (req, res) => {
 export const convertGRNToInventory = async (req, res) => {
   try {
     const { grnId } = req.params;
-    
-    // Import GRN model
-    const GRN = require('../models/GRN.js').default;
     
     // Get GRN with all details
     const grn = await GRN.findById(grnId)

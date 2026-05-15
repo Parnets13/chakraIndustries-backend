@@ -1,16 +1,12 @@
 import express from 'express';
 import {
-  getPickingStats,
-  getAllPickingLists,
-  getPickingListById,
-  createPickingList,
-  updatePickingList,
-  markItemPicked,
-  deletePickingList
+  getAllPickingLists, getPickingListById, createPickingList,
+  updatePickingList, markItemPicked, deletePickingList, getPickingStats
 } from '../controllers/pickingListController.js';
 import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
+router.use(protect);
 
 router.get('/stats', getPickingStats);
 router.get('/', getAllPickingLists);

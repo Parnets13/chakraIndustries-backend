@@ -11,8 +11,10 @@ import {
   getGRNInventoryFlow,
   getInventoryTrends,
 } from '../controllers/inventoryFlowController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
+router.use(protect);
 
 // Stats (must be before /:id routes)
 router.get('/stats',      getInventoryStats);

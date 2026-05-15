@@ -17,12 +17,13 @@ import {
   processQC,
   updateTracking
 } from '../controllers/materialReturnController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
+router.use(protect);
 
-// Existing routes
-router.get('/', getAll);
 router.get('/stats', getStats);
+router.get('/', getAll);
 router.post('/', create);
 router.patch('/:id/stage', updateStage);
 router.patch('/:id/credit-note', issueCreditNote);

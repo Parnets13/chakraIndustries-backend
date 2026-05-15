@@ -11,6 +11,10 @@ const invoiceItemSchema = new mongoose.Schema({
   amount:      { type: Number, required: true },   // qty * rate after discount
   taxAmount:   { type: Number, default: 0 },
   total:       { type: Number, required: true },   // amount + taxAmount
+  // Explicit tax breakdown (from Excel or manual entry)
+  cgst:        { type: Number, default: 0 },       // CGST amount
+  sgst:        { type: Number, default: 0 },       // SGST amount
+  igst:        { type: Number, default: 0 },       // IGST amount (inter-state)
 }, { _id: false });
 
 const invoiceSchema = new mongoose.Schema({
@@ -49,6 +53,40 @@ const invoiceSchema = new mongoose.Schema({
   // Source tracking
   source:       { type: String, enum: ['manual', 'excel_upload'], default: 'manual' },
   uploadBatch:  { type: String, default: '' },  // batch ID for bulk uploads
+
+  // Excel order fields — ALL columns from the Orders Excel preserved as-is
+  uniqueId:            { type: String, default: '' },   // UniqueId
+  purchaseOrderRef:    { type: String, default: '' },   // PurchaseOrder
+  poDate:              { type: String, default: '' },   // PODate
+  lineNbr:             { type: String, default: '' },   // LineNbr
+  biPartNumber:        { type: String, default: '' },   // BIPartNumber
+  vendorCode:          { type: String, default: '' },   // VendorCode
+  programNumber:       { type: String, default: '' },   // ProgramNumber
+  accountNumber:       { type: String, default: '' },   // AccountNumber
+  brandName:           { type: String, default: '' },   // BrandName
+  orderStatus:         { type: String, default: '' },   // OrderStatus
+  biwpo:               { type: String, default: '' },   // BIWPO
+  dispatchDate:        { type: String, default: '' },   // DispatchDate
+  awb:                 { type: String, default: '' },   // AWB
+  courierName:         { type: String, default: '' },   // CourierName
+  vendorInvoiceNumber: { type: String, default: '' },   // VendorInvoiceNumber
+  poValue:             { type: Number, default: 0 },    // PoValue
+  totalQuantity:       { type: Number, default: 0 },    // TotalQuantity
+  totalPoValue:        { type: Number, default: 0 },    // TotalPoValue
+  courierValue:        { type: Number, default: 0 },    // CourierValue
+  totalCourier:        { type: Number, default: 0 },    // TotalCourier
+  deliveryDate:        { type: String, default: '' },   // DeliveryDate
+  weightKg:            { type: Number, default: 0 },    // Weight (in Kg)
+  modeOfTransport:     { type: String, default: '' },   // Mode of Transportation
+  lbh:                 { type: String, default: '' },   // LBH
+  totalFaceValue:      { type: Number, default: 0 },    // TotalFaceValue
+  podSharedLink:       { type: String, default: '' },   // PodSharedLink
+  // Ship-to address parts (stored individually for easy display)
+  partyCity:           { type: String, default: '' },
+  partyState:          { type: String, default: '' },
+  partyPostal:         { type: String, default: '' },
+  partyCountry:        { type: String, default: '' },
+  serialNo:            { type: Number, default: 0 },    // sequential upload serial
 }, { timestamps: true });
 
 invoiceSchema.index({ invoiceNo: 1 });

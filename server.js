@@ -57,6 +57,8 @@ import forecastingRoutes from './routes/forecastingRoutes.js';
 import invoiceRoutes from './routes/invoiceRoutes.js';
 import returnsRoutes from './routes/returnsRoutes.js';
 import reconciliationRoutes from './routes/reconciliationRoutes.js';
+import docketTrackingRoutes from './routes/docketTrackingRoutes.js';
+import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -77,6 +79,7 @@ import './models/QuotationClient.js';
 import './models/InvoiceClient.js';
 import './models/AccountsLedger.js';
 import './models/DispatchClient.js';
+import './models/LossTracking.js';
 
 dotenv.config();
 
@@ -110,8 +113,8 @@ app.use(cors({
   credentials: true,
 }));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -170,6 +173,8 @@ app.use('/api/forecasting', forecastingRoutes);
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/returns', returnsRoutes);
 app.use('/api/reconciliation', reconciliationRoutes);
+app.use('/api/docket-tracking', docketTrackingRoutes);
+app.use('/api/loss-tracking', lossTrackingRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars
