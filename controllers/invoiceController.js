@@ -57,7 +57,7 @@ const computeTotals = (items = []) => {
 // ── GET /api/invoices ─────────────────────────────────────────────────────────
 export const getAll = async (req, res) => {
   try {
-    const { status, search, page = 1, limit = 50, invoiceType } = req.query;
+    const { status, search, page = 1, limit = 0, invoiceType } = req.query;
     const filter = {};
     if (status) filter.status = status;
     if (invoiceType) filter.invoiceType = invoiceType;
@@ -66,12 +66,21 @@ export const getAll = async (req, res) => {
       { partyName:  { $regex: search, $options: 'i' } },
       { purchaseOrderRef: { $regex: search, $options: 'i' } },
     ];
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const limitNum = parseInt(limit);
+    const query = Invoice.find(filter).sort({ serialNo: 1, createdAt: 1 });
+
+    // limit=0 means fetch all (no pagination)
+    if (limitNum > 0) {
+      const skip = (parseInt(page) - 1) * limitNum;
+      query.skip(skip).limit(limitNum);
+    }
+
     const [list, total] = await Promise.all([
-      Invoice.find(filter).sort({ serialNo: 1, createdAt: 1 }).skip(skip).limit(parseInt(limit)),
+      query,
       Invoice.countDocuments(filter),
     ]);
-    res.json({ success: true, data: list, total, page: parseInt(page), limit: parseInt(limit) });
+    res.json({ success: true, data: list, total, page: parseInt(page), limit: limitNum });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
