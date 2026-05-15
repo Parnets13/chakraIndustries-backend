@@ -54,6 +54,9 @@ const invoiceSchema = new mongoose.Schema({
   source:       { type: String, enum: ['manual', 'excel_upload'], default: 'manual' },
   uploadBatch:  { type: String, default: '' },  // batch ID for bulk uploads
 
+  // Invoice type — set automatically based on item count
+  invoiceType:  { type: String, enum: ['single', 'multi'], default: 'single' },
+
   // Excel order fields — ALL columns from the Orders Excel preserved as-is
   uniqueId:            { type: String, default: '' },   // UniqueId
   purchaseOrderRef:    { type: String, default: '' },   // PurchaseOrder

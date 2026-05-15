@@ -448,18 +448,7 @@ const bulkUpdateStatus = async (req, res) => {
   }
 };
 
-export {
-  getAllDockets,
-  getDocketById,
-  createDocket,
-  updateDocket,
-  updateDocketStatus,
-  deleteDocket,
-  trackByLRNumber,
-  getDashboardStats,
-  getDelayedDockets,
-  bulkUpdateStatus
-};
+
 // Upload POD
 const uploadPOD = async (req, res) => {
   try {

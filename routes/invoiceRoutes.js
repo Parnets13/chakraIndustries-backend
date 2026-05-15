@@ -3,7 +3,7 @@ import { protect } from '../middleware/authMiddleware.js';
 import {
   getAll, getStats, getById,
   create, bulkUpload, update, updateStatus,
-  remove, removeAll, sendEmail,
+  remove, removeAll, sendEmail, migrateTypes,
 } from '../controllers/invoiceController.js';
 
 const router = express.Router();
@@ -15,6 +15,7 @@ router.get('/stats',               getStats);
 router.post('/',                   create);
 router.post('/bulk-upload',        bulkUpload);
 router.post('/delete-all',         removeAll);
+router.post('/migrate-types',      migrateTypes);
 router.get('/:id',                 getById);
 router.put('/:id',                 update);
 router.patch('/:id/status',        updateStatus);
