@@ -57,12 +57,14 @@ const computeTotals = (items = []) => {
 // ── GET /api/invoices ─────────────────────────────────────────────────────────
 export const getAll = async (req, res) => {
   try {
-    const { status, search, page = 1, limit = 50 } = req.query;
+    const { status, search, page = 1, limit = 50, invoiceType } = req.query;
     const filter = {};
     if (status) filter.status = status;
+    if (invoiceType) filter.invoiceType = invoiceType;
     if (search) filter.$or = [
       { invoiceNo:  { $regex: search, $options: 'i' } },
       { partyName:  { $regex: search, $options: 'i' } },
+      { purchaseOrderRef: { $regex: search, $options: 'i' } },
     ];
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [list, total] = await Promise.all([
@@ -76,7 +78,7 @@ export const getAll = async (req, res) => {
 // ── GET /api/invoices/stats ───────────────────────────────────────────────────
 export const getStats = async (req, res) => {
   try {
-    const [total, draft, sent, paid, overdue, cancelled, totalValueAgg, paidValueAgg, pendingValueAgg] =
+    const [total, draft, sent, paid, overdue, cancelled, singleCount, multiCount, totalValueAgg, paidValueAgg, pendingValueAgg] =
       await Promise.all([
         Invoice.countDocuments(),
         Invoice.countDocuments({ status: 'Draft' }),
@@ -84,6 +86,8 @@ export const getStats = async (req, res) => {
         Invoice.countDocuments({ status: 'Paid' }),
         Invoice.countDocuments({ status: 'Overdue' }),
         Invoice.countDocuments({ status: 'Cancelled' }),
+        Invoice.countDocuments({ invoiceType: 'single' }),
+        Invoice.countDocuments({ invoiceType: 'multi' }),
         Invoice.aggregate([{ $group: { _id: null, v: { $sum: '$grandTotal' } } }]),
         Invoice.aggregate([{ $match: { status: 'Paid' } }, { $group: { _id: null, v: { $sum: '$grandTotal' } } }]),
         Invoice.aggregate([{ $match: { status: { $in: ['Draft','Sent','Overdue'] } } }, { $group: { _id: null, v: { $sum: '$grandTotal' } } }]),
@@ -92,6 +96,7 @@ export const getStats = async (req, res) => {
       success: true,
       data: {
         total, draft, sent, paid, overdue, cancelled,
+        singleCount, multiCount,
         totalValue:   totalValueAgg[0]?.v   || 0,
         paidValue:    paidValueAgg[0]?.v    || 0,
         pendingValue: pendingValueAgg[0]?.v || 0,
@@ -115,7 +120,8 @@ export const create = async (req, res) => {
     const invoiceNo = await genInvoiceNo();
     const { items = [], ...rest } = req.body;
     const totals = computeTotals(items);
-    const inv = await Invoice.create({ invoiceNo, ...rest, ...totals, source: 'manual' });
+    const invoiceType = items.length > 1 ? 'multi' : 'single';
+    const inv = await Invoice.create({ invoiceNo, ...rest, ...totals, source: 'manual', invoiceType });
     res.status(201).json({ success: true, data: inv });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
@@ -157,6 +163,7 @@ export const bulkUpload = async (req, res) => {
           uploadBatch: batchId,
           serialNo:    i + 1,
           status:      rest.status || 'Draft',
+          invoiceType: items.length > 1 ? 'multi' : 'single',
         });
       } catch (e) {
         errors.push({ row: i + 1, error: e.message });
@@ -196,9 +203,10 @@ export const update = async (req, res) => {
   try {
     const { items = [], ...rest } = req.body;
     const totals = computeTotals(items);
+    const invoiceType = items.length > 1 ? 'multi' : 'single';
     const inv = await Invoice.findByIdAndUpdate(
       req.params.id,
-      { ...rest, ...totals },
+      { ...rest, ...totals, invoiceType },
       { new: true, runValidators: true }
     );
     if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
@@ -214,6 +222,22 @@ export const updateStatus = async (req, res) => {
     if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
     res.json({ success: true, data: inv });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+// ── POST /api/invoices/migrate-types ─────────────────────────────────────────
+// One-time migration: set invoiceType on all existing docs based on items.length
+export const migrateTypes = async (req, res) => {
+  try {
+    const all = await Invoice.find({}, { _id: 1, items: 1 });
+    const ops = all.map(inv => ({
+      updateOne: {
+        filter: { _id: inv._id },
+        update: { $set: { invoiceType: (inv.items?.length || 0) > 1 ? 'multi' : 'single' } },
+      },
+    }));
+    const result = await Invoice.bulkWrite(ops, { ordered: false });
+    res.json({ success: true, updated: result.modifiedCount, total: all.length });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
 // ── DELETE /api/invoices (delete all) ────────────────────────────────────────
