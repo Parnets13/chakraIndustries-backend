@@ -30,7 +30,7 @@ const invoiceSchema = new mongoose.Schema({
   partyPhone:   { type: String, default: '' },
 
   // Company (billed from)
-  companyName:  { type: String, default: 'Chakra Industries' },
+  companyName:  { type: String, default: 'Sri Chakra Industries' },
   companyAddress:{ type: String, default: '' },
   companyGST:   { type: String, default: '' },
 
