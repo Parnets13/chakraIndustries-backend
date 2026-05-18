@@ -231,10 +231,14 @@ export const generateInvoiceFromPDF = async (req, res) => {
       const qty       = it.qty || 1;
       const rate      = it.rate || it.basePrice || 0;
       const gst       = it.gst || 18;
-      // Use lineAmount from PDF parser if provided — most accurate
+      const disc      = it.discount || 0;
+      const cgst      = it.cgst || 0;
+      const sgst      = it.sgst || 0;
+      const igst      = it.igst || 0;
+      const taxable   = it.taxableValue || +(qty * rate * (1 - disc / 100)).toFixed(2);
       const lineTotal = it.lineAmount
         ? +parseFloat(it.lineAmount).toFixed(2)
-        : +(qty * rate * (1 + gst / 100)).toFixed(2);
+        : +(taxable * (1 + gst / 100)).toFixed(2);
 
       return {
         itemName:     it.name || it.itemName || 'Item',
@@ -245,6 +249,11 @@ export const generateInvoiceFromPDF = async (req, res) => {
         unit:         it.unit || 'Nos',
         basePrice:    rate,
         gst,
+        cgst,
+        sgst,
+        igst,
+        discount:     disc,
+        taxableValue: taxable,
         lineTotal,
         hsn:          it.hsn || '',
       };
