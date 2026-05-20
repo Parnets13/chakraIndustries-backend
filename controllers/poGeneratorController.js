@@ -220,7 +220,7 @@ export const generateInvoice = async (req, res) => {
 // Creates invoice directly from PDF-parsed data (no PO in DB required)
 export const generateInvoiceFromPDF = async (req, res) => {
   try {
-    const { poNumber, vendorName, buyerName, items = [], total, notes = '' } = req.body;
+    const { poNumber, vendorName, buyerName, buyerAddress = '', buyerGSTIN = '', shipToName = '', shipToAddress = '', items = [], total, notes = '' } = req.body;
 
     if (!items.length)
       return res.status(400).json({ success: false, message: 'No items provided' });
@@ -228,20 +228,36 @@ export const generateInvoiceFromPDF = async (req, res) => {
     const invoiceNo = await genInvoiceNo();
 
     const invoiceItems = items.map(it => {
+      const cleanHsn = (value) => {
+        const digits = String(value || '').replace(/\D/g, '');
+        return digits.length >= 4 && digits.length <= 10 ? digits : '';
+      };
+      let itemName = it.name || it.itemName || 'Item';
+      let hsn = cleanHsn(it.hsn);
+      if (!hsn) {
+        const hsnInName = itemName.match(/(?:\/\s*)?(\d(?:[\s-]?\d){3,9})\s*$/);
+        if (hsnInName) hsn = cleanHsn(hsnInName[1]);
+      }
+      if (hsn) {
+        itemName = itemName.replace(/\s*\/?\s*\d(?:[\s-]?\d){3,9}\s*$/, '').trim();
+      }
       const qty       = it.qty || 1;
       const rate      = it.rate || it.basePrice || 0;
-      const gst       = it.gst || 18;
+      // IMPORTANT: use 0 as default, never fall back to 18 — if the PDF has no tax, gst must be 0
+      const gst       = (it.gst != null && it.gst !== '') ? Number(it.gst) : 0;
       const disc      = it.discount || 0;
-      const cgst      = it.cgst || 0;
-      const sgst      = it.sgst || 0;
-      const igst      = it.igst || 0;
+      const cgst      = Number(it.cgst) || 0;
+      const sgst      = Number(it.sgst) || 0;
+      const igst      = Number(it.igst) || 0;
       const taxable   = it.taxableValue || +(qty * rate * (1 - disc / 100)).toFixed(2);
-      const lineTotal = it.lineAmount
+      // Use the lineAmount sent from frontend (which is the PDF's actual line total).
+      // Only fall back to computing from gst% if lineAmount is not provided.
+      const lineTotal = (it.lineAmount != null && parseFloat(it.lineAmount) > 0)
         ? +parseFloat(it.lineAmount).toFixed(2)
         : +(taxable * (1 + gst / 100)).toFixed(2);
 
       return {
-        itemName:     it.name || it.itemName || 'Item',
+        itemName,
         requestedQty: qty,
         availableQty: qty,
         invoicedQty:  qty,
@@ -252,10 +268,13 @@ export const generateInvoiceFromPDF = async (req, res) => {
         cgst,
         sgst,
         igst,
+        cgstVal:      it.cgstVal || 0,
+        sgstVal:      it.sgstVal || 0,
+        igstVal:      it.igstVal || 0,
         discount:     disc,
         taxableValue: taxable,
         lineTotal,
-        hsn:          it.hsn || '',
+        hsn,
       };
     });
 
@@ -273,10 +292,12 @@ export const generateInvoiceFromPDF = async (req, res) => {
 
     const invoice = await POInvoice.create({
       invoiceNo,
-      poId:       null,
-      poRef:      poNumber || 'PDF-UPLOAD',
-      vendorName: vendorName || '',
-      buyerName:  buyerName || '',
+      poId:        null,
+      poRef:       poNumber || 'PDF-UPLOAD',
+      vendorName:  vendorName || '',
+      buyerName:   buyerName || '',
+      buyerAddress: buyerAddress,
+      buyerGSTIN:  buyerGSTIN,
       items:      invoiceItems,
       subtotal,
       gstTotal,
@@ -444,6 +465,151 @@ export const deletePO = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+// ── POST /api/po-generator/migrate-hsn ───────────────────────────────────────
+// One-time migration: extract HSN codes embedded in itemName and store them
+// in the dedicated hsn field. Safe to run multiple times (idempotent).
+export const migrateHSN = async (req, res) => {
+  try {
+    const invoices = await POInvoice.find({});
+    const HSN_IN_NAME = /(?:\/\s*)?(\d{6,10})\s*$/;
+    let updatedInvoices = 0;
+    let updatedItems = 0;
+
+    for (const inv of invoices) {
+      let changed = false;
+      for (const item of inv.items) {
+        // Only fix items where hsn is empty but name contains an HSN
+        if (!item.hsn || !item.hsn.trim()) {
+          const m = item.itemName.match(HSN_IN_NAME);
+          if (m) {
+            item.hsn = m[1];
+            item.itemName = item.itemName.replace(/\s*\/?\s*\d{6,10}\s*$/, '').trim();
+            changed = true;
+            updatedItems++;
+          }
+        }
+      }
+      if (changed) {
+        await inv.save();
+        updatedInvoices++;
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Migration complete — updated ${updatedItems} items across ${updatedInvoices} invoices`,
+      updatedInvoices,
+      updatedItems,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── GET /api/po-generator/upload-summary ─────────────────────────────────────
+// Day-wise view of uploaded PO PDFs and the invoices created from them.
+export const getUploadSummary = async (req, res) => {
+  try {
+    const { date } = req.query;
+    const selectedDate = /^\d{4}-\d{2}-\d{2}$/.test(date || '')
+      ? date
+      : new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+    const timezone = 'Asia/Kolkata';
+    const now = new Date();
+    const from = new Date(now);
+    from.setDate(from.getDate() - 29);
+    from.setHours(0, 0, 0, 0);
+
+    const pdfUploadFilter = {
+      poId: null,
+      $or: [
+        { notes: { $regex: 'Created from PDF', $options: 'i' } },
+        { poRef: { $ne: '' } },
+      ],
+    };
+
+    const [dailyRows, selectedInvoices] = await Promise.all([
+      POInvoice.aggregate([
+        { $match: { ...pdfUploadFilter, createdAt: { $gte: from } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone } },
+            uploadedPOs: { $sum: 1 },
+            invoiceCount: { $sum: 1 },
+            totalValue: { $sum: '$grandTotal' },
+            itemCount: { $sum: { $size: { $ifNull: ['$items', []] } } },
+          },
+        },
+        { $sort: { _id: -1 } },
+      ]),
+      POInvoice.aggregate([
+        {
+          $match: {
+            ...pdfUploadFilter,
+            $expr: {
+              $eq: [
+                { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone } },
+                selectedDate,
+              ],
+            },
+          },
+        },
+        {
+          $project: {
+            invoiceNo: 1,
+            poRef: 1,
+            vendorName: 1,
+            buyerName: 1,
+            status: 1,
+            grandTotal: 1,
+            createdAt: 1,
+            itemCount: { $size: { $ifNull: ['$items', []] } },
+          },
+        },
+        { $sort: { createdAt: -1 } },
+      ]),
+    ]);
+
+    const daily = [];
+    for (let i = 0; i < 30; i++) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i);
+      const key = d.toLocaleDateString('en-CA', { timeZone: timezone });
+      const row = dailyRows.find(x => x._id === key) || {};
+      daily.push({
+        date: key,
+        label: new Date(`${key}T00:00:00`).toLocaleDateString('en-IN', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+        }),
+        uploadedPOs: row.uploadedPOs || 0,
+        invoiceCount: row.invoiceCount || 0,
+        totalValue: row.totalValue || 0,
+        itemCount: row.itemCount || 0,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        selectedDate,
+        daily,
+        selected: {
+          uploadedPOs: selectedInvoices.length,
+          invoiceCount: selectedInvoices.length,
+          totalValue: selectedInvoices.reduce((sum, inv) => sum + (inv.grandTotal || 0), 0),
+          itemCount: selectedInvoices.reduce((sum, inv) => sum + (inv.itemCount || 0), 0),
+          invoices: selectedInvoices,
+        },
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const getStats = async (req, res) => {
   try {
     const [

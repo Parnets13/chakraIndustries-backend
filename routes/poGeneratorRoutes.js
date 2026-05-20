@@ -13,7 +13,9 @@ import {
   listPendingOrders,
   updatePendingOrder,
   getStats,
+  getUploadSummary,
   deleteInvoice,
+  migrateHSN,
 } from '../controllers/poGeneratorController.js';
 
 const router = express.Router();
@@ -21,6 +23,7 @@ router.use(protect);
 
 // Stats
 router.get('/stats', getStats);
+router.get('/upload-summary', getUploadSummary);
 
 // PO listing for upload/selection
 router.get('/pos', listPOs);
@@ -45,5 +48,8 @@ router.delete('/invoices/:id', deleteInvoice);
 // Pending / backorders
 router.get('/pending-orders', listPendingOrders);
 router.patch('/pending-orders/:id', updatePendingOrder);
+
+// One-time migration: extract HSN from itemName into hsn field
+router.post('/migrate-hsn', migrateHSN);
 
 export default router;

@@ -8,6 +8,7 @@ const invoiceItemSchema = new mongoose.Schema({
   rate:        { type: Number, required: true },
   discount:    { type: Number, default: 0 },       // percentage
   taxRate:     { type: Number, default: 18 },      // GST %
+  basic:       { type: Number, default: 0 },       // taxable amount (qty * rate after discount)
   amount:      { type: Number, required: true },   // qty * rate after discount
   taxAmount:   { type: Number, default: 0 },
   total:       { type: Number, required: true },   // amount + taxAmount
@@ -28,6 +29,15 @@ const invoiceSchema = new mongoose.Schema({
   partyGST:     { type: String, default: '' },
   partyEmail:   { type: String, default: '' },
   partyPhone:   { type: String, default: '' },
+
+  // Bill To (explicit — for GRT format where bill-to differs from ship-to)
+  billToName:    { type: String, default: '' },
+  billToAddress: { type: String, default: '' },
+  billToGST:     { type: String, default: '' },
+
+  // Ship To
+  shipToName:    { type: String, default: '' },
+  shipToAddress: { type: String, default: '' },
 
   // Company (billed from)
   companyName:  { type: String, default: 'Sri Chakra Industries' },

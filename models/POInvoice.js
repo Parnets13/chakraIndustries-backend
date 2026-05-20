@@ -38,6 +38,10 @@ const poInvoiceSchema = new mongoose.Schema({
   poRef:        { type: String, default: '' },
   vendorName:   { type: String, default: '' },
   buyerName:    { type: String, default: '' },
+  buyerAddress: { type: String, default: '' },
+  buyerGSTIN:   { type: String, default: '' },
+  shipToName:   { type: String, default: '' },
+  shipToAddress:{ type: String, default: '' },
   items:        [poInvoiceItemSchema],
 
   subtotal:     { type: Number, default: 0 },
