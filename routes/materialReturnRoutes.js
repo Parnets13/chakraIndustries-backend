@@ -15,7 +15,8 @@ import {
   getWarehouseReturns,
   receiveAtWarehouse,
   processQC,
-  updateTracking
+  updateTracking,
+  getInvoiceContext
 } from '../controllers/materialReturnController.js';
 import { protect } from '../middleware/authMiddleware.js';
 
@@ -23,6 +24,7 @@ const router = express.Router();
 router.use(protect);
 
 router.get('/stats', getStats);
+router.get('/invoice/:invoiceNo/context', getInvoiceContext);
 router.get('/', getAll);
 router.post('/', create);
 router.patch('/:id/stage', updateStage);

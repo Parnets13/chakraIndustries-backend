@@ -1,4 +1,5 @@
 import MaterialReturn from '../models/MaterialReturn.js';
+import Invoice from '../models/Invoice.js';
 
 const genId = async (prefix, field) => {
   const year = new Date().getFullYear();
@@ -25,32 +26,108 @@ export const getStats = async (req, res) => {
   try {
     const total = await MaterialReturn.countDocuments();
     const inTransit = await MaterialReturn.countDocuments({ 
-      stage: { $in: ['Transport_Pickup', 'In_Transit', 'Out_For_Delivery'] }
+      stage: { $in: ['Transport_Pickup', 'In_Transit', 'Out_For_Delivery', 'Transport_Tracking'] }
     });
     const pendingQC = await MaterialReturn.countDocuments({ 
-      stage: { $in: ['Delivered', 'Warehouse_Queue', 'Received_At_Warehouse', 'QC_In_Progress'] }
+      stage: { $in: ['Delivered', 'Warehouse_Queue', 'Received_At_Warehouse', 'QC_In_Progress', 'Warehouse_Receive', 'QC_Verification'] }
     });
     const closed = await MaterialReturn.countDocuments({ 
-      stage: { $in: ['QC_Completed', 'Closed'] }
+      stage: { $in: ['QC_Completed', 'Tally_Sync', 'Closed'] }
     });
     res.json({ success: true, data: { total, inTransit, pendingQC, closed } });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
+const toDateOrUndefined = (value) => {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+};
+
+const buildInvoiceReturnContext = (invoice) => {
+  if (!invoice) return null;
+  const firstItem = invoice.items?.[0] || {};
+  const productName = firstItem.description || invoice.biPartNumber || invoice.brandName || '';
+  const returnQty = Number(firstItem.qty || invoice.totalQuantity || 1);
+  const unitPrice = Number(firstItem.rate || (returnQty ? invoice.grandTotal / returnQty : 0) || 0);
+
+  return {
+    invoiceNo: invoice.invoiceNo,
+    invoiceDate: invoice.invoiceDate,
+    dispatchDate: toDateOrUndefined(invoice.dispatchDate),
+    deliveryDate: toDateOrUndefined(invoice.deliveryDate),
+    orderNo: invoice.purchaseOrderRef || invoice.uniqueId || '',
+    supplierName: invoice.partyName,
+    supplierEmail: invoice.partyEmail || '',
+    supplierPincode: invoice.partyPostal || '',
+    supplierGSTNo: invoice.partyGST || '',
+    supplierAddress: invoice.partyAddress || '',
+    mobileNumber: invoice.partyPhone || '',
+    pickupAddress: invoice.partyAddress || '',
+    pinCode: invoice.partyPostal || '',
+    gstNumber: invoice.partyGST || '',
+    productName,
+    skuCode: invoice.biPartNumber || firstItem.hsn || '',
+    productSku: invoice.biPartNumber || firstItem.hsn || '',
+    returnQty,
+    expectedQty: returnQty,
+    unitPrice,
+    gstAmount: Number(firstItem.taxAmount || invoice.totalTax || 0),
+    value: Number(firstItem.total || invoice.grandTotal || 0),
+    awbNo: invoice.awb || '',
+    transport: invoice.courierName || invoice.modeOfTransport || '',
+  };
+};
+
+export const getInvoiceContext = async (req, res) => {
+  try {
+    const invoice = await Invoice.findOne({ invoiceNo: req.params.invoiceNo });
+    if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+    res.json({ success: true, data: buildInvoiceReturnContext(invoice) });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
 export const create = async (req, res) => {
   try {
+    const returnRequestId = await genId('RR', 'returnRequestId');
     const mrId     = await genId('MR', 'mrId');
     const docketId = await genId('DKT', 'docketId');
-    const mr = await MaterialReturn.create({ ...req.body, mrId, docketId });
+    const invoice = req.body.invoiceNo ? await Invoice.findOne({ invoiceNo: req.body.invoiceNo }) : null;
+    const invoiceContext = buildInvoiceReturnContext(invoice) || {};
+    const body = Object.fromEntries(
+      Object.entries(req.body).filter(([, value]) => value !== '' && value !== undefined && value !== null)
+    );
+    const mr = await MaterialReturn.create({
+      ...invoiceContext,
+      ...body,
+      returnRequestId,
+      mrId,
+      docketId,
+      stage: body.stage || 'Return_Request_Create',
+      currentWorkflowStage: body.currentWorkflowStage || 'Return_Request_Create',
+      Return_Request_Create_processedAt: new Date(),
+      Return_Request_Create_processedBy: req.user?.name || 'System',
+    });
     res.status(201).json({ success: true, data: mr });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
 export const updateStage = async (req, res) => {
   try {
+    const stage = req.body.stage;
+    if (!stage) return res.status(400).json({ success: false, message: 'Stage is required' });
     const mr = await MaterialReturn.findByIdAndUpdate(
       req.params.id,
-      { stage: req.body.stage },
+      {
+        stage,
+        currentWorkflowStage: stage,
+        [`${stage}_processedAt`]: new Date(),
+        [`${stage}_processedBy`]: req.user?.name || 'System',
+        ...(stage === 'Manager_Approval' ? { approvalStatus: 'Approved', returnStatus: 'Approved' } : {}),
+        ...(stage === 'QC_Verification' ? { qcStatus: 'In Progress' } : {}),
+        ...(stage === 'Finance_Reconciliation' ? { reconciliationStatus: 'In Progress', ledgerStatus: 'Updated' } : {}),
+        ...(stage === 'Tally_Sync' ? { reconciliationStatus: 'Completed', ledgerStatus: 'Reconciled' } : {}),
+      },
       { new: true }
     );
     if (!mr) return res.status(404).json({ success: false, message: 'Not found' });
