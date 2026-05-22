@@ -33,6 +33,9 @@ import clientRoutes from './routes/clientRoutes.js';
 import bomRoutes from './routes/bomRoutes.js';
 import workOrderRoutes from './routes/workOrderRoutes.js';
 import oemRoutes from './routes/oemRoutes.js';
+import oemOrderRoutes from './routes/oemOrderRoutes.js';
+import oemInvoiceRoutes from './routes/oemInvoiceRoutes.js';
+import oemFinishedGoodsRoutes from './routes/oemFinishedGoodsRoutes.js';
 import mrpRoutes from './routes/mrpRoutes.js';
 import assetRoutes from './routes/assetRoutes.js';
 import warehouseRoutes from './routes/warehouseRoutes.js';
@@ -60,6 +63,7 @@ import returnsRoutes from './routes/returnsRoutes.js';
 import reconciliationRoutes from './routes/reconciliationRoutes.js';
 import docketTrackingRoutes from './routes/docketTrackingRoutes.js';
 import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
+import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -81,6 +85,8 @@ import './models/InvoiceClient.js';
 import './models/AccountsLedger.js';
 import './models/DispatchClient.js';
 import './models/LossTracking.js';
+import './models/POInvoice.js';
+import './models/PendingOrder.js';
 
 dotenv.config();
 
@@ -89,16 +95,21 @@ const app = express();
 // Connect to MongoDB
 connectDB();
 
-// Rate limiting middleware
+// Rate limiting middleware — relaxed for local dev, tighter for production
 const limiter = rateLimit({
   windowMs: 1000, // 1 second
-  max: 10, // limit each IP to 10 requests per windowMs
+  max: process.env.NODE_ENV === 'production' ? 10 : 200, // 200/sec locally, 10/sec in prod
   message: {
     success: false,
     message: 'Too many requests from this IP, please try again later.'
   },
-  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    // Skip rate limiting for localhost in development
+    const ip = req.ip || req.connection?.remoteAddress || '';
+    return process.env.NODE_ENV !== 'production' && (ip === '::1' || ip === '127.0.0.1' || ip.includes('::ffff:127.0.0.1'));
+  },
 });
 
 // Middleware
@@ -110,14 +121,20 @@ app.use(cors({
     const allowed = [
       'https://chakraindustries-backend.onrender.com',
       'http://localhost:3000',
+      'http://localhost:5000',
       'http://localhost:5173',
       'http://localhost:5174',
       'http://localhost:4173',
+      'http://127.0.0.1:5173',
+      'http://127.0.0.1:5174',
+      'http://127.0.0.1:3000',
     ];
     const allowedPatterns = [
       /\.netlify\.app$/,
       /\.netlify\.com$/,
       /\.onrender\.com$/,
+      /^http:\/\/localhost:\d+$/,
+      /^http:\/\/127\.0\.0\.1:\d+$/,
     ];
     if (allowed.includes(origin) || allowedPatterns.some(p => p.test(origin))) {
       return callback(null, true);
@@ -162,6 +179,9 @@ app.use('/api/clients', clientRoutes);
 app.use('/api/bom', bomRoutes);
 app.use('/api/workorders', workOrderRoutes);
 app.use('/api/oem', oemRoutes);
+app.use('/api/oem-orders', oemOrderRoutes);
+app.use('/api/oem-invoices', oemInvoiceRoutes);
+app.use('/api/oem-finished-goods', oemFinishedGoodsRoutes);
 app.use('/api/mrp', mrpRoutes);
 app.use('/api/assets', assetRoutes);
 app.use('/api/warehouses', warehouseRoutes);
@@ -184,11 +204,12 @@ app.use('/api/sales-orders', salesOrderRoutes);
 app.use('/api/tally', tallyRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/forecasting', forecastingRoutes);
-app.use('/api/invoices', invoiceRoutes);
-app.use('/api/returns', returnsRoutes);
+app.use('/api/invoices',     invoiceRoutes);
+app.use('/api/returns',      returnsRoutes);
 app.use('/api/reconciliation', reconciliationRoutes);
 app.use('/api/docket-tracking', docketTrackingRoutes);
 app.use('/api/loss-tracking', lossTrackingRoutes);
+app.use('/api/po-generator', poGeneratorRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars

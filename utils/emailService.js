@@ -15,7 +15,7 @@ const createTransporter = () => {
 
 export const sendInvoiceEmail = async ({ to, partyName, invoice: inv, pdfBase64, pdfFilename }) => {
   const transporter = createTransporter();
-  const fromName    = process.env.SMTP_FROM_NAME || 'Chakra Industries';
+  const fromName    = process.env.SMTP_FROM_NAME || 'Sri Chakra Industries';
   const fromEmail   = process.env.SMTP_USER;
 
   const fmtDate = (d) => {
@@ -41,7 +41,7 @@ export const sendInvoiceEmail = async ({ to, partyName, invoice: inv, pdfBase64,
       <td style="background:linear-gradient(135deg,#c0392b 0%,#922b21 100%);padding:32px 40px;">
         <table width="100%" cellpadding="0" cellspacing="0"><tr>
           <td>
-            <div style="font-size:24px;font-weight:800;color:#fff;letter-spacing:-0.5px;">Chakra Industries</div>
+            <div style="font-size:24px;font-weight:800;color:#fff;letter-spacing:-0.5px;">Sri Chakra Industries</div>
             <div style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.7);letter-spacing:3px;text-transform:uppercase;margin-top:4px;">ERP Platform</div>
           </td>
           <td align="right">
@@ -59,7 +59,7 @@ export const sendInvoiceEmail = async ({ to, partyName, invoice: inv, pdfBase64,
     <tr><td style="padding:32px 40px 0;">
       <p style="margin:0;font-size:16px;font-weight:600;color:#0f172a;">Dear ${partyName},</p>
       <p style="margin:12px 0 0;font-size:14px;color:#475569;line-height:1.7;">
-        Greetings from <strong>Chakra Industries</strong>! Please find the invoice attached to this email as a PDF.
+        Greetings from <strong>Sri Chakra Industries</strong>! Please find the invoice attached to this email as a PDF.
         The details of your order are summarised below for your reference.
       </p>
     </td></tr>
@@ -199,14 +199,14 @@ export const sendInvoiceEmail = async ({ to, partyName, invoice: inv, pdfBase64,
         <strong>Payment Terms:</strong> ${inv.terms || 'Payment due within 30 days.'}
       </p>
       <p style="margin:20px 0 0;font-size:14px;color:#0f172a;font-weight:600;">Warm regards,</p>
-      <p style="margin:4px 0 0;font-size:14px;font-weight:800;color:#c0392b;">Chakra Industries</p>
+      <p style="margin:4px 0 0;font-size:14px;font-weight:800;color:#c0392b;">Sri Chakra Industries</p>
       <p style="margin:2px 0 0;font-size:12px;color:#94a3b8;">ERP &amp; Operations Team</p>
     </td></tr>
 
     <!-- Footer -->
     <tr><td style="background:#0f172a;padding:16px 40px;">
       <p style="margin:0;font-size:11px;color:#64748b;text-align:center;">
-        This is a system-generated email from <strong style="color:#94a3b8;">Chakra Industries ERP</strong>.
+        This is a system-generated email from <strong style="color:#94a3b8;">Sri Chakra Industries ERP</strong>.
       </p>
     </td></tr>
 
@@ -220,7 +220,7 @@ export const sendInvoiceEmail = async ({ to, partyName, invoice: inv, pdfBase64,
   const textBody = [
     `Dear ${partyName},`,
     ``,
-    `Greetings from Chakra Industries!`,
+    `Greetings from Sri Chakra Industries!`,
     `Please find the invoice PDF (${pdfFilename}) attached to this email.`,
     ``,
     `Invoice No.  : ${inv.invoiceNo}`,
@@ -240,13 +240,13 @@ export const sendInvoiceEmail = async ({ to, partyName, invoice: inv, pdfBase64,
     `Terms        : ${inv.terms || 'Payment due within 30 days.'}`,
     ``,
     `Warm regards,`,
-    `Chakra Industries — ERP & Operations Team`,
+    `Sri Chakra Industries — ERP & Operations Team`,
   ].filter(l => l !== null).join('\n');
 
   const info = await transporter.sendMail({
     from:        `"${fromName}" <${fromEmail}>`,
     to,
-    subject:     `Invoice ${inv.invoiceNo} from Chakra Industries — ${partyName}`,
+    subject:     `Invoice ${inv.invoiceNo} from Sri Chakra Industries — ${partyName}`,
     text:        textBody,
     html:        htmlBody,
     attachments: [{

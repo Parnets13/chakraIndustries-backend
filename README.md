@@ -1,4 +1,4 @@
-# Chakra Industries Backend - Procurement Module
+# Sri Chakra Industries Backend - Procurement Module
 
 Production-ready backend API with proper CRUD operations, clean architecture, and separate routers for Vendors and Purchase Orders.
 

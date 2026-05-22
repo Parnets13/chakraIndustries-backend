@@ -1,7 +1,7 @@
 {
   "name": "chakraindustries-backend",
   "version": "1.0.0",
-  "description": "Chakra Industries Backend API",
+  "description": "Sri Chakra Industries Backend API",
   "main": "server.js",
   "type": "module",
   "scripts": {

@@ -36,6 +36,7 @@ const computeTotals = (items = []) => {
 
     return {
       ...item,
+      basic:     +amount.toFixed(2),   // taxable amount (qty × rate − discount)
       amount:    +amount.toFixed(2),
       taxAmount: +taxAmt.toFixed(2),
       total:     +total.toFixed(2),
