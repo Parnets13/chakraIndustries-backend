@@ -26,19 +26,47 @@ export const getSortingJobById = async (req, res) => {
 
 export const createSortingJob = async (req, res) => {
   try {
+    console.log('--- CREATE SORTING JOB REQUEST ---');
+    console.log('Body:', JSON.stringify(req.body, null, 2));
+    
     const { orderId, sku, itemName, quantity, grade } = req.body;
-    if (!orderId || !sku || quantity === undefined || quantity === null || quantity === '') {
-      return res.status(400).json({ success: false, message: 'orderId, sku, and quantity are required' });
+    
+    // Validate required fields
+    if (!orderId) {
+      console.log('Validation Error: orderId is missing');
+      return res.status(400).json({ success: false, message: 'orderId is required' });
     }
+    if (!sku) {
+      console.log('Validation Error: sku is missing');
+      return res.status(400).json({ success: false, message: 'sku is required' });
+    }
+    if (quantity === undefined || quantity === null || quantity === '') {
+      console.log('Validation Error: quantity is missing or empty');
+      return res.status(400).json({ success: false, message: 'quantity is required' });
+    }
+    
     const qty = parseInt(quantity);
     if (isNaN(qty) || qty <= 0) {
+      console.log('Validation Error: quantity is not a valid positive number:', quantity);
       return res.status(400).json({ success: false, message: 'quantity must be a valid positive number' });
     }
+    
     const sortId = `SRT-${String(await SortingJob.countDocuments() + 1).padStart(3, '0')}`;
-    const job = new SortingJob({ sortId, orderId, sku, itemName, quantity: qty, grade: grade || 'Grade A', status: 'Pending' });
+    const job = new SortingJob({ 
+      sortId, 
+      orderId, 
+      sku, 
+      itemName: itemName || 'Unknown Item', 
+      quantity: qty, 
+      grade: grade || 'Grade A', 
+      status: 'Pending' 
+    });
+    
     await job.save();
+    console.log('Sorting job created successfully:', job.sortId);
     res.status(201).json({ success: true, message: 'Sorting job created', data: job });
   } catch (error) {
+    console.error('Error in createSortingJob:', error);
     res.status(400).json({ success: false, message: 'Error creating sorting job', error: error.message });
   }
 };
