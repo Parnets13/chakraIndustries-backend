@@ -2,6 +2,7 @@ import BulkOrder from '../models/BulkOrder.js';
 import BulkQuotation from '../models/BulkQuotation.js';
 import CorporateClient from '../models/CorporateClient.js';
 import DeliverySchedule from '../models/DeliverySchedule.js';
+import XLSX from 'xlsx';
 
 const generateOrderId = async () => {
   const last = await BulkOrder.findOne({}, {}, { sort: { createdAt: -1 } });
@@ -26,6 +27,82 @@ export const createClient = async (req, res) => {
     const client = await CorporateClient.create({ ...req.body, clientId });
     res.status(201).json({ success: true, data: client });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+// Import multiple clients from frontend-parsed Excel/JSON
+export const importClients = async (req, res) => {
+  try {
+    const list = req.body?.clients;
+    if (!Array.isArray(list)) return res.status(400).json({ success: false, message: 'Invalid payload: clients array required' });
+
+    const created = [];
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i] || {};
+      const clientId = `CC-${Date.now()}-${Math.floor(Math.random()*9000)+1000}-${i}`;
+      const payload = {
+        name: c.name || c.companyName || c.company || '',
+        contact: c.contact || c.contactPerson || '',
+        phone: c.phone || c.mobile || c.phoneNumber || '',
+        email: c.email || c.emailAddress || '',
+        city: c.city || '',
+        category: c.category || c.tier || 'Trading',
+        creditLimit: Number(c.creditLimit || c.credit || 0) || 0,
+        gstNumber: c.gstNumber || c.gstin || '',
+        address: c.address || '',
+        status: c.status || 'Active',
+        clientId,
+      };
+      const doc = await CorporateClient.create(payload);
+      created.push(doc);
+    }
+
+    res.status(201).json({ success: true, data: created, message: `${created.length} clients imported` });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// Import clients from uploaded Excel file (multipart/form-data 'file')
+export const importClientsFromFile = async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file || !file.buffer) return res.status(400).json({ success: false, message: 'No file uploaded' });
+
+    const wb = XLSX.read(file.buffer, { type: 'buffer' });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+    if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ success: false, message: 'Excel sheet is empty' });
+
+    // Map rows to client payloads
+    const mapped = rows.map((r, i) => ({
+      name: r['Company Name'] || r['name'] || r['Company'] || r['companyName'] || '',
+      contact: r['Contact Person'] || r['contact'] || '',
+      phone: String(r['Phone'] || r['Mobile'] || r['phone'] || '').trim(),
+      email: r['Email'] || r['email'] || '',
+      city: r['City'] || r['city'] || '',
+      category: r['Category'] || r['Tier'] || r['category'] || 'Trading',
+      creditLimit: Number(r['Credit Limit'] || r['creditLimit'] || 0) || 0,
+      gstNumber: r['GST Number'] || r['gstNumber'] || r['Gstin'] || '',
+      address: r['Address'] || r['address'] || '',
+      status: r['Status'] || 'Active',
+    }));
+
+    // Insert many (avoid duplicates by simple name check) — basic validation
+    const toCreate = [];
+    for (const c of mapped) {
+      if (!c.name) continue;
+      // Skip if exact name already exists
+      const exists = await CorporateClient.findOne({ name: c.name });
+      if (exists) continue;
+      const clientId = `CC-${Date.now()}-${Math.floor(Math.random()*9000)+1000}`;
+      toCreate.push({ ...c, clientId });
+    }
+
+    let created = [];
+    if (toCreate.length > 0) created = await CorporateClient.insertMany(toCreate);
+
+    res.status(201).json({ success: true, data: created, message: `${created.length} clients imported`, skipped: mapped.length - toCreate.length });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 export const updateClient = async (req, res) => {

@@ -184,7 +184,7 @@ export const submitForApproval = async (req, res) => {
       bom.approvalSteps.push({ approver: req.body.approver || 'Production Manager', role: 'Manager', status: 'Pending' });
     }
     await bom.save();
-    res.json({ success: true, message: 'BOM submitted for approval', data: bom });
+    res.json({ success: true, message: 'BOM submitted for approval', data: { ...bom.toObject(), ...calcCosts(bom) } });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
@@ -270,7 +270,7 @@ export const addAlternate = async (req, res) => {
     if (!req.body.itemName?.trim()) return res.status(400).json({ success: false, message: 'Alternate item name is required' });
     comp.alternates.push(req.body);
     await bom.save();
-    res.status(201).json({ success: true, message: 'Alternate added', data: comp });
+    res.status(201).json({ success: true, message: 'Alternate added', data: { ...bom.toObject(), ...calcCosts(bom) } });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 

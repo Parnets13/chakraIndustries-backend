@@ -420,8 +420,22 @@ export const updateInventoryFromQC = async (qcData) => {
       return;
     }
 
+    let warehouseCode = 'WH-01';
+    if (warehouseId) {
+      if (typeof warehouseId === 'string' && warehouseId.match(/^[0-9a-fA-F]{24}$/)) {
+        const wh = await Warehouse.findById(warehouseId);
+        warehouseCode = wh?.warehouseId || warehouseId;
+      } else if (typeof warehouseId === 'object' && warehouseId._id) {
+        const wh = await Warehouse.findById(warehouseId._id);
+        warehouseCode = wh?.warehouseId || warehouseId.toString();
+      } else {
+        warehouseCode = warehouseId;
+      }
+    }
+
     console.log(`[INVENTORY UPDATE] Starting inventory update for GRN: ${grnId}`);
     console.log(`[INVENTORY UPDATE] Items to process: ${items.length}`);
+    console.log(`[INVENTORY UPDATE] Warehouse resolved to: ${warehouseCode}`);
 
     for (const item of items) {
       const passedQty = item.passedQty || 0;
@@ -434,7 +448,7 @@ export const updateInventoryFromQC = async (qcData) => {
       const sku = item.sku || item.itemName?.replace(/\s+/g, '-').toUpperCase() || `SKU-${Date.now()}`;
       const itemName = item.itemName || item.name || 'Item';
       const unit = item.unit || 'Nos';
-      const warehouse = warehouseId || 'WH-01';
+      const warehouse = warehouseCode;
 
       console.log(`[INVENTORY UPDATE] Processing item: ${itemName} (SKU: ${sku}, Qty: ${passedQty})`);
 

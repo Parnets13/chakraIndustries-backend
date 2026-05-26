@@ -2,7 +2,7 @@ import express from 'express';
 import {
   getAllWorkOrders, getWorkOrderById, createWorkOrder,
   updateWorkOrder, releaseWorkOrder, updateProgress,
-  recordConsumption, deductInventory, recordQC, deleteWorkOrder,
+  recordConsumption, deductInventory, recordQC, recordWastage, deleteWorkOrder,
 } from '../controllers/workOrderController.js';
 import { protect } from '../middleware/authMiddleware.js';
 
@@ -20,5 +20,6 @@ router.patch('/:id/progress',         protect, updateProgress);
 router.patch('/:id/consume',          protect, recordConsumption);
 router.post('/:id/deduct-inventory',  protect, deductInventory);
 router.patch('/:id/qc',               protect, recordQC);
+router.patch('/:id/wastage',          protect, recordWastage);
 
 export default router;

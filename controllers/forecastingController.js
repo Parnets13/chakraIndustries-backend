@@ -14,13 +14,16 @@ export const getDemandForecast = async (req, res) => {
     const historical = months.map((label, i) => ({
       label,
       value: orders.filter(o => new Date(o.orderDate).getMonth() === i && new Date(o.orderDate).getFullYear() === year - 1)
-                   .reduce((s, o) => s + (o.items || 0), 0) || Math.floor(Math.random() * 3000 + 3000),
+                   .reduce((s, o) => s + (o.items || 0), 0) || 0,
     }));
     const curMonth = new Date().getMonth();
-    const forecast = months.slice(curMonth, curMonth + 6).map((label, i) => ({
-      label,
-      value: Math.round((historical[curMonth + i]?.value || 5000) * (1.08 + i * 0.02)),
-    }));
+    const forecast = Array.from({ length: 6 }, (_, i) => {
+      const mIdx = (curMonth + i) % 12;
+      return {
+        label: months[mIdx],
+        value: Math.round((historical[mIdx]?.value || 5000) * (1.08 + i * 0.02)),
+      };
+    });
     res.json({ success: true, data: { historical, forecast } });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
