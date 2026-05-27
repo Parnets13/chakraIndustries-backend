@@ -16,7 +16,9 @@ import {
   receiveAtWarehouse,
   processQC,
   updateTracking,
-  getInvoiceContext
+  updateTransport,
+  getInvoiceContext,
+  processFinance
 } from '../controllers/materialReturnController.js';
 import { protect } from '../middleware/authMiddleware.js';
 
@@ -33,7 +35,8 @@ router.delete('/:id', remove);
 
 // New warehouse workflow routes
 router.get('/warehouse/queue', getWarehouseQueue);
-router.patch('/:id/warehouse/receive', warehouseReceive);
+router.patch('/:id/warehouse/receive', receiveAtWarehouse);
+router.post('/:id/reconciliation', processFinance);
 router.patch('/:id/qc/receive', qcReceive);
 router.patch('/:id/transport/status', updateTransportStatus);
 
@@ -48,5 +51,7 @@ router.patch('/:id/qc/process', processQC);
 
 // Tracking update route
 router.patch('/:id/tracking', updateTracking);
+router.post('/:id/transport', updateTransport);
+router.put('/:id/status', updateStage);
 
 export default router;

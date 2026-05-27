@@ -1,57 +1,56 @@
 import express from 'express';
+import * as materialReturnController from '../controllers/materialReturnController.js';
+import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// Placeholder routes for returns functionality
-// These can be expanded based on specific requirements
+router.use(protect);
 
-// Get all returns
-router.get('/', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Returns endpoint - to be implemented',
-    data: []
-  });
-});
+// 1. Static Warehouse Routes (Must be at top)
+router.get('/warehouse/queue', materialReturnController.getWarehouseQueue);
+router.get('/warehouse/returns', materialReturnController.getWarehouseReturns);
 
-// Get returns statistics
-router.get('/stats', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Returns statistics endpoint - to be implemented',
-    data: {
-      totalReturns: 0,
-      pendingReturns: 0,
-      processedReturns: 0
-    }
-  });
-});
+// 2. Dashboard & Stats
+router.get('/dashboard', materialReturnController.getStats);
+router.get('/stats', materialReturnController.getStats);
 
-// Create new return
-router.post('/', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Create return endpoint - to be implemented',
-    data: null
-  });
-});
+// 3. Return Lifecycle
+router.get('/', materialReturnController.getAll);
+router.post('/create', materialReturnController.create);
+router.get('/context/:invoiceNo', materialReturnController.getInvoiceContext);
+router.get('/:id', materialReturnController.getById);
 
-// Update return
-router.put('/:id', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Update return endpoint - to be implemented',
-    data: null
-  });
-});
+// 4. Workflow Actions (Specific)
+router.put('/:id/approve', materialReturnController.approveReturn);
+router.post('/:id/docket', materialReturnController.generateDocket);
+router.post('/:id/gate-entry', materialReturnController.createGateEntry);
+router.post('/:id/receive', materialReturnController.receiveMaterial);
+router.post('/:id/qc-verify', materialReturnController.qcVerification);
+router.post('/:id/inventory-update', materialReturnController.inventoryUpdate);
+router.post('/:id/finance-close', materialReturnController.financeClosure);
 
-// Delete return
-router.delete('/:id', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Delete return endpoint - to be implemented',
-    data: null
-  });
-});
+// 5. Generic Stage/Status Updates (Support for multiple endpoints)
+router.put('/:id/status', materialReturnController.updateStage);
+router.patch('/:id/status', materialReturnController.updateStage);
+router.put('/:id/stage', materialReturnController.updateStage);
+router.patch('/:id/stage', materialReturnController.updateStage);
+
+// 6. Specific Module Processing
+router.post('/:id/qc', materialReturnController.processQC);
+router.post('/:id/inventory', materialReturnController.processInventory);
+router.post('/:id/reconciliation', materialReturnController.processFinance);
+router.post('/:id/loss', materialReturnController.processLoss);
+router.post('/:id/transport', materialReturnController.updateTransport);
+
+// 7. Warehouse specific dynamic flow
+router.patch('/:id/warehouse/receive', materialReturnController.receiveAtWarehouse);
+router.patch('/:id/qc/process', materialReturnController.processQC);
+router.patch('/:id/tracking', materialReturnController.updateTracking);
+router.get('/:id/workflow/status', materialReturnController.getWorkflowStatus);
+router.patch('/:id/workflow/process', materialReturnController.processWorkflowStage);
+
+// 8. Utilities
+router.post('/', materialReturnController.create);
+router.delete('/:id', materialReturnController.remove);
 
 export default router;

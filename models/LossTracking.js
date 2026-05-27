@@ -72,81 +72,43 @@ const lossTrackingSchema = new mongoose.Schema({
     serialNo: String,
     returnQty: {
       type: Number,
-      required: true,
-      min: 0
+      default: 0
     },
     receivedQty: {
       type: Number,
-      default: 0,
-      min: 0
+      default: 0
     },
     damagedQty: {
       type: Number,
-      default: 0,
-      min: 0
+      default: 0
     },
     shortageQty: {
       type: Number,
-      default: 0,
-      min: 0
+      default: 0
     },
     excessQty: {
       type: Number,
-      default: 0,
-      min: 0
+      default: 0
     },
     unitRate: {
       type: Number,
-      required: true,
-      min: 0
+      default: 0
     },
     totalValue: {
       type: Number,
-      required: true,
-      min: 0
+      default: 0
     }
   }],
   
   // Loss Classification (Manual)
   lossType: {
     type: String,
-    required: true,
-    enum: [
-      'Transit Damage',
-      'Material Shortage', 
-      'Wrong Material',
-      'Supplier Defect',
-      'Customer Return',
-      'Expired Material',
-      'Packing Damage',
-      'Transport Delay',
-      'Invoice Mismatch',
-      'Quantity Mismatch',
-      'Duplicate Dispatch',
-      'QC Rejection',
-      'Missing Material',
-      'Financial Adjustment',
-      'Warehouse Damage',
-      'Theft / Pilferage',
-      'Production Rejection'
-    ]
+    required: true
   },
   
   rootCause: {
     type: String,
-    required: true,
-    enum: [
-      'Supplier Packing Issue',
-      'Transport Mishandling',
-      'Warehouse Error',
-      'QC Failure',
-      'Invoice Error',
-      'System Entry Mistake',
-      'Customer Rejection',
-      'Production Defect',
-      'Wrong Dispatch',
-      'Missing Documentation'
-    ]
+    required: true
   },
   
   // Financial Details
@@ -171,14 +133,12 @@ const lossTrackingSchema = new mongoose.Schema({
   creditNoteNumber: String,
   financialStatus: {
     type: String,
-    enum: ['Pending', 'Debit Note Raised', 'Credit Note Issued', 'Settled', 'Write-off'],
     default: 'Pending'
   },
   
   // Material Status (Auto from Warehouse)
   materialStatus: {
     type: String,
-    enum: ['Pending Return', 'In Transit', 'Received', 'QC In Progress', 'QC Completed', 'Disposed'],
     default: 'Pending Return'
   },
   
@@ -192,8 +152,7 @@ const lossTrackingSchema = new mongoose.Schema({
   // Responsibility & Priority (Manual)
   responsibleDepartment: {
     type: String,
-    required: true,
-    enum: ['Procurement', 'Warehouse', 'QC', 'Logistics', 'Finance', 'Sales', 'Production']
+    required: true
   },
   responsiblePerson: {
     type: String,
@@ -209,7 +168,7 @@ const lossTrackingSchema = new mongoose.Schema({
   // SLA & Tracking (Auto)
   slaDueDate: {
     type: Date,
-    required: true
+    default: () => new Date(+new Date() + 7*24*60*60*1000) // Default 7 days
   },
   escalationLevel: {
     type: Number,
@@ -238,7 +197,6 @@ const lossTrackingSchema = new mongoose.Schema({
   closureDate: Date,
   finalStatus: {
     type: String,
-    enum: ['Open', 'In Progress', 'Resolved', 'Escalated', 'Closed'],
     default: 'Open'
   },
   

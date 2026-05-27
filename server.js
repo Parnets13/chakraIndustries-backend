@@ -3,6 +3,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import connectDB from './config/database.js';
+
+// Route Imports
 import authRoutes from './routes/authRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import permissionRoutes from './routes/permissionRoutes.js';
@@ -18,7 +20,7 @@ import qualityCheckRoutes from './routes/qualityCheckRoutes.js';
 import approvalRoutes from './routes/approvalRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
 import inventoryRoutes from './routes/inventoryRoutes.js';
-import materialReturnRoutes from './routes/materialReturnRoutes.js';
+import returnsRoutes from './routes/returnsRoutes.js';
 import creditNoteRoutes from './routes/creditNoteRoutes.js';
 import taskRoutes from './routes/taskRoutes.js';
 import logisticsRoutes from './routes/logisticsRoutes.js';
@@ -59,13 +61,12 @@ import tallyRoutes from './routes/tallyRoutes.js';
 import reportsRoutes from './routes/reportsRoutes.js';
 import forecastingRoutes from './routes/forecastingRoutes.js';
 import invoiceRoutes from './routes/invoiceRoutes.js';
-import returnsRoutes from './routes/returnsRoutes.js';
 import reconciliationRoutes from './routes/reconciliationRoutes.js';
 import docketTrackingRoutes from './routes/docketTrackingRoutes.js';
 import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
 import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
 
-// Ensure new models are registered
+// Ensure models are registered
 import './models/Warehouse.js';
 import './models/StockMovement.js';
 import './models/SalesOrder.js';
@@ -95,55 +96,22 @@ const app = express();
 // Connect to MongoDB
 connectDB();
 
-// Rate limiting middleware — relaxed for local dev, tighter for production
+// Rate limiting middleware
 const limiter = rateLimit({
-  windowMs: 1000, // 1 second
-  max: process.env.NODE_ENV === 'production' ? 10 : 200, // 200/sec locally, 10/sec in prod
-  message: {
-    success: false,
-    message: 'Too many requests from this IP, please try again later.'
-  },
+  windowMs: 1000,
+  max: process.env.NODE_ENV === 'production' ? 10 : 200,
+  message: { success: false, message: 'Too many requests' },
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
-    // Skip rate limiting for localhost in development
     const ip = req.ip || req.connection?.remoteAddress || '';
-    return process.env.NODE_ENV !== 'production' && (ip === '::1' || ip === '127.0.0.1' || ip.includes('::ffff:127.0.0.1'));
+    return process.env.NODE_ENV !== 'production' && (ip === '::1' || ip === '127.0.0.1');
   },
 });
 
 // Middleware
 app.use(limiter);
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, Postman)
-    if (!origin) return callback(null, true);
-    const allowed = [
-      'https://chakraindustries-backend.onrender.com',
-      'http://localhost:3000',
-      'http://localhost:5000',
-      'http://localhost:5173',
-      'http://localhost:5174',
-      'http://localhost:4173',
-      'http://127.0.0.1:5173',
-      'http://127.0.0.1:5174',
-      'http://127.0.0.1:3000',
-    ];
-    const allowedPatterns = [
-      /\.netlify\.app$/,
-      /\.netlify\.com$/,
-      /\.onrender\.com$/,
-      /^http:\/\/localhost:\d+$/,
-      /^http:\/\/127\.0\.0\.1:\d+$/,
-    ];
-    if (allowed.includes(origin) || allowedPatterns.some(p => p.test(origin))) {
-      return callback(null, true);
-    }
-    return callback(new Error(`CORS blocked: ${origin}`));
-  },
-  credentials: true,
-}));
-
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -163,7 +131,8 @@ app.use('/api/quality-checks', qualityCheckRoutes);
 app.use('/api/approvals', approvalRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/inventory', inventoryRoutes);
-app.use('/api/material-returns', materialReturnRoutes);
+app.use('/api/returns', returnsRoutes);
+app.use('/api/material-returns', returnsRoutes); // Alias
 app.use('/api/credit-notes', creditNoteRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/logistics', logisticsRoutes);
@@ -196,7 +165,6 @@ app.use('/api/accounts-ledgers', accountsLedgerRoutes);
 app.use('/api/dispatch-clients', dispatchClientRoutes);
 app.use('/api/bulk-quotations', bulkQuotationRoutes);
 app.use('/api/bulk-quotation-requests', bulkQuotationRequestRoutes);
-app.use('/api/bulk-order-approvals', bulkOrderApprovalRoutes);
 app.use('/api/bulk-order-inventory', bulkOrderInventoryRoutes);
 app.use('/api/bulk-order-invoices', bulkOrderInvoiceRoutes);
 app.use('/api/bulk-order-credit', bulkOrderCreditRoutes);
@@ -204,21 +172,16 @@ app.use('/api/sales-orders', salesOrderRoutes);
 app.use('/api/tally', tallyRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/forecasting', forecastingRoutes);
-app.use('/api/invoices',     invoiceRoutes);
-app.use('/api/returns',      returnsRoutes);
+app.use('/api/invoices', invoiceRoutes);
 app.use('/api/reconciliation', reconciliationRoutes);
 app.use('/api/docket-tracking', docketTrackingRoutes);
 app.use('/api/loss-tracking', lossTrackingRoutes);
 app.use('/api/po-generator', poGeneratorRoutes);
 
 // Health check
-// eslint-disable-next-line no-unused-vars
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'Server is running' });
-});
+app.get('/api/health', (req, res) => res.json({ status: 'Server is running' }));
 
-// Error handling middleware
-// eslint-disable-next-line no-unused-vars
+// Error handling
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({
@@ -229,6 +192,4 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

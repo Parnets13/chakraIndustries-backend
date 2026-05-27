@@ -184,15 +184,16 @@ export const createLossTracking = async (req, res) => {
       lossType,
       rootCause,
       responsibleDepartment,
-      responsiblePerson,
+      assignedTo, // From frontend
       priority,
+      status, // From frontend
       resolutionNotes,
       correctiveAction,
       preventiveAction
     } = req.body;
 
     // Auto-populate data from Material Return
-    const materialReturn = await MaterialReturn.findOne({ mrId }).populate('supplierId');
+    const materialReturn = await MaterialReturn.findOne({ mrId });
     if (!materialReturn) {
       return res.status(404).json({
         success: false,
@@ -200,10 +201,14 @@ export const createLossTracking = async (req, res) => {
       });
     }
 
-    // Calculate total loss amount
-    const totalLossAmount = products.reduce((sum, product) => {
-      return sum + (product.damagedQty * product.unitRate);
-    }, 0);
+    // Process products and calculate totals
+    const processedProducts = (products || []).map(p => ({
+      ...p,
+      returnQty: p.returnQty || p.damagedQty || 0,
+      totalValue: (Number(p.damagedQty || 0) * Number(p.unitRate || 0))
+    }));
+
+    const totalLossAmount = processedProducts.reduce((sum, p) => sum + p.totalValue, 0);
 
     const lossRecord = new LossTracking({
       mrId,
@@ -212,25 +217,26 @@ export const createLossTracking = async (req, res) => {
       
       // Auto-populated from Material Return
       supplierName: materialReturn.supplierName,
-      supplierId: materialReturn.supplierId,
+      supplierId: materialReturn.supplierId || null,
       customerName: materialReturn.customerName,
-      customerId: materialReturn.customerId,
+      customerId: materialReturn.customerId || null,
       
       // Auto-populated from Invoice
       invoiceNumber: materialReturn.invoiceNo,
       invoiceDate: materialReturn.invoiceDate || new Date(),
-      invoiceType: 'Purchase', // Default, can be determined from context
+      invoiceType: 'Purchase',
       
-      products,
+      products: processedProducts,
       lossType,
       rootCause,
       lossAmount: totalLossAmount,
-      recoverableAmount: 0, // To be updated manually
+      recoverableAmount: req.body.recoverableAmount || 0,
       
       responsibleDepartment,
-      responsiblePerson,
-      priority,
+      responsiblePerson: assignedTo || 'Unassigned',
+      priority: priority || 'Medium',
       
+      finalStatus: status || 'Open',
       resolutionNotes,
       correctiveAction,
       preventiveAction,

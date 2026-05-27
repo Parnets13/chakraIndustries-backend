@@ -1,12 +1,16 @@
 import mongoose from 'mongoose';
 
 const vehicleSchema = new mongoose.Schema({
-  vehicleId:  { type: String, unique: true, required: true },
-  type:       { type: String, required: true },
-  number:     { type: String, required: true, unique: true },
-  driver:     { type: String, required: true },
-  capacity:   { type: String, default: '' },
-  status:     { type: String, enum: ['Available', 'In Transit', 'Maintenance', 'Inactive'], default: 'Available' },
+  vehicleId:     { type: String, unique: true, required: true },
+  type:          { type: String, required: true },
+  number:        { type: String, required: true, unique: true },
+  driver:        { type: String, required: true },
+  driverMobile:  { type: String, default: '' },
+  capacity:      { type: String, default: '' },
+  currentLoad:   { type: String, default: '' },
+  currentDocket: { type: String, default: '' },
+  currentRoute:  { type: String, default: '' },
+  status:        { type: String, enum: ['Available', 'Assigned', 'Pickup Pending', 'In Transit', 'Arrived', 'Maintenance', 'Inactive'], default: 'Available' },
 }, { timestamps: true });
 
 const dispatchSchema = new mongoose.Schema({

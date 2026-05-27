@@ -43,6 +43,12 @@ const inventorySchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  defectiveQuantity: {
+    type: Number,
+    required: true,
+    default: 0,
+    min: 0
+  },
   minQuantity: {
     type: Number,
     required: true,
@@ -117,8 +123,8 @@ inventorySchema.index({ grnId: 1 });
 
 // Auto-calculate status based on quantity
 inventorySchema.pre('save', function(next) {
-  // Ensure availableQuantity + reservedQuantity = totalQuantity
-  this.availableQuantity = Math.max(0, this.totalQuantity - this.reservedQuantity);
+  // Ensure availableQuantity + reservedQuantity + defectiveQuantity = totalQuantity
+  this.availableQuantity = Math.max(0, this.totalQuantity - (this.reservedQuantity || 0) - (this.defectiveQuantity || 0));
   
   if (this.totalQuantity === 0) {
     this.status = 'Dead';
