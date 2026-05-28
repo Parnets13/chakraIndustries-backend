@@ -5,7 +5,7 @@ const accountsLedgerSchema = new mongoose.Schema({
   corporateClientId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'CorporateClient',
-    required: true,
+    required: false,
     index: true
   },
   
@@ -45,7 +45,7 @@ const accountsLedgerSchema = new mongoose.Schema({
   
   panNumber: {
     type: String,
-    required: true
+    required: false
   },
   
   gstRegistrationType: {
@@ -67,17 +67,17 @@ const accountsLedgerSchema = new mongoose.Schema({
   // Contact details
   contactPerson: {
     type: String,
-    required: true
+    required: false
   },
   
   phone: {
     type: String,
-    required: true
+    required: false
   },
   
   email: {
     type: String,
-    required: true
+    required: false
   },
   
   // Financial details

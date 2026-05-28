@@ -43,7 +43,10 @@ const purchaseOrderSchema = new mongoose.Schema({
   },
   paymentTerms: String,
   shippingAddress: String,
-  remarks: String
+  remarks: String,
+  // Tally sync tracking
+  tallySync: { type: Boolean, default: false },
+  tallySyncAt: { type: Date },
 }, {
   timestamps: true
 });

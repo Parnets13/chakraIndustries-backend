@@ -56,11 +56,14 @@ import bulkOrderInvoiceRoutes from './routes/bulkOrderInvoiceRoutes.js';
 import bulkOrderCreditRoutes from './routes/bulkOrderCreditRoutes.js';
 import salesOrderRoutes from './routes/salesOrderRoutes.js';
 import tallyRoutes from './routes/tallyRoutes.js';
+import { startTallyScheduler } from './services/tallyScheduler.js';
+import { rawXmlParser } from './controllers/tallyWebhookController.js';
 import reportsRoutes from './routes/reportsRoutes.js';
 import forecastingRoutes from './routes/forecastingRoutes.js';
 import invoiceRoutes from './routes/invoiceRoutes.js';
 import returnsRoutes from './routes/returnsRoutes.js';
 import reconciliationRoutes from './routes/reconciliationRoutes.js';
+import debitNoteRoutes from './routes/debitNoteRoutes.js';
 import docketTrackingRoutes from './routes/docketTrackingRoutes.js';
 import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
 import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
@@ -87,6 +90,7 @@ import './models/DispatchClient.js';
 import './models/LossTracking.js';
 import './models/POInvoice.js';
 import './models/PendingOrder.js';
+import './models/DebitNote.js';
 
 dotenv.config();
 
@@ -147,6 +151,9 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Raw XML parser for Tally webhook (must be before JSON routes)
+app.use('/api/tally/webhook', rawXmlParser);
+
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
@@ -205,8 +212,9 @@ app.use('/api/tally', tallyRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/forecasting', forecastingRoutes);
 app.use('/api/invoices',     invoiceRoutes);
-app.use('/api/returns',      returnsRoutes);
+app.use('/api/returns',        returnsRoutes);
 app.use('/api/reconciliation', reconciliationRoutes);
+app.use('/api/debit-notes',    debitNoteRoutes);
 app.use('/api/docket-tracking', docketTrackingRoutes);
 app.use('/api/loss-tracking', lossTrackingRoutes);
 app.use('/api/po-generator', poGeneratorRoutes);
@@ -231,4 +239,6 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  // Start Tally auto-sync scheduler after server is up
+  startTallyScheduler();
 });
