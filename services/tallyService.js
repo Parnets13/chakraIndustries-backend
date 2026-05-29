@@ -1,15 +1,3 @@
-/**
- * tallyService.js  — Bidirectional ERP ↔ Tally sync via Tally XML/HTTP API
- *
- * KEY RULES for Tally XML import:
- *  1. REPORTNAME=All Masters  → for STOCKGROUP, STOCKITEM, LEDGER masters
- *  2. REPORTNAME=Vouchers     → for VOUCHER entries ONLY
- *  3. Masters and Vouchers CANNOT be mixed in the same TALLYMESSAGE
- *  4. Within one TALLYMESSAGE, entries are processed top-to-bottom,
- *     so STOCKGROUP must come before STOCKITEM in the same message.
- *  5. Vouchers reference stock items/ledgers that must already exist in Tally
- *     BEFORE the voucher request is sent (separate prior request is fine).
- */
 
 import axios from 'axios';
 import TallyConfig    from '../models/TallyConfig.js';
@@ -225,9 +213,8 @@ export async function pushMastersToTally(cfg, triggeredBy) {
     LOG(`Items: ${items.length}, Vendors: ${vendors.length}, Ledgers: ${ledgers.length}`);
 
     // ── Stock Items ──────────────────────────────────────────────────────────
-    // Use empty PARENT so Tally places items under its default root group.
-    // Never use a custom group name — it may not exist in the company.
-    const stockGroupXml = ''; // no custom group needed
+    // Do NOT set PARENT — let Tally use its default group (Primary).
+    // Setting a custom group name that doesn't exist in Tally causes LINEERROR.
     const stockItemsXml = items.map(item => `
 <STOCKITEM NAME="${esc(item.name)}" ACTION="Create">
   <NAME>${esc(item.name)}</NAME>
@@ -239,7 +226,6 @@ export async function pushMastersToTally(cfg, triggeredBy) {
 </STOCKITEM>`).join('');
 
     // Also create stock items for any PO item names not in ItemMaster
-    // so vouchers can reference them
     const allPOs = await PurchaseOrder.find({ status: { $in: ['Approved', 'Received'] }, tallySync: { $ne: true } }).lean();
     const poItemNames = new Set();
     for (const po of allPOs) {
@@ -381,33 +367,49 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
 
     const today = tallyDate(new Date());
     const validVouchers = [];
+    const skippedPOs = [];
 
     for (const po of pos) {
       const vendorName = po.vendor?.companyName || 'Unknown Vendor';
-      const date = tallyDate(po.createdAt) || today;
+      // Always fall back to today if date is missing — never send empty DATE
+      const date = tallyDate(po.createdAt) || tallyDate(po.orderDate) || today;
       const cgst = (po.gstTotal || 0) / 2;
       const sgst = (po.gstTotal || 0) / 2;
       LOG(`  PO ${po.poId} vendor="${vendorName}" items=${po.items?.length} total=${po.grandTotal} date=${date}`);
 
       // All items are now pushed to Tally as masters (including PO-only items)
       const itemsXml = (po.items || []).map(item => {
-        const itemName = (item.name || 'Unknown Item').trim();
+        const itemName  = (item.name || 'Unknown Item').trim();
+        const itemQty   = item.qty || item.quantity || 1;
+        const itemRate  = item.basePrice || item.unitPrice || item.rate || 0;
+        const itemTotal = +(itemQty * itemRate).toFixed(2);
         LOG(`    item="${itemName}"`);
         return `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-  <RATE>${item.basePrice || item.unitPrice || 0}/Nos</RATE>
-  <AMOUNT>-${item.total || 0}</AMOUNT>
-  <ACTUALQTY>${item.qty || item.quantity || 0} Nos</ACTUALQTY>
-  <BILLEDQTY>${item.qty || item.quantity || 0} Nos</BILLEDQTY>
+  <RATE>${itemRate}/Nos</RATE>
+  <AMOUNT>-${itemTotal}</AMOUNT>
+  <ACTUALQTY>${itemQty} Nos</ACTUALQTY>
+  <BILLEDQTY>${itemQty} Nos</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>Purchase Accounts</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <AMOUNT>-${item.total || 0}</AMOUNT>
+    <AMOUNT>-${itemTotal}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
       }).join('');
+
+      // Compute correct totals from items
+      const itemsTotal = +(po.items || []).reduce((s, it) => {
+        const q = it.qty || it.quantity || 1;
+        const r = it.basePrice || it.unitPrice || it.rate || 0;
+        return s + q * r;
+      }, 0).toFixed(2);
+      const gstAmt   = +(po.gstTotal || 0).toFixed(2);
+      const grandTot = +(po.grandTotal || itemsTotal + gstAmt).toFixed(2);
+      const cgstAmt  = +(gstAmt / 2).toFixed(2);
+      const sgstAmt  = +(gstAmt - cgstAmt).toFixed(2);
 
       validVouchers.push(`
 <VOUCHER VCHTYPE="Purchase" ACTION="Create">
@@ -419,10 +421,10 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(vendorName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-    <AMOUNT>-${po.grandTotal || 0}</AMOUNT>
+    <AMOUNT>${grandTot}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
-  ${cgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${cgst}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
-  ${sgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${sgst}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  ${cgstAmt > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgstAmt}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  ${sgstAmt > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgstAmt}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
   ${itemsXml}
 </VOUCHER>`);
     }
@@ -433,6 +435,7 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
       return { ok: true, records: 0 };
     }
 
+    // Send all vouchers in one batch
     const vouchersXml = validVouchers.join('');
 
     const xml = `<ENVELOPE>
