@@ -18,7 +18,8 @@ import {
   updateTracking,
   updateTransport,
   getInvoiceContext,
-  processFinance
+  processFinance,
+  approveReturn
 } from '../controllers/materialReturnController.js';
 import { protect } from '../middleware/authMiddleware.js';
 
@@ -29,6 +30,7 @@ router.get('/stats', getStats);
 router.get('/invoice/:invoiceNo/context', getInvoiceContext);
 router.get('/', getAll);
 router.post('/', create);
+router.put('/:id/approve', approveReturn);
 router.patch('/:id/stage', updateStage);
 router.patch('/:id/credit-note', issueCreditNote);
 router.delete('/:id', remove);

@@ -4,15 +4,12 @@ const docketTrackingSchema = new mongoose.Schema({
   // Auto-generated fields
   docketId: {
     type: String,
-    required: true,
-    unique: true,
     trim: true
   },
   
   // Material Return Integration
   mrId: {
     type: String,
-    required: true,
     trim: true,
     ref: 'MaterialReturn'
   },
@@ -20,64 +17,98 @@ const docketTrackingSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  returnType: {
+    type: String,
+    trim: true
+  },
+  invoiceNo: {
+    type: String,
+    trim: true
+  },
+  
+  // Product Details
+  productName: {
+    type: String,
+    trim: true
+  },
+  productSku: {
+    type: String,
+    trim: true
+  },
+  qty: {
+    type: Number,
+    default: 1
+  },
+  shipmentValue: {
+    type: Number,
+    default: 0
+  },
+  
+  // Supplier and Location
+  supplier: {
+    type: String,
+    trim: true
+  },
+  sourceLocation: {
+    type: String,
+    trim: true
+  },
+  destWarehouse: {
+    type: String,
+    trim: true
+  },
   
   // Transport Details
   awbLrNumber: {
     type: String,
-    required: true,
-    unique: true,
     trim: true
   },
   courierPartner: {
     type: String,
-    required: true,
     enum: ['VRL Logistics', 'Delhivery', 'Blue Dart', 'DTDC', 'FedEx', 'Aramex', 'Ecom Express', 'Xpressbees', 'Ekart', 'Other'],
+    trim: true,
+    default: 'VRL Logistics'
+  },
+  vehicleName: {
+    type: String,
     trim: true
   },
   vehicleNumber: {
     type: String,
-    required: true,
     trim: true
   },
   driverName: {
     type: String,
-    required: true,
     trim: true
   },
   driverMobile: {
     type: String,
-    required: true,
     trim: true
   },
   
   // Location Details (Auto-fetch from masters)
   pickupLocation: {
     type: String,
-    required: true,
     trim: true
   },
   deliveryLocation: {
     type: String,
-    required: true,
     trim: true
   },
   
   // Date Management
   pickupDate: {
     type: Date,
-    required: true,
     default: Date.now
   },
   dispatchDate: {
-    type: Date,
-    required: true
+    type: Date
   },
   lastScanTime: {
     type: Date
   },
   estimatedDelivery: {
-    type: Date,
-    required: true
+    type: Date
   },
   actualDeliveryDate: {
     type: Date
@@ -96,16 +127,15 @@ const docketTrackingSchema = new mongoose.Schema({
   // Shipment Details
   shipmentWeight: {
     type: Number,
-    required: true
+    default: 0
   },
   packagesCount: {
     type: Number,
-    required: true,
     default: 1
   },
   transportCost: {
     type: Number,
-    required: true
+    default: 0
   },
   shipmentType: {
     type: String,
@@ -124,6 +154,21 @@ const docketTrackingSchema = new mongoose.Schema({
     enum: ['pickup_pending', 'picked_up', 'in_transit', 'reached_hub', 'out_for_delivery', 'delivered', 'delayed', 'damaged', 'returned', 'cancelled', 'closed'],
     default: 'pickup_pending'
   },
+  warehouseStatus: {
+    type: String,
+    enum: ['Not Started', 'Awaited', 'Received', 'Processing', 'Completed'],
+    default: 'Not Started'
+  },
+  qcStatus: {
+    type: String,
+    enum: ['Pending', 'In Progress', 'Passed', 'Failed', 'Completed'],
+    default: 'Pending'
+  },
+  financeStatus: {
+    type: String,
+    enum: ['Not Initiated', 'Pending', 'Credit Note Issued', 'Completed'],
+    default: 'Not Initiated'
+  },
   podStatus: {
     type: String,
     enum: ['pending', 'uploaded', 'verified', 'rejected'],
@@ -133,6 +178,11 @@ const docketTrackingSchema = new mongoose.Schema({
     type: String,
     enum: ['none', 'minor', 'major', 'total_loss'],
     default: 'none'
+  },
+  assignedTeam: {
+    type: String,
+    trim: true,
+    default: 'Logistics Team'
   },
   
   // Additional Information
@@ -240,7 +290,7 @@ const docketTrackingSchema = new mongoose.Schema({
   },
   createdBy: {
     type: String,
-    required: true
+    default: 'system'
   },
   updatedBy: String
 }, {
@@ -250,7 +300,7 @@ const docketTrackingSchema = new mongoose.Schema({
 // Indexes for better query performance
 docketTrackingSchema.index({ docketId: 1 });
 docketTrackingSchema.index({ mrId: 1 });
-docketTrackingSchema.index({ lrNumber: 1 });
+docketTrackingSchema.index({ awbLrNumber: 1 });
 docketTrackingSchema.index({ supplierName: 1 });
 docketTrackingSchema.index({ materialStatus: 1 });
 docketTrackingSchema.index({ dispatchDate: 1 });
@@ -312,7 +362,7 @@ docketTrackingSchema.statics.searchDockets = function(searchTerm) {
     $or: [
       { docketId: regex },
       { mrId: regex },
-      { lrNumber: regex },
+      { awbLrNumber: regex },
       { supplierName: regex },
       { transporter: regex },
       { vehicleNo: regex }

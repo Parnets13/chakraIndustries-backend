@@ -17,6 +17,7 @@ router.get('/stats', materialReturnController.getStats);
 // 3. Return Lifecycle
 router.get('/', materialReturnController.getAll);
 router.post('/create', materialReturnController.create);
+router.get('/invoice/:invoiceNo/context', materialReturnController.getInvoiceContext);
 router.get('/context/:invoiceNo', materialReturnController.getInvoiceContext);
 router.get('/:id', materialReturnController.getById);
 

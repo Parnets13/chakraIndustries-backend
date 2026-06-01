@@ -142,32 +142,39 @@ const createDocket = async (req, res) => {
       docketData.docketId = `DKT-${year}-${sequence}`;
     }
 
+    // Auto-generate AWB/LR number if not provided
+    if (!docketData.awbLrNumber) {
+      docketData.awbLrNumber = `AWB-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+    }
+
+    // Set default dates if not provided
+    if (!docketData.pickupDate) {
+      docketData.pickupDate = new Date();
+    }
+
+    if (!docketData.dispatchDate) {
+      docketData.dispatchDate = new Date();
+    }
+
     // Auto-calculate estimated delivery if not provided
-    if (!docketData.estimatedDelivery && docketData.pickupDate) {
+    if (!docketData.estimatedDelivery) {
       const pickupDate = new Date(docketData.pickupDate);
       const estimatedDelivery = new Date(pickupDate);
-      estimatedDelivery.setDate(estimatedDelivery.getDate() + 2); // Default 2 days
+      estimatedDelivery.setDate(estimatedDelivery.getDate() + 3); // Default 3 days
       docketData.estimatedDelivery = estimatedDelivery;
     }
 
-    // Check if docket ID or AWB/LR number already exists
-    const existingDocket = await DocketTracking.findOne({
-      $or: [
-        { docketId: docketData.docketId },
-        { awbLrNumber: docketData.awbLrNumber }
-      ],
-      isActive: true
-    });
+    // Set default locations if not provided
+    if (!docketData.pickupLocation) {
+      docketData.pickupLocation = docketData.sourceLocation || 'Pickup Location';
+    }
 
-    if (existingDocket) {
-      return res.status(400).json({
-        success: false,
-        message: 'Docket ID or AWB/LR Number already exists'
-      });
+    if (!docketData.deliveryLocation) {
+      docketData.deliveryLocation = docketData.destWarehouse || 'Delivery Location';
     }
 
     // Initialize tracking history
-    if (!docketData.trackingHistory) {
+    if (!docketData.trackingHistory || docketData.trackingHistory.length === 0) {
       docketData.trackingHistory = [{
         status: docketData.transportStatus || 'pickup_pending',
         location: docketData.pickupLocation,
@@ -210,33 +217,28 @@ const updateDocket = async (req, res) => {
       });
     }
 
-    // Check for duplicate docket ID or LR number if they're being updated
-    if (updateData.docketId || updateData.lrNumber) {
-      const existingDocket = await DocketTracking.findOne({
-        _id: { $ne: id },
-        $or: [
-          ...(updateData.docketId ? [{ docketId: updateData.docketId }] : []),
-          ...(updateData.lrNumber ? [{ lrNumber: updateData.lrNumber }] : [])
-        ],
-        isActive: true
-      });
+    // Remove fields that shouldn't be updated directly
+    delete updateData._id;
+    delete updateData.createdAt;
+    delete updateData.createdBy;
 
-      if (existingDocket) {
-        return res.status(400).json({
-          success: false,
-          message: 'Docket ID or LR Number already exists'
-        });
+    // Update docket using findByIdAndUpdate
+    const updatedDocket = await DocketTracking.findByIdAndUpdate(
+      id,
+      { 
+        ...updateData,
+        updatedBy: updateData.updatedBy || 'system'
+      },
+      { 
+        new: true,
+        runValidators: false // Disable validators for update to allow partial updates
       }
-    }
-
-    // Update docket
-    Object.assign(docket, updateData);
-    await docket.save();
+    );
 
     res.json({
       success: true,
       message: 'Docket updated successfully',
-      data: docket
+      data: updatedDocket
     });
   } catch (error) {
     console.error('Error updating docket:', error);
@@ -252,7 +254,7 @@ const updateDocket = async (req, res) => {
 const updateDocketStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, location, remarks } = req.body;
+    const { transportStatus, status, location, remarks, stage, warehouseStatus, qcStatus, financeStatus } = req.body;
 
     const docket = await DocketTracking.findById(id);
     
@@ -263,20 +265,24 @@ const updateDocketStatus = async (req, res) => {
       });
     }
 
-    // Update status
-    docket.materialStatus = status;
+    // Update status fields
+    if (transportStatus) docket.transportStatus = transportStatus;
+    if (status) docket.transportStatus = status; // Support both field names
+    if (warehouseStatus) docket.warehouseStatus = warehouseStatus;
+    if (qcStatus) docket.qcStatus = qcStatus;
+    if (financeStatus) docket.financeStatus = financeStatus;
     
     // Add to tracking history
     docket.trackingHistory.push({
-      status,
+      status: transportStatus || status || docket.transportStatus,
       location,
       remarks,
       timestamp: new Date()
     });
 
-    // Set actual arrival if delivered
-    if (status === 'delivered' && !docket.actualArrival) {
-      docket.actualArrival = new Date();
+    // Set actual delivery date if delivered
+    if ((transportStatus === 'delivered' || status === 'delivered') && !docket.actualDeliveryDate) {
+      docket.actualDeliveryDate = new Date();
     }
 
     await docket.save();
