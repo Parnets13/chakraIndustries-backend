@@ -96,7 +96,10 @@ const itemMasterSchema = new mongoose.Schema({
   },
   barcode: {
     type: String,
-    default: ''
+    default: '',
+    trim: true,
+    // sparse unique: allows multiple empty strings but enforces uniqueness for non-empty values
+    index: { unique: true, sparse: true },
   },
   
   // Metadata
@@ -109,6 +112,28 @@ const itemMasterSchema = new mongoose.Schema({
     ref: 'User'
   },
   
+  // Tally Integration Fields
+  tallyGuid: {
+    type: String,
+    trim: true,
+    sparse: true,
+    index: true
+  },
+  tallyAlterId: {
+    type: String,
+    trim: true
+  },
+  tallySynced: {
+    type: Boolean,
+    default: false
+  },
+  lastTallySync: {
+    type: Date
+  },
+  tallyStockName: {
+    type: String,
+    trim: true
+  }
 }, {
   timestamps: true
 });

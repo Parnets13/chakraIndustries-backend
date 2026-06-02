@@ -107,7 +107,31 @@ const vendorSchema = new mongoose.Schema(
       enum: ['Active', 'Inactive', 'Blacklisted'],
       default: 'Active'
     },
-    remarks: String
+    remarks: String,
+    
+    // Tally Integration Fields
+    tallyGuid: {
+      type: String,
+      trim: true,
+      sparse: true,
+      index: true
+    },
+    tallyAlterId: {
+      type: String,
+      trim: true
+    },
+    tallySynced: {
+      type: Boolean,
+      default: false
+    },
+    lastTallySync: {
+      type: Date
+    },
+    tallyMasterType: {
+      type: String,
+      enum: ['Ledger', 'Party'],
+      default: 'Ledger'
+    }
   },
   {
     timestamps: true

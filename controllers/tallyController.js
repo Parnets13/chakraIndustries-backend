@@ -1,7 +1,12 @@
 import TallyConfig from '../models/TallyConfig.js';
 import TallySyncLog from '../models/TallySyncLog.js';
+import TallyVoucher from '../models/TallyVoucher.js';
 import ItemMaster from '../models/ItemMaster.js';
 import PurchaseOrder from '../models/PurchaseOrder.js';
+import Invoice from '../models/Invoice.js';
+import Vendor from '../models/Vendor.js';
+import Client from '../models/Client.js';
+import AccountsLedger from '../models/AccountsLedger.js';
 import {
   testTallyConnection,
   runTargetedSync,
@@ -194,5 +199,69 @@ export const retrySync = async (req, res) => {
       return res.json({ success: false, offline: true, data: result, message: result.error });
     }
     res.json({ success: result.ok, data: result, message: result.ok ? 'Retry successful' : `Retry failed: ${result.error}` });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+
+// ─── VOUCHERS (Payment & Receipt Management) ──────────────────────────────────
+
+export const getVouchers = async (req, res) => {
+  try {
+    const { type, partyName, limit = 100 } = req.query;
+    const filter = {};
+    if (type) filter.voucherType = type;
+    if (partyName) filter.partyName = new RegExp(partyName, 'i');
+    const vouchers = await TallyVoucher.find(filter)
+      .sort({ voucherDate: -1 })
+      .limit(parseInt(limit));
+    res.json({ success: true, data: vouchers });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+export const createVoucher = async (req, res) => {
+  try {
+    const voucher = await TallyVoucher.create({ ...req.body, source: 'ERP' });
+    res.json({ success: true, data: voucher, message: 'Voucher created (will sync to Tally on next sync)' });
+  } catch (e) { res.status(400).json({ success: false, message: e.message }); }
+};
+
+export const deleteVoucher = async (req, res) => {
+  try {
+    await TallyVoucher.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Voucher deleted' });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+// ─── GUID STATUS ──────────────────────────────────────────────────────────────
+
+export const getGuidStatus = async (req, res) => {
+  try {
+    const [items, vendors, clients, ledgers, invoices, pos] = await Promise.all([
+      ItemMaster.countDocuments({ tallyGuid: { $exists: true } }),
+      Vendor.countDocuments({ tallyGuid: { $exists: true } }),
+      Client.countDocuments({ tallyGuid: { $exists: true } }),
+      AccountsLedger.countDocuments({ tallyGuid: { $exists: true } }),
+      Invoice.countDocuments({ tallyGuid: { $exists: true } }),
+      PurchaseOrder.countDocuments({ tallyGuid: { $exists: true } }),
+    ]);
+    const [itemsTotal, vendorsTotal, clientsTotal, ledgersTotal, invoicesTotal, posTotal] = await Promise.all([
+      ItemMaster.countDocuments({ isActive: true }),
+      Vendor.countDocuments({}),
+      Client.countDocuments({ status: 'Active' }),
+      AccountsLedger.countDocuments({ isActive: true }),
+      Invoice.countDocuments({}),
+      PurchaseOrder.countDocuments({}),
+    ]);
+    res.json({
+      success: true,
+      data: {
+        items: { synced: items, total: itemsTotal, percentage: itemsTotal ? ((items / itemsTotal) * 100).toFixed(1) : '0.0' },
+        vendors: { synced: vendors, total: vendorsTotal, percentage: vendorsTotal ? ((vendors / vendorsTotal) * 100).toFixed(1) : '0.0' },
+        clients: { synced: clients, total: clientsTotal, percentage: clientsTotal ? ((clients / clientsTotal) * 100).toFixed(1) : '0.0' },
+        ledgers: { synced: ledgers, total: ledgersTotal, percentage: ledgersTotal ? ((ledgers / ledgersTotal) * 100).toFixed(1) : '0.0' },
+        invoices: { synced: invoices, total: invoicesTotal, percentage: invoicesTotal ? ((invoices / invoicesTotal) * 100).toFixed(1) : '0.0' },
+        purchaseOrders: { synced: pos, total: posTotal, percentage: posTotal ? ((pos / posTotal) * 100).toFixed(1) : '0.0' },
+      },
+    });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };

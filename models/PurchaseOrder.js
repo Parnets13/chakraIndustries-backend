@@ -47,6 +47,20 @@ const purchaseOrderSchema = new mongoose.Schema({
   // Tally sync tracking
   tallySync: { type: Boolean, default: false },
   tallySyncAt: { type: Date },
+  tallyGuid: {
+    type: String,
+    trim: true,
+    sparse: true,
+    index: true
+  },
+  tallyAlterId: {
+    type: String,
+    trim: true
+  },
+  tallyVoucherNumber: {
+    type: String,
+    trim: true
+  }
 }, {
   timestamps: true
 });
