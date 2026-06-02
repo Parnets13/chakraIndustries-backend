@@ -50,12 +50,23 @@ export const testConnection = async (req, res) => {
     const connected = result.status === 'Connected';
     res.json({
       success: true,
-      data: { status: result.status, error: result.error || null, url: result.url || null },
+      data: {
+        status         : result.status,
+        error          : result.error || null,
+        url            : result.url,
+        httpStatus     : result.httpStatus || null,
+        requestMethod  : result.requestMethod,
+        requestBody    : result.requestBody,
+        responsePreview: result.responsePreview || null,
+      },
       message: connected
-        ? `Connected to Tally at ${result.url || 'configured URL'}`
-        : result.error || 'Tally is not reachable',
+        ? `Connected — POST ${result.url} → HTTP ${result.httpStatus || '2xx'}`
+        : `Not reachable — ${result.error}`,
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) {
+    console.error('[TallyController] testConnection error:', e);
+    res.status(500).json({ success: false, message: e.message });
+  }
 };
 
 // ── Sync Logs ─────────────────────────────────────────────────────────────────
