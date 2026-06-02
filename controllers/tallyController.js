@@ -50,9 +50,9 @@ export const testConnection = async (req, res) => {
     const connected = result.status === 'Connected';
     res.json({
       success: true,
-      data: { status: result.status, error: result.error || null },
+      data: { status: result.status, error: result.error || null, url: result.url || null },
       message: connected
-        ? 'Tally connected successfully'
+        ? `Connected to Tally at ${result.url || 'configured URL'}`
         : result.error || 'Tally is not reachable',
     });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }

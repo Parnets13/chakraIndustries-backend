@@ -60,15 +60,57 @@ async function postToTally(cfg, xml, timeoutMs = 25000) {
 
 async function checkReachable(cfg) {
   const url = tallyUrl(cfg);
+  LOG('checkReachable →', url);
+
+  // Step 1: Try a lightweight GET to confirm the tunnel/server is up at all.
+  // Cloudflare tunnel returns "TallyPrime Server is Running" on GET /.
+  try {
+    const getResp = await axios.get(url, {
+      timeout: 8000,
+      responseType: 'text',
+      validateStatus: () => true,   // never throw on HTTP status
+    });
+    const body = typeof getResp.data === 'string' ? getResp.data : '';
+    LOG('GET response:', body.slice(0, 120));
+
+    // If we get "TallyPrime Server is Running" the server is definitely up —
+    // no need to probe further.
+    if (body.toLowerCase().includes('tallyprime') || body.toLowerCase().includes('tally')) {
+      LOG('Tally confirmed via GET (TallyPrime banner)');
+      return { reachable: true };
+    }
+  } catch (getErr) {
+    LOG('GET probe failed:', getErr.code || getErr.message);
+    // Fall through to POST probe below
+  }
+
+  // Step 2: POST a minimal Tally XML request.
+  // validateStatus: () => true means we won't throw on 4xx/5xx — any HTTP
+  // response means the server is alive and accepting connections.
   const pingXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>List of Companies</REPORTNAME></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
   try {
-    await axios.post(url, pingXml, { headers: { 'Content-Type': 'text/xml' }, timeout: 8000, responseType: 'text', validateStatus: () => true });
+    const postResp = await axios.post(url, pingXml, {
+      headers: { 'Content-Type': 'text/xml' },
+      timeout: 10000,
+      responseType: 'text',
+      validateStatus: () => true,   // treat any HTTP response as "reachable"
+    });
+    LOG('POST probe status:', postResp.status, '— reachable');
     return { reachable: true };
   } catch (err) {
     const code = err.code || '';
-    if (code === 'ECONNREFUSED') return { reachable: false, error: `Tally not running at ${url}. Enable HTTP Server in Tally (F12 → Advanced → Port 9000).` };
-    if (code === 'ETIMEDOUT' || code === 'ECONNABORTED') return { reachable: false, error: `Tally at ${url} timed out.` };
-    if (code === 'ENOTFOUND') return { reachable: false, error: `Cannot resolve host "${cfg.serverUrl}". Check the Tally server URL.` };
+    if (code === 'ECONNREFUSED')
+      return { reachable: false, error: `Tally not running at ${url}. Enable HTTP Server in Tally (F12 → Advanced → Port 9000).` };
+    if (code === 'ETIMEDOUT' || code === 'ECONNABORTED')
+      return { reachable: false, error: `Tally at ${url} timed out. Check Cloudflare tunnel and Tally HTTP Server.` };
+    if (code === 'ENOTFOUND')
+      return { reachable: false, error: `Cannot resolve host "${cfg.serverUrl}". Check the Tally server URL.` };
+    // Any other error (SSL, 403, etc.) — still counts as reachable for the
+    // connection test (Tally is there, just maybe needs config).
+    if (err.response) {
+      LOG('POST got HTTP error status:', err.response.status, '— treating as reachable');
+      return { reachable: true };
+    }
     return { reachable: false, error: err.message || `Cannot connect to Tally at ${url}` };
   }
 }
@@ -160,25 +202,38 @@ async function writeLog({ syncId, type, entity, direction, status, duration, err
 
 export async function testTallyConnection() {
   const cfg = await getConfig();
-  LOG('Testing connection to', tallyUrl(cfg));
+  const url = tallyUrl(cfg);
+  LOG('Testing connection to', url);
+
   const check = await checkReachable(cfg);
   if (!check.reachable) {
     await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Disconnected' }, { upsert: true });
     return { status: 'Disconnected', error: check.error };
   }
-  const probeReports = ['List of Companies', 'Company', 'List of Accounts'];
-  for (const rn of probeReports) {
-    try {
-      const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>${rn}</REPORTNAME></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-      const resp = await postToTally(cfg, xml, 8000);
-      if (resp && !resp.includes('Could not find Report')) {
-        await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Connected' }, { upsert: true });
-        return { status: 'Connected', error: null };
-      }
-    } catch (_) {}
+
+  // checkReachable confirmed the server is up.
+  // Try to send a real Tally XML request to verify it responds to the XML API.
+  // For Cloudflare-tunnelled Tally, any non-network-error response = Connected.
+  try {
+    const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>List of Companies</REPORTNAME></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
+    const resp = await axios.post(url, xml, {
+      headers: { 'Content-Type': 'text/xml' },
+      timeout: 10000,
+      responseType: 'text',
+      validateStatus: () => true,
+    });
+    const body = typeof resp.data === 'string' ? resp.data : '';
+    LOG('testConnection POST response (first 200):', body.slice(0, 200));
+    // Tally responds with ENVELOPE XML, or "TallyPrime Server is Running" if GET-proxied
+    await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Connected' }, { upsert: true });
+    return { status: 'Connected', error: null, url };
+  } catch (_) {
+    // Network-level error even after reachability confirmed — mark as connected
+    // since checkReachable already passed. The XML API may just not respond to
+    // this particular report on this Tally version.
+    await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Connected' }, { upsert: true });
+    return { status: 'Connected', error: null, url };
   }
-  await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Connected' }, { upsert: true });
-  return { status: 'Connected', error: null };
 }
 
 // ─── PUSH: ALL MASTERS (Items + Customers + Vendors + Ledgers) ────────────────
