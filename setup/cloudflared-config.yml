@@ -1,0 +1,15 @@
+tunnel: f7706eef-df45-4902-b75f-45d641cd8e56
+credentials-file: C:\Windows\System32\config\systemprofile\.cloudflared\f7706eef-df45-4902-b75f-45d641cd8e56.json
+
+ingress:
+  # ERP backend (Node.js / Express) — port 5001
+  - hostname: erp.majesticmall.net
+    service: http://127.0.0.1:5001
+
+  # Tally Prime HTTP server — port 9000 (same machine)
+  # Add a CNAME record in Cloudflare DNS:  tally.majesticmall.net → this tunnel
+  - hostname: tally.majesticmall.net
+    service: http://127.0.0.1:9000
+
+  # Catch-all
+  - service: http_status:404

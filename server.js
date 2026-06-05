@@ -128,6 +128,8 @@ app.use(cors({
     if (!origin) return callback(null, true);
     const allowed = [
       'https://chakraindustries-backend.onrender.com',
+      'https://erp.majesticmall.net',
+      'https://majesticmall.net',
       'http://localhost:3000',
       'http://localhost:5001',
       'http://localhost:5173',

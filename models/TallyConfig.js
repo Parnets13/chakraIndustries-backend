@@ -1,7 +1,10 @@
 import mongoose from 'mongoose';
 
 const tallyConfigSchema = new mongoose.Schema({
+  // URL of the ERP itself (for webhook reference only — NOT used to pull from Tally)
   serverUrl:    { type: String, default: 'https://erp.majesticmall.net' },
+  // Local IP/hostname where Tally Prime HTTP server is running (e.g. http://192.168.1.10)
+  tallyLocalUrl:{ type: String, default: '' },
   port:         { type: String, default: '9000' },
   companyName:  { type: String, default: '' },
   authType:     { type: String, enum: ['None','Basic Auth','API Key'], default: 'None' },

@@ -25,10 +25,25 @@ const connectDB = async () => {
     await mongoose.connect(mongoUri, {
       serverSelectionTimeoutMS: 10000,
       socketTimeoutMS: 45000,
+      connectTimeoutMS: 10000,
+      heartbeatFrequencyMS: 10000,
       retryWrites: true,
-      w: 'majority'
+      w: 'majority',
+      maxPoolSize: 10,        // cap connection pool to avoid overwhelming Atlas
+      minPoolSize: 2,         // keep a minimum ready
     });
     console.log('✓ MongoDB connected successfully');
+
+    // Log connection events for monitoring
+    mongoose.connection.on('disconnected', () => {
+      console.warn('⚠ MongoDB disconnected — Mongoose will auto-reconnect');
+    });
+    mongoose.connection.on('reconnected', () => {
+      console.log('✓ MongoDB reconnected');
+    });
+    mongoose.connection.on('error', (err) => {
+      console.error('✗ MongoDB connection error:', err.message);
+    });
   } catch (error) {
     console.error('✗ MongoDB connection error:', error.message);
     console.warn('⚠ Continuing without database connection...');

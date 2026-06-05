@@ -358,32 +358,114 @@ class DynamicDataFlowService {
     return stateCodes[stateName] || '00';
   }
   static async syncWithTally(client, action = 'create') {
+    const syncId = `SYNC-${Date.now()}-${client.clientId}`;
     try {
       const config = await TallyConfig.findOne();
-      if (!config || config.connectionStatus !== 'Connected') {
-        console.log('Tally not connected, skipping sync');
+      if (!config) {
+        console.log('[DynamicDataFlow] No TallyConfig found, skipping Tally sync');
+        return false;
+      }
+      if (config.connectionStatus !== 'Connected') {
+        console.log('[DynamicDataFlow] Tally not connected (status:', config.connectionStatus, '), skipping sync');
+        return false;
+      }
+
+      // Build the actual Tally local URL (same logic as tallyService.js)
+      const localUrl = (config.tallyLocalUrl || '').trim();
+      const port     = config.port || '9000';
+      let tallyEndpoint = localUrl
+        ? (localUrl.match(/:\d+$/) ? localUrl.replace(/\/$/, '') : `${localUrl.replace(/\/$/, '')}:${port}`)
+        : null;
+
+      if (!tallyEndpoint) {
+        console.warn('[DynamicDataFlow] tallyLocalUrl not configured — cannot push ledger to Tally');
+        await TallySyncLog.create({
+          syncId,
+          type: 'Ledger',
+          entity: client.name,
+          direction: 'ERP → Tally',
+          status: 'Failed',
+          error: 'tallyLocalUrl not configured — set Tally machine IP in Tally configuration tab',
+          duration: '0s',
+          records: 0,
+          triggeredBy: client.createdBy
+        });
         return false;
       }
 
       // Generate Tally XML for ledger creation
       const tallyXML = this.generateTallyLedgerXML(client, action);
-      
-      // In a real implementation, this would send XML to Tally
-      console.log('Tally XML Generated:', tallyXML);
 
-      // Create sync log
-      const syncLog = await TallySyncLog.create({
-        syncId: `SYNC-${Date.now()}-${client.clientId}`,
-        type: 'Ledger',
-        entity: client.name,
-        direction: 'ERP → Tally',
-        status: 'Success',
-        duration: '0.5s',
-        records: 1,
-        triggeredBy: client.createdBy
+      console.log('[DynamicDataFlow] Posting ledger XML to Tally:', tallyEndpoint);
+      console.log('[DynamicDataFlow] XML body:\n', tallyXML);
+
+      // POST to Tally
+      const { default: axios } = await import('axios');
+      const startMs = Date.now();
+      let responseBody = '';
+      try {
+        const axiosResp = await axios({
+          method: 'POST',
+          url: tallyEndpoint,
+          data: tallyXML,
+          headers: { 'Content-Type': 'text/xml', Accept: '*/*' },
+          timeout: 20000,
+          responseType: 'text',
+          validateStatus: () => true,
+        });
+        responseBody = typeof axiosResp.data === 'string' ? axiosResp.data : JSON.stringify(axiosResp.data);
+        console.log(`[DynamicDataFlow] Tally response HTTP ${axiosResp.status} — ${responseBody.slice(0, 300)}`);
+      } catch (httpErr) {
+        const duration = `${((Date.now() - startMs) / 1000).toFixed(1)}s`;
+        console.error('[DynamicDataFlow] HTTP POST to Tally failed:', httpErr.message);
+        await TallySyncLog.create({
+          syncId,
+          type: 'Ledger',
+          entity: client.name,
+          direction: 'ERP → Tally',
+          status: 'Failed',
+          error: `HTTP error: ${httpErr.message}`,
+          duration,
+          records: 0,
+          triggeredBy: client.createdBy
+        });
+        await CorporateClient.findByIdAndUpdate(client._id, {
+          'tallySync.synced': false,
+          'tallySync.syncStatus': 'Failed',
+          'tallySync.syncError': httpErr.message
+        });
+        return false;
+      }
+
+      const duration = `${((Date.now() - startMs) / 1000).toFixed(1)}s`;
+
+      // Parse Tally response for errors
+      const hasError = responseBody.includes('<LINEERROR>') || responseBody.includes('<ERRORS>');
+      const created  = parseInt(responseBody.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
+      const altered  = parseInt(responseBody.match(/<ALTERED>(\d+)<\/ALTERED>/i)?.[1] || '0');
+      const syncOk   = !hasError || (created > 0 || altered > 0);
+
+      if (!syncOk) {
+        const errMatch = responseBody.match(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/i);
+        const errMsg   = errMatch ? errMatch[1].trim() : 'Tally returned an error response';
+        console.error('[DynamicDataFlow] Tally rejected ledger:', errMsg);
+        await TallySyncLog.create({
+          syncId, type: 'Ledger', entity: client.name, direction: 'ERP → Tally',
+          status: 'Failed', error: errMsg, duration, records: 0, triggeredBy: client.createdBy
+        });
+        await CorporateClient.findByIdAndUpdate(client._id, {
+          'tallySync.synced': false, 'tallySync.syncStatus': 'Failed', 'tallySync.syncError': errMsg
+        });
+        return false;
+      }
+
+      console.log(`[DynamicDataFlow] Ledger "${client.name}" synced to Tally — created:${created} altered:${altered}`);
+
+      await TallySyncLog.create({
+        syncId, type: 'Ledger', entity: client.name, direction: 'ERP → Tally',
+        status: 'Success', duration, records: 1, triggeredBy: client.createdBy
       });
 
-      // Update client with Tally sync info
       await CorporateClient.findByIdAndUpdate(client._id, {
         tallyLedgerId: `LED-${client.clientId}`,
         'tallySync.synced': true,
@@ -393,26 +475,16 @@ class DynamicDataFlowService {
 
       return true;
     } catch (error) {
-      console.error('Tally Sync Error:', error);
-      
-      // Log failed sync
-      await TallySyncLog.create({
-        syncId: `SYNC-${Date.now()}-${client.clientId}`,
-        type: 'Ledger',
-        entity: client.name,
-        direction: 'ERP → Tally',
-        status: 'Failed',
-        error: error.message,
-        records: 0,
-        triggeredBy: client.createdBy
-      });
+      console.error('[DynamicDataFlow] syncWithTally unexpected error:', error);
 
-      // Update client with sync error
+      await TallySyncLog.create({
+        syncId, type: 'Ledger', entity: client.name, direction: 'ERP → Tally',
+        status: 'Failed', error: error.message, records: 0, triggeredBy: client.createdBy
+      }).catch(() => {});
+
       await CorporateClient.findByIdAndUpdate(client._id, {
-        'tallySync.synced': false,
-        'tallySync.syncStatus': 'Failed',
-        'tallySync.syncError': error.message
-      });
+        'tallySync.synced': false, 'tallySync.syncStatus': 'Failed', 'tallySync.syncError': error.message
+      }).catch(() => {});
 
       return false;
     }

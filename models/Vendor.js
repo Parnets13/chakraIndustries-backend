@@ -5,7 +5,7 @@ const vendorSchema = new mongoose.Schema(
     vendorId: {
       type: String,
       unique: true,
-      required: true,
+      sparse: true,   // allow null during upsert — set only on insert
       index: true
     },
     companyName: {
@@ -15,8 +15,8 @@ const vendorSchema = new mongoose.Schema(
     },
     category: {
       type: String,
-      required: [true, 'Category is required'],
-      trim: true
+      trim: true,
+      default: 'General',
     },
     website: {
       type: String,
@@ -27,41 +27,48 @@ const vendorSchema = new mongoose.Schema(
     // Contact Information
     contactPerson: {
       type: String,
-      required: [true, 'Contact person is required'],
-      trim: true
+      trim: true,
+      default: '',
     },
     designation: String,
     phone: {
       type: String,
-      required: [true, 'Phone is required'],
-      match: [/^\d{10}$/, 'Phone must be exactly 10 digits'],
+      // Relaxed validation — Tally-imported vendors may have non-standard formats
+      // The frontend form enforces 10-digit validation on manual entry
+      trim: true,
+      default: '',
     },
     alternatePhone: {
       type: String,
-      match: [/^\d{10}$/, 'Alternate phone must be exactly 10 digits'],
+      trim: true,
     },
     email: {
       type: String,
-      required: [true, 'Email is required'],
+      trim: true,
+      default: '',
     },
     alternateEmail: String,
     
     // Address Information
     address: {
       type: String,
-      required: [true, 'Address is required']
+      trim: true,
+      default: '',
     },
     city: {
       type: String,
-      required: [true, 'City is required']
+      trim: true,
+      default: '',
     },
     state: {
       type: String,
-      required: [true, 'State is required']
+      trim: true,
+      default: '',
     },
     pincode: {
       type: String,
-      required: [true, 'Pincode is required'],
+      trim: true,
+      default: '',
     },
     country: {
       type: String,
@@ -76,7 +83,8 @@ const vendorSchema = new mongoose.Schema(
     },
     panNumber: {
       type: String,
-      match: [/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/, 'Invalid PAN format']
+      trim: true,
+      // Relaxed — PAN validation applied in frontend only, not on sync imports
     },
     bankName: String,
     accountNumber: String,

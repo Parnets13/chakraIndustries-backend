@@ -24,6 +24,14 @@ function extractGuid(block) {
   const m = block.match(/<GUID>(.*?)<\/GUID>/i);
   return m ? m[1].trim() : null;
 }
+function decodeXml(s) {
+  if (!s) return '';
+  let v = String(s);
+  for (let i = 0; i < 2; i++) {
+    v = v.replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>').replace(/&quot;/gi,'"').replace(/&apos;/gi,"'");
+  }
+  return v;
+}
 function extractAlterId(block) {
   const m = block.match(/<ALTERID[^>]*>(.*?)<\/ALTERID>/i);
   return m ? m[1].trim() : null;
@@ -40,10 +48,18 @@ export const tallyWebhook = async (req, res) => {
   const syncId = `WEBHOOK-${Date.now()}`;
 
   try {
+    // ── Auth check ─────────────────────────────────────────────────────────
+    // Accepts secret from env (fast, no DB hit) OR DB config (legacy)
+    const envSecret = (process.env.TALLY_WEBHOOK_SECRET || '').trim();
     const cfg = await TallyConfig.findOne();
-    if (cfg?.apiKey && cfg.authType === 'API Key') {
-      const secret = req.headers['x-tally-secret'] || req.headers['authorization']?.replace('Bearer ','');
-      if (secret !== cfg.apiKey) return res.status(401).json({ success:false, message:'Unauthorized' });
+    const dbSecret = (cfg?.authType === 'API Key' && cfg?.apiKey) ? cfg.apiKey : '';
+    const expectedSecret = envSecret || dbSecret;
+
+    if (expectedSecret) {
+      const received = (req.headers['x-tally-secret'] || req.headers['authorization']?.replace('Bearer ', '') || '').trim();
+      if (received !== expectedSecret) {
+        return res.status(401).json({ success: false, message: 'Unauthorized — invalid webhook secret' });
+      }
     }
 
     const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (req.body||'');
@@ -68,15 +84,18 @@ export const tallyWebhook = async (req, res) => {
         const cost    = parseFloat(block.match(/<STANDARDCOST>(.*?)<\/STANDARDCOST>/i)?.[1])||0;
         const uMap    = {Nos:'units',Kg:'kg',Ltr:'liter',Mtr:'meter',Box:'box',Pcs:'piece'};
         const sku     = name.replace(/[^A-Z0-9]/gi,'-').toUpperCase().slice(0,30);
+        const barcodeVal = guid
+          ? `TALLY-${guid.replace(/[^A-Z0-9]/gi,'').slice(0,20)}`
+          : `TALLY-${sku}-${Date.now()%100000}`;
         const filter  = guid ? { tallyGuid: guid } : { name };
         ops.push({ updateOne:{
           filter,
           update:{
             $set:{ hsn, gst, unit:uMap[unit]||'units', costPrice:cost, unitPrice:cost,
-                   tallySynced:true, lastTallySync:new Date(),
+                   tallySynced:true, lastTallySync:new Date(), status:'Active', isActive:true,
                    ...(guid ? { tallyGuid:guid } : {}),
                    ...(alterId ? { tallyAlterId:alterId } : {}) },
-            $setOnInsert:{ itemId:`TALLY-${sku}`, sku, name, sellingPrice:cost, isActive:true },
+            $setOnInsert:{ itemId:`TALLY-${sku}`, sku, name, sellingPrice:cost, barcode:barcodeVal },
           },
           upsert:true,
         }});
@@ -90,63 +109,105 @@ export const tallyWebhook = async (req, res) => {
       const matches = [...rawBody.matchAll(/<LEDGER[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/LEDGER>/gi)];
       const ledgerOps = [], vendorOps = [], clientOps = [];
       for (const match of matches) {
-        const name = match[1]?.trim(); if (!name) continue;
+        const name = decodeXml(match[1]?.trim()); if (!name) continue;
         const block       = match[2];
         const guid        = extractGuid(block);
         const alterId     = extractAlterId(block);
-        const parent      = (block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1]||'').trim();
+        const parent      = decodeXml((block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1]||'').trim());
         if (!parent.includes('Sundry')) continue;
-        const gstNumber      = (block.match(/<PARTYGSTIN>(.*?)<\/PARTYGSTIN>/i)?.[1]||'N/A').trim();
+        const gstNumber      = decodeXml((block.match(/<PARTYGSTIN>(.*?)<\/PARTYGSTIN>/i)?.[1]||'N/A').trim());
         const openingBalance = parseFloat(block.match(/<OPENINGBALANCE>(.*?)<\/OPENINGBALANCE>/i)?.[1])||0;
-        const email          = (block.match(/<EMAIL>(.*?)<\/EMAIL>/i)?.[1]||'').trim();
-        const phone          = (block.match(/<LEDGERMOBILE>(.*?)<\/LEDGERMOBILE>/i)?.[1]||'').trim();
+        const email          = decodeXml((block.match(/<EMAIL>(.*?)<\/EMAIL>/i)?.[1]||'').trim());
+        const phone          = decodeXml((block.match(/<LEDGERMOBILE>(.*?)<\/LEDGERMOBILE>/i)?.[1]||'').trim());
+        const contactPerson  = decodeXml((block.match(/<MAILINGNAME>(.*?)<\/MAILINGNAME>/i)?.[1]||'').trim());
         const isCreditor     = parent.includes('Creditor');
         const ledgerGroup    = isCreditor ? 'Sundry Creditors' : 'Sundry Debtors';
         const ledgerCode     = `TALLY-${name.replace(/[^A-Z0-9]/gi,'-').toUpperCase().slice(0,20)}-${Date.now()%10000}`;
+        // Parse address
+        const addrLines = [...block.matchAll(/<ADDRESS>([\s\S]*?)<\/ADDRESS>/gi)].map(a=>decodeXml(a[1].trim())).filter(Boolean);
+        const wCity    = decodeXml((block.match(/<LEDGERCITY>(.*?)<\/LEDGERCITY>/i)?.[1]||'').trim());
+        const wState   = decodeXml((block.match(/<STATENAME>(.*?)<\/STATENAME>/i)?.[1]||'').trim());
+        const wPincode = decodeXml((block.match(/<PINCODE>(.*?)<\/PINCODE>/i)?.[1]||'').trim()).replace(/\D/g,'').slice(0,6);
+        let wDCity=wCity, wDState=wState, wDPin=wPincode;
+        if (!wDCity||!wDState) { for(const ln of addrLines){ const pm=ln.match(/\b(\d{6})\b/); if(pm){ if(!wDPin)wDPin=pm[1]; const pts=ln.replace(pm[0],'').replace(/[-,\s]+$/,'').split(/[,\-]/).map(p=>p.trim()).filter(Boolean); if(!wDCity&&pts[0])wDCity=pts[0]; if(!wDState&&pts[1])wDState=pts[1]; break; }}}
+        const wAddr = addrLines.slice(0,2).join(', ');
+        // Normalise phone
+        const _wd=phone?String(phone).replace(/\D/g,''):''; const _wc=(()=>{let d=_wd;if(d.length===12&&d.startsWith('91'))d=d.slice(2);if(d.length===11&&d.startsWith('0'))d=d.slice(1);return d.length===10?d:'';})(); const wSafePhone=_wc||_wd.slice(0,15)||'0000000000'; const wSafeEmail=email||`${name.replace(/\s+/g,'').toLowerCase().slice(0,30)}@tally.sync`;
         const lFilter = guid ? { tallyGuid:guid } : { ledgerName:name };
         ledgerOps.push({ updateOne:{
           filter:lFilter,
           update:{
-            $set:{ ledgerGroup, gstNumber, openingBalance, email, phone, syncedWithTally:true, lastTallySync:new Date(),
+            $set:{ ledgerGroup, gstNumber, openingBalance, syncedWithTally:true, lastTallySync:new Date(),
+                   ...(email?{email}:{}), ...(wSafePhone!=='0000000000'?{phone:wSafePhone}:{}),
+                   ...(wAddr?{'address.street':wAddr}:{}), ...(wDCity?{'address.city':wDCity}:{}),
+                   ...(wDState?{'address.state':wDState}:{}), ...(wDPin?{'address.pincode':wDPin}:{}),
                    ...(guid?{tallyGuid:guid}:{}), ...(alterId?{tallyAlterId:alterId}:{}) },
-            $setOnInsert:{ ledgerCode, ledgerName:name, contactPerson:name, panNumber:'N/A', isActive:true },
+            $setOnInsert:{ ledgerCode, ledgerName:name, contactPerson:contactPerson||name, panNumber:'N/A', isActive:true },
           },
           upsert:true,
         }});
         if (isCreditor) {
+          const _vd = phone ? String(phone).replace(/\D/g,'') : '';
+          const _vc = (() => { let d=_vd; if(d.length===12&&d.startsWith('91'))d=d.slice(2); if(d.length===11&&d.startsWith('0'))d=d.slice(1); return d.length===10?d:''; })();
+          const vSafePhone = _vc || _vd.slice(0,15) || '0000000000';
+          const vSafeEmail = email || `${name.replace(/\s+/g,'').toLowerCase().slice(0,30)}@tally.sync`;
           vendorOps.push({ updateOne:{
             filter: guid ? {tallyGuid:guid} : {companyName:name},
             update:{
-              $set:{ email:email||undefined, phone:phone||undefined, gstNumber:gstNumber||undefined,
-                     tallySynced:true, lastTallySync:new Date(),
+              $set:{ tallySynced:true, lastTallySync:new Date(),
+                     ...(vSafePhone !== '0000000000' ? {phone:vSafePhone} : {}),
+                     ...(email ? {email:vSafeEmail} : {}),
+                     ...(contactPerson ? {contactPerson} : {}),
+                     ...(wAddr  ? {address:wAddr}   : {}),
+                     ...(wDCity ? {city:wDCity}      : {}),
+                     ...(wDState ? {state:wDState}   : {}),
+                     ...(wDPin  ? {pincode:wDPin}    : {}),
+                     ...(gstNumber&&gstNumber!=='N/A' ? {gstNumber} : {}),
                      ...(guid?{tallyGuid:guid}:{}), ...(alterId?{tallyAlterId:alterId}:{}) },
               $setOnInsert:{ vendorId:`VND-TLY-${Date.now()%100000}`, companyName:name, category:'General',
-                             contactPerson:name, phone:phone||'0000000000',
-                             email:email||`${name.replace(/\s+/g,'').toLowerCase()}@tally.sync`,
-                             address:'Webhook Import', city:'Unknown', state:'Unknown', pincode:'000000', status:'Active' },
+                             contactPerson:contactPerson||name, phone:vSafePhone, email:vSafeEmail,
+                             address:wAddr||'Webhook Import', city:wDCity||'Unknown',
+                             state:wDState||'Unknown', pincode:wDPin||'000000', status:'Active' },
             },
             upsert:true,
           }});
         } else {
+          const _cd = phone ? String(phone).replace(/\D/g,'') : '';
+          const _cc = (() => { let d=_cd; if(d.length===12&&d.startsWith('91'))d=d.slice(2); if(d.length===11&&d.startsWith('0'))d=d.slice(1); return d.length===10?d:''; })();
+          const cSafePhone = _cc || _cd.slice(0,15) || '0000000000';
+          const cSafeEmail = email || `${name.replace(/\s+/g,'').toLowerCase().slice(0,30)}@tally.sync`;
           clientOps.push({ updateOne:{
             filter: guid ? {tallyGuid:guid} : {name},
             update:{
-              $set:{ email:email||undefined, phone:phone||undefined, gstNumber:gstNumber||undefined,
-                     tallySynced:true, lastTallySync:new Date(),
+              $set:{ tallySynced:true, lastTallySync:new Date(),
+                     ...(cSafePhone !== '0000000000' ? {phone:cSafePhone} : {}),
+                     ...(email ? {email:cSafeEmail} : {}),
+                     ...(contactPerson ? {contact:contactPerson} : {}),
+                     ...(wAddr  ? {address:wAddr}   : {}),
+                     ...(wDCity ? {city:wDCity}      : {}),
+                     ...(gstNumber&&gstNumber!=='N/A' ? {gstNumber} : {}),
                      ...(guid?{tallyGuid:guid}:{}), ...(alterId?{tallyAlterId:alterId}:{}) },
-              $setOnInsert:{ clientId:`CLT-TLY-${Date.now()%100000}`, name, contact:name,
-                             phone:phone||'0000000000',
-                             email:email||`${name.replace(/\s+/g,'').toLowerCase()}@tally.sync`,
-                             city:'Unknown', category:'Trading', status:'Active' },
+              $setOnInsert:{ clientId:`CLT-TLY-${Date.now()%100000}`, name, contact:contactPerson||name,
+                             phone:cSafePhone, email:cSafeEmail,
+                             city:wDCity||'Unknown', category:'Trading', status:'Active' },
             },
             upsert:true,
           }});
         }
       }
       await Promise.all([
-        ledgerOps.length ? AccountsLedger.bulkWrite(ledgerOps,{ordered:false}) : Promise.resolve(),
-        vendorOps.length ? Vendor.bulkWrite(vendorOps,{ordered:false}) : Promise.resolve(),
-        clientOps.length ? Client.bulkWrite(clientOps,{ordered:false}) : Promise.resolve(),
+        ledgerOps.length ? AccountsLedger.bulkWrite(ledgerOps,{ordered:false}).catch(e => {
+          console.error('[TallyWebhook] AccountsLedger.bulkWrite failed:', e.message);
+          return null;
+        }) : Promise.resolve(),
+        vendorOps.length ? Vendor.bulkWrite(vendorOps,{ordered:false}).catch(e => {
+          console.error('[TallyWebhook] Vendor.bulkWrite failed:', e.message);
+          return null;
+        }) : Promise.resolve(),
+        clientOps.length ? Client.bulkWrite(clientOps,{ordered:false}).catch(e => {
+          console.error('[TallyWebhook] Client.bulkWrite failed:', e.message);
+          return null;
+        }) : Promise.resolve(),
       ]);
       records += ledgerOps.length;
     }

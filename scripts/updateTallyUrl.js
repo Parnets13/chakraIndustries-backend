@@ -1,39 +1,26 @@
-/**
- * One-time script to update TallyConfig to use the Cloudflare tunnel URL
- * Run: node scripts/updateTallyUrl.js
- */
 import dotenv from 'dotenv';
 import connectDB from '../config/database.js';
 import TallyConfig from '../models/TallyConfig.js';
 
 dotenv.config();
 
-async function updateUrl() {
+const NEW_URL     = process.argv[2] || 'https://erp.majesticmall.net';
+const COMPANY     = 'SRI CHAKRA INDUSTRIES';
+
+async function run() {
   await connectDB();
-  
-  console.log('Updating TallyConfig...');
-  
-  const result = await TallyConfig.findOneAndUpdate(
+  await new Promise(r => setTimeout(r, 2000));
+  const r = await TallyConfig.findOneAndUpdate(
     {},
-    {
-      $set: {
-        serverUrl: 'https://erp.majesticmall.net',
-        port: '9000',
+    { $set: {
+        tallyLocalUrl: NEW_URL,
+        companyName: COMPANY,
         connectionStatus: 'Unknown'
-      }
-    },
+    }},
     { upsert: true, new: true }
   );
-  
-  console.log('✅ Updated TallyConfig:');
-  console.log('   Server URL:', result.serverUrl);
-  console.log('   Port:', result.port);
-  console.log('   Connection Status:', result.connectionStatus);
-  
+  console.log('✅ tallyLocalUrl  :', r.tallyLocalUrl);
+  console.log('✅ companyName    :', r.companyName);
   process.exit(0);
 }
-
-updateUrl().catch(err => {
-  console.error('❌ Error:', err.message);
-  process.exit(1);
-});
+run().catch(e => { console.error(e.message); process.exit(1); });
