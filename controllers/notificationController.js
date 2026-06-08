@@ -3,11 +3,13 @@ import PurchaseOrder from '../models/PurchaseOrder.js';
 import GRN from '../models/GRN.js';
 import Approval from '../models/Approval.js';
 import ActivityLog from '../models/ActivityLog.js';
+import DismissedNotification from '../models/DismissedNotification.js';
 
 // GET /api/notifications
 // Returns live notifications aggregated from all procurement modules
 export const getNotifications = async (req, res) => {
   try {
+    const userId = req.user?._id; // from auth middleware
     const notifications = [];
 
     // ── Pending PRs awaiting approval ──
@@ -91,12 +93,111 @@ export const getNotifications = async (req, res) => {
 
     // Sort all by time descending, cap at 20
     notifications.sort((a, b) => new Date(b.time) - new Date(a.time));
-    const result = notifications.slice(0, 20);
+    let result = notifications.slice(0, 20);
+
+    // Filter out dismissed notifications for this user
+    if (userId) {
+      const dismissed = await DismissedNotification.find({ userId }).select('notificationId');
+      const dismissedIds = new Set(dismissed.map(d => d.notificationId));
+      result = result.filter(n => !dismissedIds.has(n.id));
+    }
 
     // Unread count = pending items (PRs + POs + GRNs + Approvals)
     const unreadCount = pendingPRs.length + pendingPOs.length + pendingQC.length + pendingApprovals.length;
 
     res.json({ success: true, data: result, unreadCount });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/notifications/:id/dismiss
+// Mark a single notification as dismissed for the current user
+export const dismissNotification = async (req, res) => {
+  try {
+    const userId = req.user?._id;
+    const { id } = req.params;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+
+    // Create or update dismissed record
+    await DismissedNotification.findOneAndUpdate(
+      { userId, notificationId: id },
+      { userId, notificationId: id, dismissedAt: new Date() },
+      { upsert: true, new: true }
+    );
+
+    res.json({ success: true, message: `Notification ${id} dismissed` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/notifications/clear-all
+// Clear all notifications (mark all current notifications as dismissed)
+export const clearAllNotifications = async (req, res) => {
+  try {
+    const userId = req.user?._id;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+
+    // Get all current notifications
+    const notifications = [];
+
+    const pendingPRs = await PurchaseRequisition.find({ status: 'Pending' })
+      .select('_id');
+    pendingPRs.forEach(pr => {
+      notifications.push(`pr-${pr._id}`);
+    });
+
+    const pendingPOs = await PurchaseOrder.find({ status: 'Pending' })
+      .select('_id');
+    pendingPOs.forEach(po => {
+      notifications.push(`po-${po._id}`);
+    });
+
+    const pendingQC = await GRN.find({ qcStatus: 'Pending' })
+      .select('_id');
+    pendingQC.forEach(grn => {
+      notifications.push(`grn-${grn._id}`);
+    });
+
+    const pendingApprovals = await Approval.find({ status: 'Pending' })
+      .select('_id');
+    pendingApprovals.forEach(a => {
+      notifications.push(`apr-${a._id}`);
+    });
+
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const recentActivity = await ActivityLog.find({ createdAt: { $gte: since }, status: 'success' })
+      .select('_id');
+    recentActivity.forEach(log => {
+      notifications.push(`log-${log._id}`);
+    });
+
+    // Dismiss all notifications
+    const dismissals = notifications.map(notifId => ({
+      userId,
+      notificationId: notifId,
+      dismissedAt: new Date(),
+    }));
+
+    if (dismissals.length > 0) {
+      // Use insertMany with upsert-like behavior
+      for (const dismissal of dismissals) {
+        await DismissedNotification.findOneAndUpdate(
+          { userId, notificationId: dismissal.notificationId },
+          dismissal,
+          { upsert: true }
+        );
+      }
+    }
+
+    res.json({ success: true, message: `Dismissed ${notifications.length} notifications` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

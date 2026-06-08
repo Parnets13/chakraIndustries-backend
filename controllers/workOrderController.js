@@ -1,6 +1,9 @@
 import WorkOrder  from '../models/WorkOrder.js';
 import BOM        from '../models/BOM.js';
 import InventoryItem from '../models/InventoryItem.js';
+import StockMovement from '../models/StockMovement.js';
+import DefectiveStock from '../models/DefectiveStock.js';
+import LossTracking from '../models/LossTracking.js';
 
 async function generateWoId() {
   const last = await WorkOrder.findOne().sort({ createdAt: -1 }).select('woId');
@@ -9,6 +12,33 @@ async function generateWoId() {
   let id = `WO-${String(n).padStart(4, '0')}`;
   while (await WorkOrder.findOne({ woId: id })) { n++; id = `WO-${String(n).padStart(4, '0')}`; }
   return id;
+}
+
+async function generateMovementId() {
+  const last = await StockMovement.findOne().sort({ createdAt: -1 }).select('movementId');
+  let n = 1;
+  if (last?.movementId) { const m = last.movementId.match(/(\d+)$/); if (m) n = parseInt(m[1]) + 1; }
+  let id = `MV-${String(n).padStart(3, '0')}`;
+  while (await StockMovement.findOne({ movementId: id })) { n++; id = `MV-${String(n).padStart(3, '0')}`; }
+  return id;
+}
+
+async function generateDefectId() {
+  const last = await DefectiveStock.findOne().sort({ createdAt: -1 }).select('defectId');
+  let n = 1;
+  if (last?.defectId) { const m = last.defectId.match(/(\d+)$/); if (m) n = parseInt(m[1]) + 1; }
+  let id = `DEF-${String(n).padStart(5, '0')}`;
+  while (await DefectiveStock.findOne({ defectId: id })) { n++; id = `DEF-${String(n).padStart(5, '0')}`; }
+  return id;
+}
+
+function finishedGoodsSku(product) {
+  return `FG-${String(product || 'PRODUCT').trim().replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toUpperCase()}`;
+}
+
+async function updateInventoryStatus(item) {
+  item.status = item.qty === 0 ? 'Dead' : item.qty < item.minQty ? 'Critical' : 'Active';
+  await item.save();
 }
 
 // ── GET all ───────────────────────────────────────────────────────────────────
@@ -90,7 +120,10 @@ export const getWorkOrderById = async (req, res) => {
 // ── CREATE ────────────────────────────────────────────────────────────────────
 export const createWorkOrder = async (req, res) => {
   try {
-    const { product, bomId, qty, woId, shift, startDate, endDate, priority, remarks, oemBrand, oemProduct } = req.body;
+    const {
+      product, bomId, qty, woId, shift, startDate, endDate, priority, remarks,
+      oemBrand, oemProduct, salesOrderId, productionLine, machine, assignedTeam, supervisor
+    } = req.body;
     
     console.log('Create WO Request Body:', req.body);
     
@@ -130,11 +163,16 @@ export const createWorkOrder = async (req, res) => {
       bomId: bomId || null,
       oemBrand: oemBrand || null,
       oemProduct: oemProduct || null,
+      salesOrderId: salesOrderId || null,
       qty: parseInt(qty),
       shift: shift || 'General',
       startDate: parsedStartDate,
       endDate: parsedEndDate,
       priority: priority || 'Normal',
+      productionLine: productionLine || '',
+      machine: machine || '',
+      assignedTeam: assignedTeam || '',
+      supervisor: supervisor || '',
       remarks: remarks || '',
       plannedCost,
       status: 'Pending'
@@ -159,7 +197,7 @@ export const updateWorkOrder = async (req, res) => {
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
-// ── RELEASE WO — populate material consumption from BOM ───────────────────────
+// ── RELEASE WO — populate material consumption from BOM and auto-deduct inventory ───────────────────────
 // PATCH /api/workorders/:id/release
 export const releaseWorkOrder = async (req, res) => {
   try {
@@ -183,11 +221,62 @@ export const releaseWorkOrder = async (req, res) => {
       unitCost:    c.unitCost || 0,
     }));
 
+    // ✅ AUTO-DEDUCT INVENTORY
+    const errors = [];
+    let totalPlannedCost = 0;
+
+    for (const line of wo.materialConsumption) {
+      const qty = line.plannedQty;
+      if (!qty) continue;
+
+      // Find inventory item by itemCode or itemName
+      const invItem = await InventoryItem.findOne(
+        line.itemCode
+          ? { $or: [{ sku: line.itemCode }, { name: new RegExp(line.itemName, 'i') }] }
+          : { name: new RegExp(line.itemName, 'i') }
+      );
+
+      if (!invItem) {
+        errors.push(`Item not found in inventory: ${line.itemName}`);
+        continue;
+      }
+
+      if (invItem.qty < qty) {
+        errors.push(`Insufficient stock for ${line.itemName}: need ${qty}, have ${invItem.qty}`);
+        continue;
+      }
+
+      invItem.qty -= qty;
+      await updateInventoryStatus(invItem);
+      totalPlannedCost += qty * (line.unitCost || 0);
+
+      // Create stock movement record
+      const movementId = await generateMovementId();
+      await StockMovement.create({
+        movementId,
+        type: 'Issued to Production',
+        sku: line.itemCode || line.itemName,
+        name: line.itemName,
+        qty: -qty,
+        from: invItem.warehouse,
+        to: `Production ${wo.woId}`,
+        ref: wo.woId,
+        notes: `Raw materials issued for WO ${wo.woId}`,
+      });
+    }
+
     wo.status     = 'Released';
+    wo.inventoryDeducted = true;
+    wo.plannedCost = totalPlannedCost;
     wo.actualStart = new Date();
     await wo.save();
 
-    res.json({ success: true, message: 'Work order released — material plan created', data: wo });
+    res.json({
+      success: true,
+      message: errors.length ? `WO released with ${errors.length} warning(s) - inventory deducted` : 'Work order released and inventory deducted successfully',
+      warnings: errors,
+      data: wo
+    });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 
@@ -200,8 +289,16 @@ export const updateProgress = async (req, res) => {
 
     const newProduced = Math.min(parseInt(produced), wo.qty);
     wo.produced = newProduced;
+    
+    // ✅ Calculate efficiency
+    wo.efficiency = Math.round((newProduced / wo.qty) * 100);
+    
+    // ✅ Calculate WIP
+    wo.wip = wo.qty - newProduced - wo.rejected;
+    
     wo.status   = newProduced >= wo.qty ? 'QC Pending' : 'In-Progress';
     if (wo.status === 'In-Progress' && !wo.actualStart) wo.actualStart = new Date();
+    
     await wo.save();
 
     res.json({ success: true, message: 'Progress updated', data: wo });
@@ -271,7 +368,7 @@ export const deductInventory = async (req, res) => {
       }
 
       invItem.qty -= qty;
-      await invItem.save();
+      await updateInventoryStatus(invItem);
       totalActualCost += qty * (line.unitCost || 0);
     }
 
@@ -302,9 +399,104 @@ export const recordQC = async (req, res) => {
     wo.rejected  = rejectedQty || 0;
     wo.status    = (passedQty || 0) >= wo.qty ? 'Completed' : 'QC Pending';
     if (wo.status === 'Completed') wo.actualEnd = new Date();
+
+    if (!wo.finishedGoodsPosted && (passedQty || 0) > 0) {
+      const sku = finishedGoodsSku(wo.product);
+      const existingFg = await InventoryItem.findOne({ sku, warehouse: 'FG-01' });
+
+      if (existingFg) {
+        existingFg.qty += passedQty || 0;
+        existingFg.lastReceivedAt = new Date();
+        await updateInventoryStatus(existingFg);
+      } else {
+        await InventoryItem.create({
+          sku,
+          name: wo.product,
+          qty: passedQty || 0,
+          unit: 'Nos',
+          warehouse: 'FG-01',
+          minQty: 0,
+          lastReceivedAt: new Date(),
+          status: 'Active',
+        });
+      }
+
+      const movementId = await generateMovementId();
+      await StockMovement.create({
+        movementId,
+        type: 'Inward',
+        sku,
+        name: wo.product,
+        qty: passedQty || 0,
+        from: `Production ${wo.woId}`,
+        to: 'FG-01',
+        ref: wo.woId,
+        notes: 'Finished goods posted after QC approval',
+      });
+
+      wo.finishedGoodsPosted = true;
+      wo.finishedGoodsSku = sku;
+    }
+
+    if (!wo.defectiveStockPosted && (rejectedQty || 0) > 0) {
+      const defectId = await generateDefectId();
+      await DefectiveStock.create({
+        defectId,
+        sku: wo.finishedGoodsSku || finishedGoodsSku(wo.product),
+        itemName: wo.product,
+        quantity: rejectedQty || 0,
+        defectType: defectType || 'Other',
+        source: 'Production',
+        stage: 'QC Hold',
+        warehouse: 'Production',
+        remarks: remarks || `Rejected from ${wo.woId}`,
+      });
+      wo.defectiveStockPosted = true;
+    }
+
     await wo.save();
 
-    res.json({ success: true, message: 'QC result recorded', data: wo });
+    res.json({ success: true, message: 'QC result recorded and finished goods updated', data: wo });
+  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+};
+
+// ── RECORD MATERIAL WASTAGE ───────────────────────────────────────────────────
+// PATCH /api/workorders/:id/wastage
+// body: { consumptionIndex, wastedQty, wastageReason }
+export const recordWastage = async (req, res) => {
+  try {
+    const { consumptionIndex, wastedQty, wastageReason } = req.body;
+    const wo = await WorkOrder.findById(req.params.id);
+    if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
+    if (!wo.materialConsumption[consumptionIndex]) {
+      return res.status(400).json({ success: false, message: 'Invalid consumption line' });
+    }
+
+    const line = wo.materialConsumption[consumptionIndex];
+    line.wastedQty = parseFloat(wastedQty) || 0;
+    line.wastageReason = wastageReason || '';
+
+    // Create loss tracking record
+    if (line.wastedQty > 0) {
+      const lossId = `LOSS-${Date.now()}`;
+      await LossTracking.create({
+        lossId,
+        mrId: wo.woId,
+        supplierName: 'Internal Production',
+        products: [{
+          productName: line.itemName,
+          skuCode: line.itemCode,
+          returnQty: line.wastedQty,
+          damagedQty: line.wastedQty,
+          unitRate: line.unitCost
+        }],
+        invoiceType: 'Production Loss',
+        remarks: `Wastage from WO ${wo.woId}: ${wastageReason}`
+      }).catch(err => console.log('Loss tracking note:', err.message));
+    }
+
+    await wo.save();
+    res.json({ success: true, message: 'Wastage recorded', data: wo });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 

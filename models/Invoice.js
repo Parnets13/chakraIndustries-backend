@@ -100,6 +100,9 @@ const invoiceSchema = new mongoose.Schema({
   partyPostal:         { type: String, default: '' },
   partyCountry:        { type: String, default: '' },
   serialNo:            { type: Number, default: 0 },    // sequential upload serial
+  // Tally sync tracking
+  tallySync:           { type: Boolean, default: false },
+  tallySyncAt:         { type: Date },
 }, { timestamps: true });
 
 invoiceSchema.index({ invoiceNo: 1 });

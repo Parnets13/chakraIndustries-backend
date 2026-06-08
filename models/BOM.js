@@ -25,7 +25,7 @@ const componentSchema = new mongoose.Schema({
   scrapFactor: { type: Number, default: 0 },   // % extra to account for scrap
 
   // Classification
-  type:        { type: String, enum: ['Raw', 'Sub-Assembly', 'Semi-Finished', 'Consumable', 'Packing'], default: 'Raw' },
+  type:        { type: String, enum: ['Raw', 'Sub-Assembly', 'Semi-Finished', 'Consumable', 'Packing', 'Packaging'], default: 'Raw' },
   level:       { type: Number, default: 1 },   // 0=finished, 1=direct, 2=sub-level, etc.
 
   // Costing
@@ -69,7 +69,7 @@ const bomSchema = new mongoose.Schema({
   product:     { type: String, required: true, trim: true },
   productCode: { type: String, trim: true, default: '' },
   version:     { type: String, default: 'v1.0' },
-  type:        { type: String, enum: ['Finished Good', 'Sub-Assembly', 'Semi-Finished'], default: 'Finished Good' },
+  type:        { type: String, enum: ['Finished Good', 'Sub-Assembly', 'Semi-Finished', 'Phantom'], default: 'Finished Good' },
   uom:         { type: String, default: 'Set' },
   description: { type: String, default: '' },
 

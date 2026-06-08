@@ -1,8 +1,12 @@
 import TallyConfig from '../models/TallyConfig.js';
 import TallySyncLog from '../models/TallySyncLog.js';
-import PurchaseOrder from '../models/PurchaseOrder.js';
 import ItemMaster from '../models/ItemMaster.js';
-
+import PurchaseOrder from '../models/PurchaseOrder.js';
+import {
+  testTallyConnection,
+  runTargetedSync,
+  runFullSync,
+} from '../services/tallyService.js';
 // ── Config ────────────────────────────────────────────────────────────────────
 export const getConfig = async (req, res) => {
   try {
@@ -23,22 +27,36 @@ export const saveConfig = async (req, res) => {
   } catch (e) { res.status(400).json({ success: false, message: e.message }); }
 };
 
+// ── Fix existing config direction (one-time) ──────────────────────────────────
+export const fixConfig = async (req, res) => {
+  try {
+    const result = await TallyConfig.findOneAndUpdate(
+      { syncDirection: 'ERP → Tally' },
+      { $set: { syncDirection: 'Bi-directional' } },
+      { new: true }
+    );
+    res.json({ success: true, updated: !!result, data: result });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
 export const testConnection = async (req, res) => {
   try {
-    // In a real implementation this would ping the Tally server
-    // For now we simulate a connection test
-    const config = await TallyConfig.findOne();
-    const connected = !!(config?.serverUrl && config?.port);
-    const status = connected ? 'Connected' : 'Disconnected';
-    if (config) { config.connectionStatus = status; await config.save(); }
-    res.json({ success: true, data: { status }, message: `Tally ${status.toLowerCase()}` });
+    const result = await testTallyConnection();
+    const connected = result.status === 'Connected';
+    res.json({
+      success: true,
+      data: { status: result.status, error: result.error || null },
+      message: connected
+        ? 'Tally connected successfully'
+        : result.error || 'Tally is not reachable',
+    });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 
 // ── Sync Logs ─────────────────────────────────────────────────────────────────
 export const getSyncLogs = async (req, res) => {
   try {
-    const { type, status, limit = 50 } = req.query;
+    const { type, status, limit = 100 } = req.query;
     const filter = {};
     if (type && type !== 'All Types') filter.type = type;
     if (status && status !== 'All Status') filter.status = status;
@@ -60,14 +78,28 @@ export const getSyncStats = async (req, res) => {
       TallySyncLog.countDocuments({ createdAt: { $gte: today }, status: 'Failed' }),
       TallyConfig.findOne(),
     ]);
+
+    // Auto-probe connection if status is Unknown or last check was >5 min ago
+    let connectionStatus = config?.connectionStatus || 'Unknown';
+    const stale = !config?.updatedAt || (Date.now() - new Date(config.updatedAt).getTime() > 5 * 60 * 1000);
+    if (connectionStatus === 'Unknown' || stale) {
+      try {
+        const probe = await testTallyConnection();
+        connectionStatus = probe.status;
+      } catch (_) { /* non-fatal */ }
+    }
+
     const successRate = todayTotal > 0 ? ((todaySuccess / todayTotal) * 100).toFixed(1) : '0.0';
     res.json({
       success: true,
       data: {
-        connectionStatus: config?.connectionStatus || 'Unknown',
+        connectionStatus,
         lastSyncAt: config?.lastSyncAt || null,
         todayTotal, todaySuccess, todayFailed,
         successRate: `${successRate}%`,
+        syncDirection: config?.syncDirection || 'Bi-directional',
+        autoSync: config?.autoSync || false,
+        syncInterval: config?.syncInterval || 'Every 15 minutes',
       },
     });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -80,10 +112,10 @@ export const getMasterDataStatus = async (req, res) => {
       ItemMaster.countDocuments({ isActive: true }),
       PurchaseOrder.countDocuments(),
     ]);
-    // Simulate sync status based on last sync log per category
     const categories = ['Items', 'Ledgers', 'GST Rates', 'Units', 'Godowns'];
     const result = await Promise.all(categories.map(async (cat) => {
-      const lastLog = await TallySyncLog.findOne({ type: cat === 'Items' ? 'Item Master' : cat }).sort({ createdAt: -1 });
+      const logType = cat === 'Items' ? 'Item Master' : cat === 'Ledgers' ? 'Ledger' : cat;
+      const lastLog = await TallySyncLog.findOne({ type: logType }).sort({ createdAt: -1 });
       const total = cat === 'Items' ? itemCount : cat === 'Ledgers' ? poCount : 8;
       const failed = lastLog?.status === 'Failed' ? 1 : 0;
       return {
@@ -104,8 +136,11 @@ export const getMasterDataStatus = async (req, res) => {
 export const getTransactionStatus = async (req, res) => {
   try {
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    const types = ['Purchase Vouchers','Sales Vouchers','Payment Vouchers','Receipt Vouchers','Journal Vouchers'];
-    const typeMap = { 'Purchase Vouchers': 'Purchase', 'Sales Vouchers': 'Sales', 'Payment Vouchers': 'Payment', 'Receipt Vouchers': 'Receipt', 'Journal Vouchers': 'Journal' };
+    const types = ['Purchase Vouchers', 'Sales Vouchers', 'Payment Vouchers', 'Receipt Vouchers', 'Journal Vouchers'];
+    const typeMap = {
+      'Purchase Vouchers': 'Purchase', 'Sales Vouchers': 'Sales',
+      'Payment Vouchers': 'Payment', 'Receipt Vouchers': 'Receipt', 'Journal Vouchers': 'Journal',
+    };
     const result = await Promise.all(types.map(async (t) => {
       const logType = typeMap[t];
       const [todayLogs, lastLog] = await Promise.all([
@@ -131,22 +166,22 @@ export const getTransactionStatus = async (req, res) => {
 export const triggerSync = async (req, res) => {
   try {
     const { type = 'Full' } = req.body;
-    const start = Date.now();
-    // Simulate sync — in production this would call Tally XML API
-    const syncId = `SYNC-${Date.now()}`;
-    const duration = `${((Date.now() - start) / 1000 + Math.random() * 2).toFixed(1)}s`;
-    const log = await TallySyncLog.create({
-      syncId,
-      type: type === 'master' ? 'Item Master' : type === 'transaction' ? 'Purchase' : type,
-      direction: 'ERP → Tally',
-      status: 'Success',
-      duration,
-      records: Math.floor(Math.random() * 100) + 10,
-      triggeredBy: req.user?._id,
-    });
-    // Update last sync time
-    await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { upsert: true });
-    res.json({ success: true, data: log, message: `${type} sync completed` });
+    const result = await runTargetedSync(type, req.user?._id);
+
+    // Tally is offline — return 200 with clear message (not a server error)
+    if (result.offline) {
+      return res.json({
+        success: false,
+        offline: true,
+        data: result,
+        message: result.error,
+      });
+    }
+
+    const message = result.ok
+      ? `${type} sync completed — ${result.records || 0} records processed`
+      : `${type} sync completed with errors: ${result.error || 'unknown'}`;
+    res.json({ success: result.ok, data: result, message });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 
@@ -154,17 +189,10 @@ export const retrySync = async (req, res) => {
   try {
     const original = await TallySyncLog.findById(req.params.id);
     if (!original) return res.status(404).json({ success: false, message: 'Log not found' });
-    const syncId = `SYNC-${Date.now()}`;
-    const log = await TallySyncLog.create({
-      syncId,
-      type: original.type,
-      entity: original.entity,
-      direction: original.direction,
-      status: 'Success',
-      duration: `${(Math.random() * 3 + 0.5).toFixed(1)}s`,
-      records: original.records,
-      triggeredBy: req.user?._id,
-    });
-    res.json({ success: true, data: log, message: 'Retry successful' });
+    const result = await runTargetedSync(original.type, req.user?._id);
+    if (result.offline) {
+      return res.json({ success: false, offline: true, data: result, message: result.error });
+    }
+    res.json({ success: result.ok, data: result, message: result.ok ? 'Retry successful' : `Retry failed: ${result.error}` });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };

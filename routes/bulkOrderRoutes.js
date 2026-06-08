@@ -1,11 +1,16 @@
 import express from 'express';
 import {
   getClients, createClient, updateClient, deleteClient,
+  importClients,
+  importClientsFromFile,
   getQuotations, createQuotation, updateQuotation, updateQuotationStatus, deleteQuotation,
   getSchedules, createSchedule, updateSchedule, deleteSchedule,
   getBulkStats, convertToDispatch, convertToPO,
 } from '../controllers/bulkOrderController.js';
 import { protect } from '../middleware/authMiddleware.js';
+import multer from 'multer';
+
+const upload = multer({ storage: multer.memoryStorage() });
 
 const router = express.Router();
 router.use(protect);
@@ -16,6 +21,8 @@ router.get('/stats', getBulkStats);
 // Corporate Clients
 router.get('/clients', getClients);
 router.post('/clients', protect, createClient);
+router.post('/clients/import', protect, importClients);
+router.post('/clients/import-file', protect, upload.single('file'), importClientsFromFile);
 router.put('/clients/:id', protect, updateClient);
 router.delete('/clients/:id', protect, deleteClient);
 

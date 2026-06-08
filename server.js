@@ -3,8 +3,6 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import connectDB from './config/database.js';
-
-// Route Imports
 import authRoutes from './routes/authRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import permissionRoutes from './routes/permissionRoutes.js';
@@ -20,7 +18,7 @@ import qualityCheckRoutes from './routes/qualityCheckRoutes.js';
 import approvalRoutes from './routes/approvalRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
 import inventoryRoutes from './routes/inventoryRoutes.js';
-import returnsRoutes from './routes/returnsRoutes.js';
+import materialReturnRoutes from './routes/materialReturnRoutes.js';
 import creditNoteRoutes from './routes/creditNoteRoutes.js';
 import taskRoutes from './routes/taskRoutes.js';
 import logisticsRoutes from './routes/logisticsRoutes.js';
@@ -53,20 +51,36 @@ import dispatchClientRoutes from './routes/dispatchClientRoutes.js';
 import bulkQuotationRoutes from './routes/bulkQuotationRoutes.js';
 import bulkQuotationRequestRoutes from './routes/bulkQuotationRequestRoutes.js';
 import bulkOrderApprovalRoutes from './routes/bulkOrderApprovalRoutes.js';
+import packagingRoutes from './routes/packagingRoutes.js';
+import brandOrderRoutes from './routes/brandOrderRoutes.js';
+import oemOrderEnhancedRoutes from './routes/oemOrderEnhancedRoutes.js';
 import bulkOrderInventoryRoutes from './routes/bulkOrderInventoryRoutes.js';
 import bulkOrderInvoiceRoutes from './routes/bulkOrderInvoiceRoutes.js';
 import bulkOrderCreditRoutes from './routes/bulkOrderCreditRoutes.js';
 import salesOrderRoutes from './routes/salesOrderRoutes.js';
 import tallyRoutes from './routes/tallyRoutes.js';
+import { startTallyScheduler } from './services/tallyScheduler.js';
+import { rawXmlParser } from './controllers/tallyWebhookController.js';
 import reportsRoutes from './routes/reportsRoutes.js';
 import forecastingRoutes from './routes/forecastingRoutes.js';
 import invoiceRoutes from './routes/invoiceRoutes.js';
+import returnsRoutes from './routes/returnsRoutes.js';
 import reconciliationRoutes from './routes/reconciliationRoutes.js';
+import debitNoteRoutes from './routes/debitNoteRoutes.js';
 import docketTrackingRoutes from './routes/docketTrackingRoutes.js';
 import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
 import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
 
-// Ensure models are registered
+// Dealer App Routes
+import dealerAuthRoutes from './routes/dealer/authRoutes.js';
+import dealerProfileRoutes from './routes/dealer/profileRoutes.js';
+import dealerProductRoutes from './routes/dealer/productRoutes.js';
+import dealerOrderRoutes from './routes/dealer/orderRoutes.js';
+import dealerCartRoutes from './routes/dealer/cartRoutes.js';
+import dealerInventoryRoutes from './routes/dealer/inventoryRoutes.js';
+import dealerInvoiceRoutes from './routes/dealer/invoiceRoutes.js';
+
+// Ensure new models are registered
 import './models/Warehouse.js';
 import './models/StockMovement.js';
 import './models/SalesOrder.js';
@@ -88,6 +102,8 @@ import './models/DispatchClient.js';
 import './models/LossTracking.js';
 import './models/POInvoice.js';
 import './models/PendingOrder.js';
+import './models/DebitNote.js';
+// import './models/TallyVoucher.js'; // TODO: Create this model if needed
 
 dotenv.config();
 
@@ -96,24 +112,60 @@ const app = express();
 // Connect to MongoDB
 connectDB();
 
-// Rate limiting middleware
+// Rate limiting middleware — relaxed for local dev, tighter for production
 const limiter = rateLimit({
-  windowMs: 1000,
-  max: process.env.NODE_ENV === 'production' ? 10 : 200,
-  message: { success: false, message: 'Too many requests' },
+  windowMs: 1000, // 1 second
+  max: process.env.NODE_ENV === 'production' ? 10 : 200, // 200/sec locally, 10/sec in prod
+  message: {
+    success: false,
+    message: 'Too many requests from this IP, please try again later.'
+  },
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
+    // Skip rate limiting for localhost in development
     const ip = req.ip || req.connection?.remoteAddress || '';
-    return process.env.NODE_ENV !== 'production' && (ip === '::1' || ip === '127.0.0.1');
+    return process.env.NODE_ENV !== 'production' && (ip === '::1' || ip === '127.0.0.1' || ip.includes('::ffff:127.0.0.1'));
   },
 });
 
 // Middleware
 app.use(limiter);
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    const allowed = [
+      'https://chakraindustries-backend.onrender.com',
+      'http://localhost:3000',
+      'http://localhost:5001',
+      'http://localhost:5173',
+      'http://localhost:5174',
+      'http://localhost:4173',
+      'http://127.0.0.1:5173',
+      'http://127.0.0.1:5174',
+      'http://127.0.0.1:3000',
+    ];
+    const allowedPatterns = [
+      /\.netlify\.app$/,
+      /\.netlify\.com$/,
+      /\.onrender\.com$/,
+      /^http:\/\/localhost:\d+$/,
+      /^http:\/\/127\.0\.0\.1:\d+$/,
+    ];
+    if (allowed.includes(origin) || allowedPatterns.some(p => p.test(origin))) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS blocked: ${origin}`));
+  },
+  credentials: true,
+}));
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Raw XML parser for Tally webhook (must be before JSON routes)
+app.use('/api/tally/webhook', rawXmlParser);
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -131,13 +183,15 @@ app.use('/api/quality-checks', qualityCheckRoutes);
 app.use('/api/approvals', approvalRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/inventory', inventoryRoutes);
-app.use('/api/returns', returnsRoutes);
-app.use('/api/material-returns', returnsRoutes); // Alias
+app.use('/api/material-returns', materialReturnRoutes);
 app.use('/api/credit-notes', creditNoteRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/logistics', logisticsRoutes);
 app.use('/api/bulk-orders', bulkOrderRoutes);
 app.use('/api/bulk-order-approvals', bulkOrderApprovalRoutes);
+app.use('/api/packaging', packagingRoutes);
+app.use('/api/brand-orders', brandOrderRoutes);
+app.use('/api/oem-orders-enhanced', oemOrderEnhancedRoutes);
 app.use('/api/inventory-data', inventoryDataRoutes);
 app.use('/api/picking', pickingListRoutes);
 app.use('/api/sorting', sortingJobRoutes);
@@ -172,16 +226,31 @@ app.use('/api/sales-orders', salesOrderRoutes);
 app.use('/api/tally', tallyRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/forecasting', forecastingRoutes);
-app.use('/api/invoices', invoiceRoutes);
+app.use('/api/invoices',     invoiceRoutes);
+app.use('/api/returns',        returnsRoutes);
 app.use('/api/reconciliation', reconciliationRoutes);
+app.use('/api/debit-notes',    debitNoteRoutes);
 app.use('/api/docket-tracking', docketTrackingRoutes);
 app.use('/api/loss-tracking', lossTrackingRoutes);
 app.use('/api/po-generator', poGeneratorRoutes);
 
-// Health check
-app.get('/api/health', (req, res) => res.json({ status: 'Server is running' }));
+// Dealer App Routes
+app.use('/api/dealer/auth', dealerAuthRoutes);
+app.use('/api/dealer/profile', dealerProfileRoutes);
+app.use('/api/dealer/products', dealerProductRoutes);
+app.use('/api/dealer/orders', dealerOrderRoutes);
+app.use('/api/dealer/cart', dealerCartRoutes);
+app.use('/api/dealer/inventory', dealerInventoryRoutes);
+app.use('/api/dealer/invoices', dealerInvoiceRoutes);
 
-// Error handling
+// Health check
+// eslint-disable-next-line no-unused-vars
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'Server is running' });
+});
+
+// Error handling middleware
+// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({
@@ -191,5 +260,9 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = process.env.PORT || 5001;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  // Start Tally auto-sync scheduler after server is up
+  startTallyScheduler();
+});

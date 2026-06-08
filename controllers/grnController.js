@@ -76,6 +76,7 @@ export const createGRN = async (req, res) => {
     const populated = await GRN.findById(saved._id)
       .populate('poId', 'poId grandTotal')
       .populate('vendorId', 'companyName vendorId')
+      .populate('warehouseId', 'warehouseId name location')
       .populate('batchId')
       .populate('inventoryId');
     res.status(201).json({ success: true, data: populated });
@@ -90,6 +91,7 @@ export const getAllGRNs = async (req, res) => {
     const grns = await GRN.find()
       .populate('poId', 'poId grandTotal')
       .populate('vendorId', 'companyName vendorId')
+      .populate('warehouseId', 'warehouseId name location')
       .populate('batchId')
       .populate('inventoryId')
       .sort({ createdAt: -1 });
@@ -129,6 +131,7 @@ export const getGRNById = async (req, res) => {
     const grn = await GRN.findById(req.params.id)
       .populate('poId', 'poId grandTotal')
       .populate('vendorId', 'companyName vendorId')
+      .populate('warehouseId', 'warehouseId name location')
       .populate('batchId')
       .populate('inventoryId');
     if (!grn) return res.status(404).json({ success: false, message: 'GRN not found' });

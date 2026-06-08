@@ -8,7 +8,7 @@ const tallyConfigSchema = new mongoose.Schema({
   apiKey:       { type: String, default: '' },
   autoSync:     { type: Boolean, default: true },
   syncInterval: { type: String, default: 'Every 15 minutes' },
-  syncDirection:{ type: String, enum: ['ERP → Tally','Tally → ERP','Bi-directional'], default: 'ERP → Tally' },
+  syncDirection:{ type: String, enum: ['ERP → Tally','Tally → ERP','Bi-directional'], default: 'Bi-directional' },
   syncPrefs: {
     masterData:       { type: Boolean, default: true },
     purchaseVouchers: { type: Boolean, default: true },

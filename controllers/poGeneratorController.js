@@ -278,16 +278,26 @@ export const generateInvoiceFromPDF = async (req, res) => {
       };
     });
 
-    // Use grand total from PDF if provided — most accurate
+    // Compute grandTotal from actual line items — most reliable
     let grandTotal, subtotal, gstTotal;
-    if (total && parseFloat(total) > 0) {
-      grandTotal = +parseFloat(total).toFixed(2);
-      subtotal   = +(invoiceItems.reduce((s, it) => s + it.invoicedQty * it.basePrice, 0)).toFixed(2);
-      gstTotal   = +(grandTotal - subtotal).toFixed(2);
-    } else {
-      subtotal   = +(invoiceItems.reduce((s, it) => s + it.invoicedQty * it.basePrice, 0)).toFixed(2);
-      gstTotal   = +(invoiceItems.reduce((s, it) => s + it.invoicedQty * it.basePrice * it.gst / 100, 0)).toFixed(2);
-      grandTotal = +(subtotal + gstTotal).toFixed(2);
+    // Only use PDF-parsed total as a sanity check, not as the source of truth
+    subtotal   = +(invoiceItems.reduce((s, it) => s + it.invoicedQty * it.basePrice * (1 - (it.discount || 0) / 100), 0)).toFixed(2);
+    const cgstTotal = +(invoiceItems.reduce((s, it) => s + (it.cgstVal || 0), 0)).toFixed(2);
+    const sgstTotal = +(invoiceItems.reduce((s, it) => s + (it.sgstVal || 0), 0)).toFixed(2);
+    const igstTotal = +(invoiceItems.reduce((s, it) => s + (it.igstVal || 0), 0)).toFixed(2);
+    gstTotal   = +(cgstTotal + sgstTotal + igstTotal).toFixed(2);
+
+    // If tax vals are all 0 but gst% is set, compute from percentage
+    if (gstTotal === 0) {
+      gstTotal = +(invoiceItems.reduce((s, it) => s + it.invoicedQty * it.basePrice * (it.gst || 0) / 100, 0)).toFixed(2);
+    }
+
+    grandTotal = +(subtotal + gstTotal).toFixed(2);
+
+    // Sanity: if PDF total is provided and reasonably close (within 5%), use it
+    const pdfTotal = total ? parseFloat(total) : 0;
+    if (pdfTotal > 100 && Math.abs(pdfTotal - grandTotal) / grandTotal < 0.05) {
+      grandTotal = +pdfTotal.toFixed(2);
     }
 
     const invoice = await POInvoice.create({

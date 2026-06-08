@@ -1,6 +1,20 @@
 import Batch from '../models/Batch.js';
 import Inventory from '../models/Inventory.js';
 import GRN from '../models/GRN.js';
+import Warehouse from '../models/Warehouse.js';
+
+const resolveWarehouseCode = async (warehouseRef) => {
+  if (!warehouseRef) return 'WH-01';
+  if (typeof warehouseRef === 'string' && warehouseRef.match(/^[0-9a-fA-F]{24}$/)) {
+    const wh = await Warehouse.findById(warehouseRef);
+    return wh?.warehouseId || warehouseRef;
+  }
+  if (typeof warehouseRef === 'object' && warehouseRef._id) {
+    const wh = await Warehouse.findById(warehouseRef._id);
+    return wh?.warehouseId || warehouseRef.toString();
+  }
+  return warehouseRef;
+};
 
 /**
  * Create batch from GRN
@@ -25,6 +39,7 @@ export const createBatchFromGRN = async (grn) => {
       const shelfLifePct = Math.max(0, Math.min(100, Math.round((remainingDays / totalDays) * 100)));
       
       const status = shelfLifePct < 20 ? 'Critical' : shelfLifePct < 0 ? 'Expired' : 'Active';
+      const warehouse = await resolveWarehouseCode(grn.warehouseId);
       
       batch = new Batch({
         batchNo: grn.batchNo,
@@ -33,7 +48,7 @@ export const createBatchFromGRN = async (grn) => {
         quantity: grn.acceptedQuantity || grn.receivedQuantity,
         mfgDate: grn.mfgDate,
         expiryDate: grn.expiryDate,
-        warehouse: grn.warehouseId,
+        warehouse,
         shelfLifePercentage: shelfLifePct,
         status,
         grnId: grn._id,
