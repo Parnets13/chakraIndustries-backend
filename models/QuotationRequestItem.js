@@ -12,7 +12,7 @@ const quotationRequestItemSchema = new mongoose.Schema({
   // Item details
   itemCode: {
     type: String,
-    required: true,
+    required: false,   // auto-generated in pre-save
     index: true
   },
   
@@ -130,10 +130,17 @@ quotationRequestItemSchema.index({ status: 1 });
 // Pre-save middleware to generate item code
 quotationRequestItemSchema.pre('save', async function(next) {
   if (this.isNew && !this.itemCode) {
-    const request = await mongoose.model('BulkQuotationRequest').findById(this.requestId);
-    if (request) {
-      const itemCount = await this.constructor.countDocuments({ requestId: this.requestId });
-      this.itemCode = `${request.requestId}-${String(itemCount + 1).padStart(2, '0')}`;
+    try {
+      const request = await mongoose.model('BulkQuotationRequest').findById(this.requestId);
+      if (request) {
+        const itemCount = await this.constructor.countDocuments({ requestId: this.requestId });
+        this.itemCode = `${request.requestId}-${String(itemCount + 1).padStart(2, '0')}`;
+      } else {
+        // fallback if request not found yet
+        this.itemCode = `ITEM-${Date.now()}`;
+      }
+    } catch (_) {
+      this.itemCode = `ITEM-${Date.now()}`;
     }
   }
   next();

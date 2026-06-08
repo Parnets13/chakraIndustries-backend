@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import connectDB from './config/database.js';
+import { execSync } from 'child_process';
 import authRoutes from './routes/authRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import permissionRoutes from './routes/permissionRoutes.js';
@@ -245,8 +246,44 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  // Start Tally auto-sync scheduler after server is up
-  startTallyScheduler();
-});
+
+function killPortAndStart(port) {
+  try {
+    // Find and kill any process using this port
+    const result = execSync(
+      `netstat -ano | findstr :${port}`,
+      { encoding: 'utf8', stdio: ['pipe','pipe','pipe'] }
+    );
+    const lines = result.split('\n').filter(l => l.includes('LISTENING'));
+    lines.forEach(line => {
+      const parts = line.trim().split(/\s+/);
+      const pid = parts[parts.length - 1];
+      if (pid && !isNaN(pid)) {
+        try {
+          execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' });
+          console.log(`✅ Killed old process PID ${pid} on port ${port}`);
+        } catch (_) {}
+      }
+    });
+  } catch (_) {
+    // No process found on port — that's fine
+  }
+
+  // Small delay then start
+  setTimeout(() => {
+    const server = app.listen(port, () => {
+      console.log(`Server running on port ${port}`);
+      startTallyScheduler();
+    });
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`Port ${port} still in use, retrying in 2s...`);
+        setTimeout(() => killPortAndStart(port), 2000);
+      } else {
+        throw err;
+      }
+    });
+  }, 500);
+}
+
+killPortAndStart(PORT);

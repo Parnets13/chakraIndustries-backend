@@ -87,9 +87,9 @@ export const submitQC = async (req, res) => {
     const grn = await GRN.findById(qc.grnId);
     if (!grn) return res.status(404).json({ success: false, message: 'GRN not found' });
 
-    // Update GRN qcStatus
-    const grnUpdate = newStatus === 'Passed' ? 'QC_Approved' : newStatus === 'Partial' ? 'Partial_Approved' : 'QC_Rejected';
-    await GRN.findByIdAndUpdate(qc.grnId, { qcStatus: grnUpdate });
+    // Update GRN qcStatus — must match GRN model enum: 'Not Started','Pending','Passed','Partial','Rejected'
+    const grnQcStatus = newStatus === 'Passed' ? 'Passed' : newStatus === 'Partial' ? 'Partial' : 'Rejected';
+    await GRN.findByIdAndUpdate(qc.grnId, { qcStatus: grnQcStatus });
 
     console.log(`[QC SUBMIT] QC ${qc.qcId} submitted with status: ${newStatus}`);
 
