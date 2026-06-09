@@ -179,22 +179,16 @@ export const clearAllNotifications = async (req, res) => {
       notifications.push(`log-${log._id}`);
     });
 
-    // Dismiss all notifications
-    const dismissals = notifications.map(notifId => ({
-      userId,
-      notificationId: notifId,
-      dismissedAt: new Date(),
-    }));
-
-    if (dismissals.length > 0) {
-      // Use insertMany with upsert-like behavior
-      for (const dismissal of dismissals) {
-        await DismissedNotification.findOneAndUpdate(
-          { userId, notificationId: dismissal.notificationId },
-          dismissal,
-          { upsert: true }
-        );
-      }
+    // Dismiss all notifications using bulkWrite to avoid sequential DB round-trips
+    if (notifications.length > 0) {
+      const ops = notifications.map(notifId => ({
+        updateOne: {
+          filter: { userId, notificationId: notifId },
+          update: { $set: { userId, notificationId: notifId, dismissedAt: new Date() } },
+          upsert: true,
+        },
+      }));
+      await DismissedNotification.bulkWrite(ops, { ordered: false });
     }
 
     res.json({ success: true, message: `Dismissed ${notifications.length} notifications` });

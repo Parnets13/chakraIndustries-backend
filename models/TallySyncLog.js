@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 const tallySyncLogSchema = new mongoose.Schema({
   syncId:    { type: String, required: true, unique: true },
-  type:      { type: String, enum: ['Purchase','Sales','Payment','Receipt','Journal','Ledger','Item Master','GST','Full','Units','Godowns','GST Rates'], required: true },
+  type:      { type: String, enum: ['Purchase','Sales','Payment','Receipt','Journal','Contra','Ledger','Item Master','GST','Full','Units','Godowns','GST Rates'], required: true },
   entity:    { type: String, default: '' },
   direction: { type: String, enum: ['ERP → Tally','Tally → ERP'], default: 'ERP → Tally' },
   status:    { type: String, enum: ['Success','Failed','Partial'], default: 'Success' },

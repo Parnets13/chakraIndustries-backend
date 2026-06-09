@@ -79,6 +79,9 @@ import dealerOrderRoutes from './routes/dealer/orderRoutes.js';
 import dealerCartRoutes from './routes/dealer/cartRoutes.js';
 import dealerInventoryRoutes from './routes/dealer/inventoryRoutes.js';
 import dealerInvoiceRoutes from './routes/dealer/invoiceRoutes.js';
+import dealerReturnRoutes from './routes/dealer/returnRoutes.js';
+import dealerDispatchRoutes from './routes/dealer/dispatchRoutes.js';
+import dealerReportRoutes from './routes/dealer/reportRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -103,7 +106,7 @@ import './models/LossTracking.js';
 import './models/POInvoice.js';
 import './models/PendingOrder.js';
 import './models/DebitNote.js';
-// import './models/TallyVoucher.js'; // TODO: Create this model if needed
+import './models/TallyVoucher.js';
 
 dotenv.config();
 
@@ -137,6 +140,8 @@ app.use(cors({
     if (!origin) return callback(null, true);
     const allowed = [
       'https://chakraindustries-backend.onrender.com',
+      'https://erp.majesticmall.net',
+      'https://majesticmall.net',
       'http://localhost:3000',
       'http://localhost:5001',
       'http://localhost:5173',
@@ -242,6 +247,9 @@ app.use('/api/dealer/orders', dealerOrderRoutes);
 app.use('/api/dealer/cart', dealerCartRoutes);
 app.use('/api/dealer/inventory', dealerInventoryRoutes);
 app.use('/api/dealer/invoices', dealerInvoiceRoutes);
+app.use('/api/dealer/returns', dealerReturnRoutes);
+app.use('/api/dealer/dispatch', dealerDispatchRoutes);
+app.use('/api/dealer/reports', dealerReportRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars
@@ -260,9 +268,11 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Local: http://localhost:${PORT}`);
+  console.log(`Network: http://0.0.0.0:${PORT}`);
   // Start Tally auto-sync scheduler after server is up
   startTallyScheduler();
 });

@@ -1,5 +1,23 @@
 import ItemMaster from '../models/ItemMaster.js';
 
+// ── Barcode generator (EAN-13 style, 13 digits) ───────────────────────────────
+const generateBarcodeValue = () => {
+  // 12 random digits + EAN-13 check digit
+  const digits = Array.from({ length: 12 }, () => Math.floor(Math.random() * 10));
+  const checkDigit = (10 - (digits.reduce((sum, d, i) => sum + d * (i % 2 === 0 ? 1 : 3), 0) % 10)) % 10;
+  return [...digits, checkDigit].join('');
+};
+
+// Ensure uniqueness — retry up to 5 times
+const generateUniqueBarcode = async () => {
+  for (let i = 0; i < 5; i++) {
+    const value = generateBarcodeValue();
+    const exists = await ItemMaster.findOne({ barcode: value });
+    if (!exists) return value;
+  }
+  throw new Error('Could not generate a unique barcode — please try again');
+};
+
 // Generate Item ID
 const generateItemId = async () => {
   const year = new Date().getFullYear();
@@ -28,7 +46,21 @@ export const createItem = async (req, res) => {
       return res.status(400).json({ success: false, message: `SKU ${sku} already exists` });
     }
 
+    // If a barcode was manually provided, ensure it is not already in use
+    if (barcode && barcode.trim()) {
+      const barcodeConflict = await ItemMaster.findOne({ barcode: barcode.trim() });
+      if (barcodeConflict) {
+        return res.status(400).json({
+          success: false,
+          message: `Barcode ${barcode} is already assigned to SKU ${barcodeConflict.sku} (${barcodeConflict.name})`
+        });
+      }
+    }
+
     const itemId = await generateItemId();
+
+    // Auto-generate a unique barcode if none was provided
+    const finalBarcode = (barcode && barcode.trim()) ? barcode.trim() : await generateUniqueBarcode();
 
     const item = new ItemMaster({
       itemId,
@@ -45,7 +77,7 @@ export const createItem = async (req, res) => {
       reorderPoint: parseInt(reorderPoint) || 0,
       hsn,
       gst: parseFloat(gst) || 0,
-      barcode,
+      barcode: finalBarcode,
       createdBy: req.user?._id
     });
 
@@ -126,6 +158,17 @@ export const updateItem = async (req, res) => {
       }
     }
 
+    // If barcode is being changed, ensure it is not already in use by another item
+    if (barcode && barcode.trim()) {
+      const barcodeConflict = await ItemMaster.findOne({ barcode: barcode.trim(), _id: { $ne: req.params.id } });
+      if (barcodeConflict) {
+        return res.status(400).json({
+          success: false,
+          message: `Barcode ${barcode} is already assigned to SKU ${barcodeConflict.sku} (${barcodeConflict.name})`
+        });
+      }
+    }
+
     const updateData = {
       ...(sku && { sku: sku.toUpperCase() }),
       ...(name && { name }),
@@ -142,7 +185,7 @@ export const updateItem = async (req, res) => {
       ...(isActive !== undefined && { isActive }),
       ...(hsn && { hsn }),
       ...(gst !== undefined && { gst: parseFloat(gst) }),
-      ...(barcode && { barcode }),
+      ...(barcode && barcode.trim() && { barcode: barcode.trim() }),
       updatedBy: req.user?._id
     };
 
@@ -231,6 +274,47 @@ export const getItemStats = async (req, res) => {
         inactive,
         discontinued
       }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET BY BARCODE - Look up a product by its barcode value
+export const getItemByBarcode = async (req, res) => {
+  try {
+    const item = await ItemMaster.findOne({ barcode: req.params.barcode.trim() })
+      .populate('category', 'name');
+
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'No product found for this barcode' });
+    }
+
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// REGENERATE BARCODE - Admin-only: force a new unique barcode for an existing item
+export const regenerateBarcode = async (req, res) => {
+  try {
+    const item = await ItemMaster.findById(req.params.id);
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+
+    const oldBarcode = item.barcode;
+    const newBarcode = await generateUniqueBarcode();
+
+    item.barcode = newBarcode;
+    item.updatedBy = req.user?._id;
+    await item.save();
+
+    res.json({
+      success: true,
+      message: `Barcode regenerated for ${item.sku}`,
+      data: { sku: item.sku, name: item.name, oldBarcode, newBarcode }
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

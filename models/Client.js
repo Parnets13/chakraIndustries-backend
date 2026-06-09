@@ -57,6 +57,25 @@ const clientSchema = new mongoose.Schema(
       type: String,
       enum: ['Active', 'Inactive'],
       default: 'Active'
+    },
+    
+    // Tally Integration Fields
+    tallyGuid: {
+      type: String,
+      trim: true,
+      sparse: true,
+      index: true
+    },
+    tallyAlterId: {
+      type: String,
+      trim: true
+    },
+    tallySynced: {
+      type: Boolean,
+      default: false
+    },
+    lastTallySync: {
+      type: Date
     }
   },
   {

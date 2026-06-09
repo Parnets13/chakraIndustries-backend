@@ -56,9 +56,17 @@ const invoiceSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ['Draft', 'Sent', 'Paid', 'Overdue', 'Cancelled'],
+    enum: ['Draft', 'Sent', 'Paid', 'Overdue', 'Cancelled', 'Partial'],
     default: 'Draft',
   },
+
+  paymentStatus: {
+    type: String,
+    enum: ['Pending', 'Partial', 'Paid'],
+    default: 'Pending'
+  },
+  paidAmount: { type: Number, default: 0 },
+  remainingAmount: { type: Number, default: 0 },
 
   // Source tracking
   source:       { type: String, enum: ['manual', 'excel_upload'], default: 'manual' },
@@ -103,11 +111,39 @@ const invoiceSchema = new mongoose.Schema({
   // Tally sync tracking
   tallySync:           { type: Boolean, default: false },
   tallySyncAt:         { type: Date },
+  tallyGuid: {
+    type: String,
+    trim: true,
+    sparse: true,
+    index: true
+  },
+  tallyAlterId: {
+    type: String,
+    trim: true
+  },
+  tallyVoucherNumber: {
+    type: String,
+    trim: true
+  }
 }, { timestamps: true });
 
 invoiceSchema.index({ invoiceNo: 1 });
 invoiceSchema.index({ status: 1 });
 invoiceSchema.index({ partyName: 1 });
 invoiceSchema.index({ invoiceDate: -1 });
+
+invoiceSchema.pre('save', function(next) {
+  if (this.isModified('grandTotal') || this.isModified('paidAmount')) {
+    this.remainingAmount = Math.max(0, this.grandTotal - this.paidAmount);
+    if (this.paidAmount <= 0) {
+      this.paymentStatus = 'Pending';
+    } else if (this.paidAmount >= this.grandTotal) {
+      this.paymentStatus = 'Paid';
+    } else {
+      this.paymentStatus = 'Partial';
+    }
+  }
+  next();
+});
 
 export default mongoose.model('Invoice', invoiceSchema);

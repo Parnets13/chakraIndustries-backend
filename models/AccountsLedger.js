@@ -39,8 +39,9 @@ const accountsLedgerSchema = new mongoose.Schema({
   // GST and tax details
   gstNumber: {
     type: String,
-    required: true,
-    index: true
+    required: false,   // must be false — Tally ledgers imported without a GSTIN are valid
+    index: true,
+    default: 'N/A'
   },
   
   panNumber: {
@@ -137,9 +138,17 @@ const accountsLedgerSchema = new mongoose.Schema({
     type: String,
     index: true
   },
-  
+
   tallyGuid: {
-    type: String
+    type: String,
+    trim: true,
+    sparse: true,
+    index: true
+  },
+
+  tallyAlterId: {
+    type: String,
+    trim: true
   },
   
   // Status
@@ -176,6 +185,7 @@ accountsLedgerSchema.index({ corporateClientId: 1, isActive: 1 });
 accountsLedgerSchema.index({ ledgerCode: 1, isActive: 1 });
 accountsLedgerSchema.index({ gstNumber: 1 });
 accountsLedgerSchema.index({ tallyLedgerId: 1 });
+accountsLedgerSchema.index({ tallyGuid: 1 }, { sparse: true });
 
 // Methods for balance calculations
 accountsLedgerSchema.methods.updateBalance = function(amount, type = 'Dr') {
