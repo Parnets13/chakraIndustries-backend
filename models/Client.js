@@ -25,7 +25,7 @@ const clientSchema = new mongoose.Schema(
     },
     email: {
       type: String,
-      required: [true, 'Email is required']
+      trim: true
     },
     city: {
       type: String,
@@ -34,8 +34,8 @@ const clientSchema = new mongoose.Schema(
     },
     category: {
       type: String,
-      enum: ['Manufacturing', 'Trading', 'Distributor'],
-      required: [true, 'Category is required']
+      enum: ['Regular', 'Premium', 'Corporate', 'Distributor', 'Retailer', 'Manufacturing', 'Trading'],
+      default: 'Regular'
     },
     creditLimit: {
       type: Number,
@@ -55,7 +55,7 @@ const clientSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['Active', 'Inactive'],
+      enum: ['Active', 'Inactive', 'Blocked'],
       default: 'Active'
     },
     

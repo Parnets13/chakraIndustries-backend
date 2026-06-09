@@ -72,6 +72,7 @@ router.get('/', async (req, res) => {
           totalQty: totalQty || totalItems,
           amount: `₹${(order.value || 0).toLocaleString('en-IN')}`,
           status: order.status || 'Pending',
+          priority: order.priority || 'Normal',
           expectedDelivery: order.expectedDeliveryDate ? new Date(order.expectedDeliveryDate).toLocaleDateString('en-GB') : null,
           trackingDetails: tracking ? {
             docketNumber: tracking.docketNumber,

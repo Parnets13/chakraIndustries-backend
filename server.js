@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import connectDB from './config/database.js';
+import { execSync } from 'child_process';
 import authRoutes from './routes/authRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import permissionRoutes from './routes/permissionRoutes.js';
@@ -70,18 +71,6 @@ import debitNoteRoutes from './routes/debitNoteRoutes.js';
 import docketTrackingRoutes from './routes/docketTrackingRoutes.js';
 import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
 import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
-
-// Dealer App Routes
-import dealerAuthRoutes from './routes/dealer/authRoutes.js';
-import dealerProfileRoutes from './routes/dealer/profileRoutes.js';
-import dealerProductRoutes from './routes/dealer/productRoutes.js';
-import dealerOrderRoutes from './routes/dealer/orderRoutes.js';
-import dealerCartRoutes from './routes/dealer/cartRoutes.js';
-import dealerInventoryRoutes from './routes/dealer/inventoryRoutes.js';
-import dealerInvoiceRoutes from './routes/dealer/invoiceRoutes.js';
-import dealerReturnRoutes from './routes/dealer/returnRoutes.js';
-import dealerDispatchRoutes from './routes/dealer/dispatchRoutes.js';
-import dealerReportRoutes from './routes/dealer/reportRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -239,18 +228,6 @@ app.use('/api/docket-tracking', docketTrackingRoutes);
 app.use('/api/loss-tracking', lossTrackingRoutes);
 app.use('/api/po-generator', poGeneratorRoutes);
 
-// Dealer App Routes
-app.use('/api/dealer/auth', dealerAuthRoutes);
-app.use('/api/dealer/profile', dealerProfileRoutes);
-app.use('/api/dealer/products', dealerProductRoutes);
-app.use('/api/dealer/orders', dealerOrderRoutes);
-app.use('/api/dealer/cart', dealerCartRoutes);
-app.use('/api/dealer/inventory', dealerInventoryRoutes);
-app.use('/api/dealer/invoices', dealerInvoiceRoutes);
-app.use('/api/dealer/returns', dealerReturnRoutes);
-app.use('/api/dealer/dispatch', dealerDispatchRoutes);
-app.use('/api/dealer/reports', dealerReportRoutes);
-
 // Health check
 // eslint-disable-next-line no-unused-vars
 app.get('/api/health', (req, res) => {
@@ -268,11 +245,45 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Local: http://localhost:${PORT}`);
-  console.log(`Network: http://0.0.0.0:${PORT}`);
-  // Start Tally auto-sync scheduler after server is up
-  startTallyScheduler();
-});
+const PORT = process.env.PORT || 5001;
+
+function killPortAndStart(port) {
+  try {
+    // Find and kill any process using this port
+    const result = execSync(
+      `netstat -ano | findstr :${port}`,
+      { encoding: 'utf8', stdio: ['pipe','pipe','pipe'] }
+    );
+    const lines = result.split('\n').filter(l => l.includes('LISTENING'));
+    lines.forEach(line => {
+      const parts = line.trim().split(/\s+/);
+      const pid = parts[parts.length - 1];
+      if (pid && !isNaN(pid)) {
+        try {
+          execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' });
+          console.log(`✅ Killed old process PID ${pid} on port ${port}`);
+        } catch (_) {}
+      }
+    });
+  } catch (_) {
+    // No process found on port — that's fine
+  }
+
+  // Small delay then start
+  setTimeout(() => {
+    const server = app.listen(port, () => {
+      console.log(`Server running on port ${port}`);
+      startTallyScheduler();
+    });
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`Port ${port} still in use, retrying in 2s...`);
+        setTimeout(() => killPortAndStart(port), 2000);
+      } else {
+        throw err;
+      }
+    });
+  }, 500);
+}
+
+killPortAndStart(PORT);

@@ -95,6 +95,147 @@ router.put('/update', verifyDealer, async (req, res) => {
   }
 });
 
+// @route   GET /api/dealer/profile/addresses
+// @desc    Get dealer addresses
+// @access  Private
+router.get('/addresses', verifyDealer, async (req, res) => {
+  try {
+    const dealer = await User.findById(req.dealerId).select('addresses');
+
+    if (!dealer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Dealer not found'
+      });
+    }
+
+    // If no addresses, provide a default from the profile address field if it exists
+    let addresses = dealer.addresses || [];
+    if (addresses.length === 0) {
+      const fullDealer = await User.findById(req.dealerId).select('address');
+      if (fullDealer.address) {
+        addresses = [{
+          label: 'Default Office',
+          address: fullDealer.address,
+          isDefault: true
+        }];
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: addresses
+    });
+  } catch (error) {
+    console.error('Get addresses error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch addresses'
+    });
+  }
+});
+
+// @route   POST /api/dealer/profile/addresses
+// @desc    Add a new delivery address
+// @access  Private
+router.post('/addresses', verifyDealer, async (req, res) => {
+  try {
+    const { label, address, city, state, pincode, isDefault } = req.body;
+
+    if (!address || !city || !state || !pincode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide complete address details'
+      });
+    }
+
+    const dealer = await User.findById(req.dealerId);
+
+    if (!dealer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Dealer not found'
+      });
+    }
+
+    // If this is set as default, unset others
+    if (isDefault) {
+      dealer.addresses.forEach(addr => {
+        addr.isDefault = false;
+      });
+    }
+
+    dealer.addresses.push({
+      label: label || 'Site Address',
+      address,
+      city,
+      state,
+      pincode,
+      isDefault: isDefault || false
+    });
+
+    await dealer.save();
+
+    res.status(201).json({
+      success: true,
+      message: 'Address added successfully',
+      data: dealer.addresses
+    });
+  } catch (error) {
+    console.error('Add address error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to add address'
+    });
+  }
+});
+
+// @route   GET /api/dealer/profile/pincode/:pincode
+// @desc    Lookup pincode for city and state
+// @access  Private
+router.get('/pincode/:pincode', verifyDealer, async (req, res) => {
+  try {
+    const { pincode } = req.params;
+    
+    // In a real scenario, use a postal service API or a database of pincodes
+    // For now, we'll provide a mock implementation with common Indian city/state patterns
+    // or try to match from existing warehouses/dealers
+    
+    const pincodeData = {
+      '560001': { city: 'Bengaluru', state: 'Karnataka' },
+      '560068': { city: 'Bengaluru', state: 'Karnataka' },
+      '400001': { city: 'Mumbai', state: 'Maharashtra' },
+      '110001': { city: 'Delhi', state: 'Delhi' },
+      '600001': { city: 'Chennai', state: 'Tamil Nadu' },
+      '700001': { city: 'Kolkata', state: 'West Bengal' },
+      '500001': { city: 'Hyderabad', state: 'Telangana' },
+    };
+
+    if (pincodeData[pincode]) {
+      return res.status(200).json({
+        success: true,
+        data: pincodeData[pincode]
+      });
+    }
+
+    // Default response if not in mock
+    res.status(200).json({
+      success: true,
+      data: {
+        city: '',
+        state: '',
+        message: 'Pincode found, please enter city and state manually'
+      }
+    });
+  } catch (error) {
+    console.error('Pincode lookup error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to lookup pincode'
+    });
+  }
+});
+
 // @route   GET /api/dealer/profile/dashboard
 // @desc    Get dealer dashboard data
 // @access  Private

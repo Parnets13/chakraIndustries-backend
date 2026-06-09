@@ -49,6 +49,24 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: true,
   },
+  addresses: [
+    {
+      label: { type: String, default: 'Head Office' },
+      address: { type: String, required: true },
+      city: { type: String },
+      state: { type: String },
+      pincode: { type: String },
+      isDefault: { type: Boolean, default: false }
+    }
+  ],
+  creditLimit: {
+    type: Number,
+    default: 500000,
+  },
+  clientId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Client',
+  },
 }, { timestamps: true });
 
 // Hash password before saving (only if password exists and is modified)

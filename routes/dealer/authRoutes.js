@@ -1,5 +1,6 @@
 import express from 'express';
 import User from '../../models/User.js';
+import Client from '../../models/Client.js';
 import jwt from 'jsonwebtoken';
 
 const router = express.Router();
@@ -213,6 +214,9 @@ router.post('/verify-otp', async (req, res) => {
     // Find or create dealer user in database
     let dealer = await User.findOne({ mobile: cleanMobile });
     
+    // Try to find matching client in database by phone
+    const matchingClient = await Client.findOne({ phone: cleanMobile });
+    
     if (!dealer) {
       console.log(`📝 Creating new dealer user: ${cleanMobile}`);
       dealer = await User.create({
@@ -223,11 +227,18 @@ router.post('/verify-otp', async (req, res) => {
         dealerCode: dealerInfo.dealerCode,
         zone: dealerInfo.zone,
         isActive: true,
-        isVerified: true
+        isVerified: true,
+        clientId: matchingClient ? matchingClient._id : undefined
       });
       console.log(`✅ Dealer created with ID: ${dealer._id}`);
     } else {
       console.log(`✅ Existing dealer found with ID: ${dealer._id}`);
+      // Update clientId if found and not already set
+      if (matchingClient && (!dealer.clientId || dealer.clientId.toString() !== matchingClient._id.toString())) {
+        dealer.clientId = matchingClient._id;
+        await dealer.save();
+        console.log(`🔗 Linked dealer to client: ${matchingClient.name}`);
+      }
     }
 
     // Generate JWT token
