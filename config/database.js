@@ -23,14 +23,14 @@ const connectDB = async () => {
     console.log('URI:', mongoUri.substring(0, 50) + '...');
 
     await mongoose.connect(mongoUri, {
-      serverSelectionTimeoutMS: 10000,
+      serverSelectionTimeoutMS: 30000, // increased timeout
       socketTimeoutMS: 45000,
-      connectTimeoutMS: 10000,
+      connectTimeoutMS: 30000,
       heartbeatFrequencyMS: 10000,
       retryWrites: true,
       w: 'majority',
-      maxPoolSize: 10,        // cap connection pool to avoid overwhelming Atlas
-      minPoolSize: 2,         // keep a minimum ready
+      maxPoolSize: 10,
+      minPoolSize: 2,
     });
     console.log('✓ MongoDB connected successfully');
 
