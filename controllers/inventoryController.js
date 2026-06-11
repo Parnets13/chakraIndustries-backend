@@ -88,7 +88,7 @@ export const getInventoryStats = async (req, res) => {
     const active   = items.filter(i => i.status === 'Active').length;
     const critical = items.filter(i => i.status === 'Critical').length;
     const dead     = items.filter(i => i.status === 'Dead').length;
-    const totalQty = items.reduce((s, i) => s + i.qty, 0);
+    const totalQty = items.reduce((s, i) => s + (i.currentQuantity || i.qty || 0), 0);
 
     // Category breakdown by warehouse prefix (simple heuristic)
     const byWarehouse = {};
@@ -97,7 +97,7 @@ export const getInventoryStats = async (req, res) => {
       byWarehouse[wh.warehouseId] = {
         name: wh.name,
         skus: whItems.length,
-        qty:  whItems.reduce((s, i) => s + i.qty, 0),
+        qty:  whItems.reduce((s, i) => s + (i.currentQuantity || i.qty || 0), 0),
       };
     }
 
@@ -250,7 +250,7 @@ export const getWarehouses = async (req, res) => {
       return {
         ...wh.toObject(),
         id:   wh.warehouseId,
-        used: whItems.reduce((s, i) => s + i.qty, 0),
+        used: whItems.reduce((s, i) => s + (i.currentQuantity || i.qty || 0), 0),
         skus: whItems.length,
       };
     });

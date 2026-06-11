@@ -1,6 +1,7 @@
 import SalesOrder from '../models/SalesOrder.js';
 import CorporateClient from '../models/CorporateClient.js';
 import ItemMaster from '../models/ItemMaster.js';
+import InventoryItem from '../models/InventoryItem.js';
 
 const genOrderId = async () => {
   const year = new Date().getFullYear();
@@ -117,6 +118,7 @@ export const getDealerOrderById = async (req, res) => {
 
 export const createDealerOrder = async (req, res) => {
   try {
+    console.log('Creating dealer order, req.body:', req.body);
     const itemsInput = parseItems(req.body.items);
     if (itemsInput.length === 0) {
       return res.status(400).json({ success: false, message: 'At least one item is required' });
@@ -124,28 +126,60 @@ export const createDealerOrder = async (req, res) => {
 
     const productIds = itemsInput.map((i) => i.productId);
     const products = await ItemMaster.find({ _id: { $in: productIds } }).populate('category', 'name');
+    console.log('Found products:', products);
     const byId = new Map(products.map((p) => [String(p._id), p]));
     const discountPercentage = await getDealerDiscountPercentage(req.dealer);
 
+    // Get stock for all SKUs
+    const skus = products.map(p => p.sku);
+    const stockAgg = await InventoryItem.aggregate([
+      { $match: { sku: { $in: skus } } },
+      { $group: { _id: '$sku', qty: { $sum: { $ifNull: ['$qty', 0] } } } }
+    ]);
+    const stockMap = new Map(stockAgg.map(row => [row._id, row.qty || 0]));
+
     const lineItems = [];
     let totalQty = 0;
+    let subTotal = 0;
+    let totalGst = 0;
     let totalValue = 0;
 
     for (const item of itemsInput) {
       const product = byId.get(String(item.productId));
-      if (!product) continue;
+      if (!product) {
+        return res.status(400).json({ success: false, message: `Product ${item.productId} not found` });
+      }
+
+      // Check stock
+      const stock = stockMap.get(product.sku) || 0;
+      if (stock < item.quantity) {
+        return res.status(400).json({ 
+          success: false, 
+          message: `Insufficient stock for ${product.name}. Available: ${stock}, Requested: ${item.quantity}` 
+        });
+      }
+
       const basePrice = product.sellingPrice || product.unitPrice || 0;
       const unitPrice = Math.max(0, +(basePrice - (basePrice * discountPercentage) / 100).toFixed(2));
-      const total = unitPrice * item.quantity;
+      const gstPercent = product.gst || 0;
+      const itemSubTotal = unitPrice * item.quantity;
+      const itemGstAmount = (itemSubTotal * gstPercent) / 100;
+      const itemTotal = itemSubTotal + itemGstAmount;
+
+      subTotal += itemSubTotal;
+      totalGst += itemGstAmount;
       totalQty += item.quantity;
-      totalValue += total;
+      totalValue += itemTotal;
+
       lineItems.push({
         productId: product._id,
         sku: product.sku,
         name: product.name,
         quantity: item.quantity,
         unitPrice,
-        total,
+        gstPercent,
+        gstAmount: +itemGstAmount.toFixed(2),
+        total: +itemTotal.toFixed(2),
       });
     }
 
@@ -161,7 +195,9 @@ export const createDealerOrder = async (req, res) => {
       customer: dealerCustomer,
       customerId: req.dealer.erpClientId,
       items: totalQty,
-      value: totalValue,
+      value: +totalValue.toFixed(2),
+      subTotal: +subTotal.toFixed(2),
+      totalGst: +totalGst.toFixed(2),
       priority: req.body.priority || 'Normal',
       status: 'Pending',
       orderDate: new Date(),
@@ -174,8 +210,19 @@ export const createDealerOrder = async (req, res) => {
       statusHistory: [{ status: 'Pending', note: 'Order placed from dealer app' }],
     });
 
-    res.status(201).json({ success: true, data: { orderId: order.orderId, mongodbId: order._id } });
+    console.log('Order created successfully:', orderId);
+    res.status(201).json({ 
+      success: true, 
+      data: { 
+        orderId: order.orderId, 
+        mongodbId: order._id,
+        subTotal: order.subTotal,
+        totalGst: order.totalGst,
+        totalValue: order.value
+      } 
+    });
   } catch (error) {
+    console.error('Create dealer order error:', error);
     res.status(400).json({ success: false, message: error.message || 'Failed to create order' });
   }
 };

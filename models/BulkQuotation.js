@@ -28,8 +28,7 @@ const bulkQuotationSchema = new mongoose.Schema(
     },
     packaging: {
       type: String,
-      enum: ['Standard Box', 'Custom Branded', 'Bulk Loose', 'Premium Gift Box'],
-      required: [true, 'Packaging option is required']
+      default: 'Standard Box'
     },
     validity: {
       type: Date,
