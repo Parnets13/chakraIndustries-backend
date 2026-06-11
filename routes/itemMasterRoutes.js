@@ -6,6 +6,7 @@ import {
   getItemBySku,
   updateItem,
   deleteItem,
+  deleteAllItems,
   searchItems,
   getItemsForDropdown,
   getItemStats,
@@ -31,6 +32,7 @@ router.get('/barcode/:barcode', protect, getItemByBarcode);
 // CRUD operations
 router.get('/',          protect, getAllItems);
 router.post('/',         protect, createItem);
+router.delete('/delete-all', protect, deleteAllItems);
 router.get('/sku/:sku',  protect, getItemBySku);
 router.get('/:id',       protect, getItemById);
 router.put('/:id',       protect, updateItem);

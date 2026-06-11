@@ -35,9 +35,14 @@ const getDealerDiscountPercentage = async (dealer) => {
   return Number.isFinite(disc) ? disc : 0;
 };
 
-const getInventoryStockMap = async (skus = []) => {
+const getInventoryStockMap = async (skus = [], warehouse = null) => {
   const normalizedSkus = skus.map((s) => String(s).toUpperCase());
   const match = normalizedSkus.length ? { sku: { $in: normalizedSkus } } : {};
+  
+  // If warehouse is provided, add to match!
+  if (warehouse) {
+    match.warehouse = warehouse;
+  }
 
   const map = new Map();
 
@@ -150,7 +155,7 @@ const buildItemMasterFilter = async ({ categoryName, categoryId, search }) => {
 
 export const getDealerProducts = async (req, res) => {
   try {
-    const { category, search } = req.query;
+    const { category, search, warehouse } = req.query; // Add warehouse
     const inStock = toBool(req.query.inStock);
     const page = Math.max(toInt(req.query.page, 1), 1);
     const limit = Math.min(Math.max(toInt(req.query.limit, 50), 1), 200);
@@ -164,7 +169,7 @@ export const getDealerProducts = async (req, res) => {
       .limit(limit);
 
     const skus = itemMasters.map((i) => i.sku);
-    const stockMap = await getInventoryStockMap(skus);
+    const stockMap = await getInventoryStockMap(skus, warehouse); // Pass warehouse
     const discountPercentage = await getDealerDiscountPercentage(req.dealer);
 
     const products = itemMasters

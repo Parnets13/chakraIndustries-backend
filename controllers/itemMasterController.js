@@ -296,6 +296,16 @@ export const getItemByBarcode = async (req, res) => {
   }
 };
 
+// DELETE ALL - Delete all items from item master
+export const deleteAllItems = async (req, res) => {
+  try {
+    const result = await ItemMaster.deleteMany({});
+    res.json({ success: true, message: `${result.deletedCount} stock items deleted` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // REGENERATE BARCODE - Admin-only: force a new unique barcode for an existing item
 export const regenerateBarcode = async (req, res) => {
   try {

@@ -25,19 +25,47 @@ const mapInventoryRow = (row) => ({
 // Get list of all warehouses
 export const getDealerWarehouses = async (req, res) => {
   try {
-    // Get unique warehouses from InventoryItem
-    const warehouses = await InventoryItem.aggregate([
+    // First get all unique warehouses from InventoryItem (where items are actually stored!)
+    const inventoryWarehouses = await InventoryItem.aggregate([
+      { $match: { warehouse: { $exists: true, $ne: null, $ne: '' } } },
       { $group: { _id: '$warehouse', name: { $first: '$warehouse' } } },
       { $sort: { _id: 1 } }
     ]);
 
-    const warehouseList = warehouses.map(w => ({
-      id: w._id,
-      name: w.name || w._id
-    }));
+    console.log('Found inventory warehouses:', inventoryWarehouses);
+
+    // Then get warehouses from Warehouse model
+    const warehouseDocs = await Warehouse.find({ status: 'Active' }).sort({ name: 1 });
+    console.log('Found Warehouse docs:', warehouseDocs);
+
+    // Combine them, avoiding duplicates
+    const warehouseMap = new Map();
+
+    // Add inventory warehouses first (using name as id to ensure matching!)
+    inventoryWarehouses.forEach(w => {
+      warehouseMap.set(w.name, {
+        id: w.name, // Use name as id so we can match directly!
+        name: w.name
+      });
+    });
+
+    // Add warehouses from Warehouse model if not already present
+    warehouseDocs.forEach(w => {
+      if (!warehouseMap.has(w.name)) {
+        warehouseMap.set(w.name, {
+          id: w.name, // Use name as id here too!
+          name: w.name
+        });
+      }
+    });
+
+    const warehouseList = Array.from(warehouseMap.values());
+
+    console.log('Final warehouse list:', warehouseList);
 
     res.json({ success: true, data: warehouseList });
   } catch (error) {
+    console.error('getDealerWarehouses error:', error);
     res.status(500).json({ success: false, message: error.message || 'Failed to fetch warehouses' });
   }
 };
@@ -48,7 +76,10 @@ export const getDealerWarehouseItems = async (req, res) => {
     const warehouseId = String(req.params.warehouseId || '').trim();
     const search = String(req.query.search || '').trim();
 
-    const match = { warehouse: warehouseId };
+    console.log('getDealerWarehouseItems called with:', { warehouseId, search });
+
+    // Now warehouseId IS the warehouse name!
+    let match = { warehouse: warehouseId };
 
     if (search) {
       match.$or = [
@@ -57,30 +88,33 @@ export const getDealerWarehouseItems = async (req, res) => {
       ];
     }
 
+    console.log('Finding InventoryItem with match:', match);
     const items = await InventoryItem.find(match).populate('category', 'name');
+    console.log('Found items:', items.length);
 
-    // Enhance with ItemMaster data if available
     const itemsWithDetails = await Promise.all(
       items.map(async (item) => {
         const itemMaster = await ItemMaster.findOne({ sku: item.sku }).populate('category', 'name');
         return {
           id: item._id,
           sku: item.sku,
-          name: item.name,
+          name: item.name || itemMaster?.name || 'Unknown Item',
           qty: getQty(item),
-          unit: item.unit,
-          minQty: item.minQty,
+          unit: item.unit || itemMaster?.unit || 'units',
+          minQty: item.minQty || itemMaster?.minQuantity || 0,
           category: itemMaster?.category?.name || 'Uncategorized',
           categoryId: itemMaster?.category?._id,
           price: itemMaster?.sellingPrice || itemMaster?.unitPrice || 0,
-          moq: itemMaster?.minQuantity || 24,
-          status: item.status
+          moq: itemMaster?.minQuantity || 1,
+          status: item.status || 'Active'
         };
       })
     );
 
+    console.log('Returning items:', itemsWithDetails.length);
     res.json({ success: true, data: itemsWithDetails });
   } catch (error) {
+    console.error('getDealerWarehouseItems error:', error);
     res.status(500).json({ success: false, message: error.message || 'Failed to fetch warehouse items' });
   }
 };

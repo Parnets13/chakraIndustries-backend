@@ -23,7 +23,7 @@ const genId = async (Model, field, prefix) => {
 // GET /api/inventory
 export const getAllInventory = async (req, res) => {
   try {
-    const { warehouse, status, search } = req.query;
+    const { warehouse, status, search, page, limit } = req.query;
     const filter = {};
     if (warehouse) filter.warehouse = warehouse;
     if (status)    filter.status    = status;
@@ -31,12 +31,24 @@ export const getAllInventory = async (req, res) => {
       { sku:  { $regex: search, $options: 'i' } },
       { name: { $regex: search, $options: 'i' } },
     ];
-    const items = await InventoryItem.find(filter)
-      .populate('category', 'name')
-      .populate('grnId',    'grnId')
-      .populate('poId',     'poId')
-      .populate('vendorId', 'companyName')
-      .sort({ updatedAt: -1 });
+
+    // Pagination support (optional — omit page/limit to return all for backwards compat)
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+    const skip = usePagination ? (pageNum - 1) * limitNum : 0;
+
+    const [items, totalCount] = await Promise.all([
+      InventoryItem.find(filter)
+        .populate('category', 'name')
+        .populate('grnId',    'grnId')
+        .populate('poId',     'poId')
+        .populate('vendorId', 'companyName')
+        .sort({ updatedAt: -1 })
+        .skip(usePagination ? skip : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? InventoryItem.countDocuments(filter) : Promise.resolve(null),
+    ]);
     
     console.log('Raw items from DB:', items.length, 'items');
     if (items.length > 0) {
@@ -70,7 +82,16 @@ export const getAllInventory = async (req, res) => {
       console.log('First processed item:', itemsWithName[0]);
     }
     
-    res.json({ success: true, data: itemsWithName });
+    const response = { success: true, data: itemsWithName };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page:  pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (err) {
     console.error('Error in getAllInventory:', err);
     res.status(500).json({ success: false, message: err.message });
@@ -242,7 +263,10 @@ export const deleteInventoryItem = async (req, res) => {
 // GET /api/inventory/warehouses
 export const getWarehouses = async (req, res) => {
   try {
-    const warehouses = await Warehouse.find({ status: 'Active' }).sort({ createdAt: 1 });
+    // Accept ?all=true to return every warehouse (used by move-stock dropdown)
+    const showAll = req.query.all === 'true';
+    const filter = showAll ? {} : { status: 'Active' };
+    const warehouses = await Warehouse.find(filter).sort({ createdAt: 1 });
     // Compute used (total qty of items in each warehouse)
     const items = await InventoryItem.find();
     const result = warehouses.map(wh => {
@@ -370,10 +394,31 @@ export const deleteWarehouse = async (req, res) => {
 // GET /api/inventory/movements
 export const getMovements = async (req, res) => {
   try {
-    const { type } = req.query;
+    const { type, page, limit } = req.query;
     const filter = type ? { type } : {};
-    const list = await StockMovement.find(filter).sort({ createdAt: -1 });
-    res.json({ success: true, data: list });
+
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+
+    const [list, totalCount] = await Promise.all([
+      StockMovement.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(usePagination ? (pageNum - 1) * limitNum : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? StockMovement.countDocuments(filter) : Promise.resolve(null),
+    ]);
+
+    const response = { success: true, data: list };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page:  pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

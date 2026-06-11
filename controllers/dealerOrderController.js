@@ -118,24 +118,37 @@ export const getDealerOrderById = async (req, res) => {
 
 export const createDealerOrder = async (req, res) => {
   try {
-    console.log('Creating dealer order, req.body:', req.body);
+    console.log('=== createDealerOrder START ===');
+    console.log('req.body:', req.body);
+    console.log('req.dealer:', req.dealer);
+    
     const itemsInput = parseItems(req.body.items);
+    console.log('itemsInput:', itemsInput);
+    
     if (itemsInput.length === 0) {
       return res.status(400).json({ success: false, message: 'At least one item is required' });
     }
 
     const productIds = itemsInput.map((i) => i.productId);
+    console.log('Looking for product IDs:', productIds);
+    
     const products = await ItemMaster.find({ _id: { $in: productIds } }).populate('category', 'name');
-    console.log('Found products:', products);
+    console.log('Found products:', products.map(p => ({_id: p._id, name: p.name, sku: p.sku})));
+    
     const byId = new Map(products.map((p) => [String(p._id), p]));
     const discountPercentage = await getDealerDiscountPercentage(req.dealer);
+    console.log('discountPercentage:', discountPercentage);
 
     // Get stock for all SKUs
     const skus = products.map(p => p.sku);
+    console.log('Looking for SKUs:', skus);
+    
     const stockAgg = await InventoryItem.aggregate([
       { $match: { sku: { $in: skus } } },
       { $group: { _id: '$sku', qty: { $sum: { $ifNull: ['$qty', 0] } } } }
     ]);
+    console.log('stockAgg results:', stockAgg);
+    
     const stockMap = new Map(stockAgg.map(row => [row._id, row.qty || 0]));
 
     const lineItems = [];
@@ -152,6 +165,8 @@ export const createDealerOrder = async (req, res) => {
 
       // Check stock
       const stock = stockMap.get(product.sku) || 0;
+      console.log(`Checking stock for ${product.name}: available ${stock}, requested ${item.quantity}`);
+      
       if (stock < item.quantity) {
         return res.status(400).json({ 
           success: false, 
@@ -165,6 +180,8 @@ export const createDealerOrder = async (req, res) => {
       const itemSubTotal = unitPrice * item.quantity;
       const itemGstAmount = (itemSubTotal * gstPercent) / 100;
       const itemTotal = itemSubTotal + itemGstAmount;
+
+      console.log('Calculating item total:', {basePrice, unitPrice, gstPercent, itemSubTotal, itemGstAmount, itemTotal});
 
       subTotal += itemSubTotal;
       totalGst += itemGstAmount;
@@ -188,9 +205,11 @@ export const createDealerOrder = async (req, res) => {
     }
 
     const orderId = await genOrderId();
+    console.log('Generated order ID:', orderId);
+    
     const dealerCustomer = req.dealer.businessName || req.dealer.name;
 
-    const order = await SalesOrder.create({
+    const orderData = {
       orderId,
       customer: dealerCustomer,
       customerId: req.dealer.erpClientId,
@@ -208,9 +227,13 @@ export const createDealerOrder = async (req, res) => {
       notes: req.body.notes || '',
       lineItems,
       statusHistory: [{ status: 'Pending', note: 'Order placed from dealer app' }],
-    });
+    };
+    
+    console.log('Creating SalesOrder with:', orderData);
 
-    console.log('Order created successfully:', orderId);
+    const order = await SalesOrder.create(orderData);
+
+    console.log('Order created successfully:', order._id);
     res.status(201).json({ 
       success: true, 
       data: { 
@@ -222,7 +245,8 @@ export const createDealerOrder = async (req, res) => {
       } 
     });
   } catch (error) {
-    console.error('Create dealer order error:', error);
+    console.error('=== createDealerOrder ERROR ===');
+    console.error(error);
     res.status(400).json({ success: false, message: error.message || 'Failed to create order' });
   }
 };
