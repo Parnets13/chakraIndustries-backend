@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import Inventory from '../models/Inventory.js';
 import InventoryItem from '../models/InventoryItem.js';
 import Warehouse from '../models/Warehouse.js';
@@ -390,88 +391,123 @@ export const getStorageLocationData = async (req, res) => {
 // Get pincode stock
 export const getPincodeStockData = async (req, res) => {
   try {
+    // Check if database is connected
+    if (mongoose.connection.readyState !== 1) {
+      console.error('✗ Database not connected. Current state:', mongoose.connection.readyState);
+      return res.status(503).json({
+        success: false,
+        message: 'Database connection is temporarily unavailable. Please try again in a few moments.',
+        data: []
+      });
+    }
+
     const inventory = await Inventory.find()
-      .populate('warehouse', 'warehouseId name location')
-      .populate('category', 'name');
+      .populate('warehouse', 'warehouseId name location city state pincode address manager phone type capacity used')
+      .populate('category', 'name')
+      .populate('batchId', 'batchNo mfgDate expiryDate');
 
-    console.log('Inventory items found:', inventory.length);
+    console.log('Inventory items found for pincode view:', inventory.length);
 
-    // Group by pincode (using warehouse location as pincode for now)
+    // Group by pincode
     const pincodeMap = {};
     
     inventory.forEach(item => {
       if (!item || !item.warehouse) return;
       
-      const pincode = item.warehouse?.location?.split(',')[0] || '000000';
-      const city = item.warehouse?.location?.split(',')[1]?.trim() || 'Unknown';
+      let pincode = item.warehouse.pincode || '';
+      let city = item.warehouse.city || '';
       
+      // Strict Extraction from location string if fields are missing
+      if (!pincode && item.warehouse.location) {
+        const parts = item.warehouse.location.split(',').map(p => p.trim());
+        const pinPart = parts.find(p => /^\d{6}$/.test(p));
+        if (pinPart) {
+          pincode = pinPart;
+          city = city || parts.find(p => p !== pinPart) || '';
+        }
+      }
+
+      // Final Strict Filter: Only allow if Pincode is a valid 6-digit number
+      if (!pincode || !/^\d{6}$/.test(pincode)) {
+        return; // Skip this item as it lacks dynamic mapping data
+      }
+
       if (!pincodeMap[pincode]) {
         pincodeMap[pincode] = {
           pincode,
-          city,
+          city: city || 'Unknown',
           godowns: {}
         };
       }
       
-      const godownId = item.warehouse?.warehouseId || 'DEFAULT';
+      const godownId = item.warehouse.warehouseId || 'DEFAULT';
       if (!pincodeMap[pincode].godowns[godownId]) {
         pincodeMap[pincode].godowns[godownId] = {
           id: godownId,
-          name: item.warehouse?.name || 'Default Godown',
+          name: item.warehouse.name || 'Default Godown',
+          address: item.warehouse.address || 'N/A',
+          city: item.warehouse.city || 'N/A',
+          state: item.warehouse.state || 'N/A',
+          pincode: item.warehouse.pincode || 'N/A',
+          manager: item.warehouse.manager || 'N/A',
+          phone: item.warehouse.phone || 'N/A',
+          type: item.warehouse.type || 'N/A',
+          capacity: item.warehouse.capacity || 0,
+          used: item.warehouse.used || 0,
           locations: []
         };
       }
       
-      // Format location properly - convert object to string
+      // Format location properly: Zone A > Rack 1 > Bin 5
       let locationStr = 'N/A';
       if (item.location) {
-        if (typeof item.location === 'object') {
-          const parts = [];
-          if (item.location.zone) parts.push(item.location.zone);
-          if (item.location.rack) parts.push(item.location.rack);
-          if (item.location.shelf) parts.push(item.location.shelf);
-          if (item.location.bin) parts.push(item.location.bin);
-          locationStr = parts.length > 0 ? parts.join('-') : 'N/A';
-        } else {
-          locationStr = String(item.location);
-        }
+        const parts = [];
+        if (item.location.zone) parts.push(`Zone ${item.location.zone}`);
+        if (item.location.rack) parts.push(`Rack ${item.location.rack}`);
+        if (item.location.shelf) parts.push(`Shelf ${item.location.shelf}`);
+        if (item.location.bin) parts.push(`Bin ${item.location.bin}`);
+        locationStr = parts.length > 0 ? parts.join(' > ') : 'N/A';
       }
       
       pincodeMap[pincode].godowns[godownId].locations.push({
         sku: String(item.sku || 'N/A'),
-        name: String(item.name || 'Unknown Item'),
-        qty: Number(item.quantity || 0),
-        loc: locationStr
+        itemName: String(item.name || 'Unknown Item'),
+        availableQty: Number(item.availableQuantity || item.quantity || 0),
+        reservedQty: Number(item.reservedQuantity || 0),
+        defectiveQty: Number(item.defectiveQuantity || 0),
+        batchNo: item.batchId?.batchNo || item.batch || 'N/A',
+        unit: String(item.unit || 'Nos'),
+        loc: locationStr,
+        lastUpdated: item.updatedAt ? new Date(item.updatedAt).toLocaleString('en-IN', { 
+          day: '2-digit', 
+          month: 'short', 
+          year: 'numeric', 
+          hour: '2-digit', 
+          minute: '2-digit', 
+          hour12: true 
+        }) : 'N/A'
       });
     });
 
     // Convert to array and ensure all data is properly formatted
-    const pincodeData = Object.values(pincodeMap).map(p => {
-      if (!p || typeof p !== 'object') return null;
-      
-      const godownsArray = Object.values(p.godowns || {}).map(g => {
-        if (!g || typeof g !== 'object') return null;
-        return {
-          id: String(g.id || ''),
-          name: String(g.name || ''),
-          locations: Array.isArray(g.locations) ? g.locations.map(loc => ({
-            sku: String(loc.sku || 'N/A'),
-            name: String(loc.name || 'Unknown'),
-            qty: Number(loc.qty || 0),
-            loc: String(loc.loc || 'N/A')
-          })) : []
-        };
-      }).filter(g => g !== null);
-      
-      return {
-        pincode: String(p.pincode || ''),
-        city: String(p.city || ''),
-        godowns: godownsArray
-      };
-    }).filter(item => item !== null && item.pincode && item.godowns && item.godowns.length > 0);
-
-    console.log('Pincode data prepared:', pincodeData.length, 'pincodes');
-    console.log('Sample data:', JSON.stringify(pincodeData[0], null, 2));
+    const pincodeData = Object.values(pincodeMap).map(p => ({
+      pincode: String(p.pincode),
+      city: String(p.city),
+      godowns: Object.values(p.godowns).map(g => ({
+        id: String(g.id),
+        name: String(g.name),
+        address: String(g.address),
+        city: String(g.city),
+        state: String(g.state),
+        pincode: String(g.pincode),
+        manager: String(g.manager),
+        phone: String(g.phone),
+        type: String(g.type),
+        capacity: Number(g.capacity),
+        used: Number(g.used),
+        locations: g.locations
+      }))
+    })).filter(item => item.pincode && item.godowns.length > 0);
 
     res.json({
       success: true,

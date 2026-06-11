@@ -1,13 +1,18 @@
 import InventoryItem from '../models/InventoryItem.js';
+import Inventory from '../models/Inventory.js';
+import InventoryLog from '../models/InventoryLog.js';
+import Batch from '../models/Batch.js';
 import GRN from '../models/GRN.js';
 import Warehouse from '../models/Warehouse.js';
 import StockMovement from '../models/StockMovement.js';
+import Location from '../models/Location.js';
 
 // ── ID generator ──────────────────────────────────────────────────────────────
 const genId = async (Model, field, prefix) => {
   const last = await Model.findOne({ [field]: new RegExp(`^${prefix}-`) }).sort({ [field]: -1 });
   if (!last) return `${prefix}-001`;
-  const num = parseInt(last[field].split('-').pop()) || 0;
+  const parts = last[field].split('-');
+  const num = parseInt(parts[parts.length - 1]) || 0;
   return `${prefix}-${String(num + 1).padStart(3, '0')}`;
 };
 
@@ -155,26 +160,33 @@ export const createInventoryItem = async (req, res) => {
 // PATCH /api/inventory/:id/adjust
 export const adjustInventoryQty = async (req, res) => {
   try {
-    const { qty, reason } = req.body;
+    const { qty, reason, mode = 'add' } = req.body;
     const item = await InventoryItem.findById(req.params.id);
     if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
 
-    const newQty = parseInt(qty);
+    const val = parseInt(qty) || 0;
+    const oldQty = Number(item.qty || 0);
+    let newQty = val;
+
+    if (mode === 'add') {
+      newQty = oldQty + val;
+    }
+
     item.qty    = newQty;
-    item.status = newQty === 0 ? 'Dead' : newQty < item.minQty ? 'Critical' : 'Active';
+    item.status = newQty === 0 ? 'Dead' : newQty < (item.minQty || 0) ? 'Critical' : 'Active';
     await item.save();
 
     // Log as movement
     const movId = await genId(StockMovement, 'movementId', 'MV');
     await StockMovement.create({
       movementId: movId,
-      type: 'Inward',
+      type: val >= 0 ? 'Inward' : 'Outward',
       sku: item.sku,
       name: item.name,
-      qty: newQty,
-      from: 'Manual Adjustment',
+      qty: Math.abs(val),
+      from: mode === 'add' ? 'Stock Adjustment' : 'Initial Set',
       to: item.warehouse,
-      ref: reason || 'Stock Adjustment',
+      ref: reason || `Adjustment: ${mode === 'add' ? (val >= 0 ? '+' : '') + val : 'Set to ' + val}`,
     });
 
     res.json({ success: true, data: item });
@@ -588,107 +600,165 @@ export const getAllStock = async (req, res) => {
   }
 };
 
-// ══════════════════════════════════════════════════════════════════════════════
-// NEW: Convert GRN items to inventory directly
-// ══════════════════════════════════════════════════════════════════════════════
+// ── GRN to Inventory Conversion ──────────────────────────────────────────────
 export const convertGRNToInventory = async (req, res) => {
   try {
     const { grnId } = req.params;
     
     // Get GRN with all details
     const grn = await GRN.findById(grnId)
-      .populate('poId', 'items')
-      .populate('vendorId', '_id')
-      .populate('warehouseId', '_id');
+      .populate('poId')
+      .populate('vendorId')
+      .populate('warehouseId');
     
     if (!grn) {
       return res.status(404).json({ success: false, message: 'GRN not found' });
     }
 
-    console.log(`[CONVERT GRN] Converting GRN ${grn.grnId} items to inventory`);
-    console.log(`[CONVERT GRN] Items count: ${grn.items.length}`);
+    console.log(`[CONVERT GRN] Converting GRN ${grn.grnId} to ERP Inventory`);
 
-    const createdItems = [];
+    const processedItems = [];
 
     // Process each item in GRN
     for (const item of grn.items) {
-      const receivedQty = item.receivedQty || 0;
-      if (receivedQty <= 0) continue;
+      const qty = Number(item.receivedQty || item.qty || 0);
+      if (qty <= 0) continue;
 
       const sku = item.sku || item.name?.replace(/\s+/g, '-').toUpperCase() || `SKU-${Date.now()}`;
       const itemName = item.name || 'Item';
       const unit = item.unit || 'Nos';
-      const warehouse = grn.warehouseId?._id || 'WH-01';
+      const warehouseId = grn.warehouseId?._id;
+      const batchNo = grn.batchNo || `B-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}`;
 
-      console.log(`[CONVERT GRN] Processing: ${itemName} (SKU: ${sku}, Qty: ${receivedQty})`);
-
-      // Check if exists
-      const existing = await InventoryItem.findOne({ sku });
-
-      if (existing) {
-        const oldQty = existing.qty;
-        existing.qty += receivedQty;
-        existing.lastReceivedAt = new Date();
-        existing.status = existing.qty === 0 ? 'Dead' : existing.qty < existing.minQty ? 'Critical' : 'Active';
-        
-        if (!existing.grnId) existing.grnId = grn._id;
-        if (!existing.poId) existing.poId = grn.poId;
-        if (!existing.vendorId) existing.vendorId = grn.vendorId;
-        
-        await existing.save();
-        console.log(`[CONVERT GRN] ✅ Updated: ${sku} | ${oldQty} → ${existing.qty}`);
-        createdItems.push({ sku, name: itemName, qty: receivedQty, action: 'updated' });
-      } else {
-        const newItem = await InventoryItem.create({
-          sku,
-          name: itemName,
-          qty: receivedQty,
-          unit,
-          warehouse,
-          minQty: 0,
-          grnId: grn._id,
-          poId: grn.poId,
-          vendorId: grn.vendorId,
-          lastReceivedAt: new Date(),
-          status: 'Active',
-        });
-        console.log(`[CONVERT GRN] ✅ Created: ${sku} | Qty: ${receivedQty}`);
-        createdItems.push({ sku, name: itemName, qty: receivedQty, action: 'created' });
+      // 0. Find an available storage location for this warehouse
+      let storageLoc = { zone: 'A', rack: '1', shelf: '1', bin: '1' };
+      const actualLocation = await Location.findOne({ warehouse: warehouseId, status: 'Active' });
+      if (actualLocation) {
+        storageLoc = {
+          zone: actualLocation.zone,
+          rack: actualLocation.rack,
+          shelf: actualLocation.shelf,
+          bin: actualLocation.bins?.[0]?.binId || '1'
+        };
       }
 
-      // Log movement
+      // 1. Ensure Batch exists
+      let batch = await Batch.findOne({ batchNo });
+      if (!batch) {
+        batch = await Batch.create({
+          batchNo,
+          sku,
+          itemName,
+          quantity: qty,
+          mfgDate: grn.mfgDate || new Date(),
+          expiryDate: grn.expiryDate,
+          warehouse: grn.warehouseId?.warehouseId || 'WH-01',
+          status: 'Active'
+        });
+      } else {
+        batch.quantity += qty;
+        await batch.save();
+      }
+
+      // 2. Update Inventory (Main ERP Model)
+      let inventory = await Inventory.findOne({ sku, warehouse: warehouseId, batch: batchNo });
+      
+      if (inventory) {
+        inventory.totalQuantity += qty;
+        // availableQuantity is auto-calculated in pre-save
+        inventory.grnId = grn._id;
+        inventory.batchId = batch._id;
+        await inventory.save();
+      } else {
+        inventory = await Inventory.create({
+          sku,
+          name: itemName,
+          warehouse: warehouseId,
+          totalQuantity: qty,
+          minQuantity: 0,
+          unit,
+          batch: batchNo,
+          batchId: batch._id,
+          grnId: grn._id,
+          poId: grn.poId?._id,
+          vendorId: grn.vendorId?._id,
+          mfgDate: grn.mfgDate,
+          expiryDate: grn.expiryDate,
+          location: storageLoc // Dynamic ERP mapping
+        });
+      }
+
+      // 3. Update InventoryItem (Legacy Model for compatibility)
+      await InventoryItem.findOneAndUpdate(
+        { sku },
+        { 
+          $inc: { qty },
+          $set: {
+            name: itemName,
+            warehouse: grn.warehouseId?.warehouseId || 'WH-01',
+            lastReceivedAt: new Date(),
+            grnId: grn._id
+          }
+        },
+        { upsert: true }
+      );
+
+      // 4. Log Movement
       const movId = await genId(StockMovement, 'movementId', 'MV');
       await StockMovement.create({
         movementId: movId,
         type: 'Inward',
         sku,
         name: itemName,
-        qty: receivedQty,
-        from: 'GRN',
-        to: warehouse,
+        qty,
+        from: 'GRN Approval',
+        to: grn.warehouseId?.name || 'Warehouse',
         ref: grn.grnId,
       });
+
+      // 5. Create Inventory Log
+      await InventoryLog.create({
+        action: 'GRN Approved',
+        sku,
+        itemName,
+        quantity: qty,
+        warehouse: warehouseId,
+        reference: grn.grnId,
+        details: `Inventory auto-created from GRN ${grn.grnId} for batch ${batchNo}`
+      });
+
+      processedItems.push({ sku, itemName, qty, batchNo });
     }
 
-    // Update GRN status
+    // 6. Update Warehouse Capacity (Stock Update)
+    if (grn.warehouseId) {
+      const warehouse = await Warehouse.findById(grn.warehouseId._id);
+      if (warehouse) {
+        const totalGrnQty = processedItems.reduce((sum, i) => sum + i.qty, 0);
+        warehouse.used = (warehouse.used || 0) + totalGrnQty;
+        await warehouse.save();
+      }
+    }
+
+    // 7. Update GRN Status
     await GRN.findByIdAndUpdate(grnId, { grnStatus: 'Inventory_Updated' });
 
-    console.log(`[CONVERT GRN] ✅ Conversion complete for GRN ${grn.grnId}`);
+    // 8. Trigger Tally Sync (Placeholder - in real ERP this would hit a Tally API)
+    console.log(`[TALLY SYNC] Triggered sync for GRN: ${grn.grnId}`);
 
     res.json({
       success: true,
-      message: `${createdItems.length} items converted to inventory`,
+      message: `${processedItems.length} items synced to ERP Inventory`,
       data: {
         grnId: grn.grnId,
-        itemsProcessed: createdItems.length,
-        items: createdItems,
+        items: processedItems,
       },
     });
   } catch (error) {
-    console.error('[CONVERT GRN] ❌ Error:', error);
+    console.error('[CONVERT GRN] ❌ ERP Sync Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Error converting GRN to inventory',
+      message: 'Error syncing GRN to ERP Inventory',
       error: error.message,
     });
   }

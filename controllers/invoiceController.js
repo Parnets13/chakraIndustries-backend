@@ -301,3 +301,12 @@ export const sendEmail = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// ── GET /api/invoices/no/:invoiceNo ─────────────────────────────────────────
+export const getByInvoiceNo = async (req, res) => {
+  try {
+    const inv = await Invoice.findOne({ invoiceNo: req.params.invoiceNo });
+    if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
+    res.json({ success: true, data: inv });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};

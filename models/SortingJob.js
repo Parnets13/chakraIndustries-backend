@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 
 const sortingJobSchema = new mongoose.Schema({
-  sortId: {
+  sortingId: {
     type: String,
     required: true,
     unique: true,

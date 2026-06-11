@@ -3,6 +3,9 @@ import mongoose from 'mongoose';
 const warehouseSchema = new mongoose.Schema({
   warehouseId: { type: String, required: true, unique: true },
   name:        { type: String, required: true },
+  city:        { type: String, default: '' },
+  state:       { type: String, default: '' },
+  pincode:     { type: String, default: '' },
   location:    { type: String, required: true },
   manager:     { type: String, default: '' },
   capacity:    { type: Number, default: 0 },

@@ -56,9 +56,17 @@ const invoiceSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ['Draft', 'Sent', 'Paid', 'Overdue', 'Cancelled'],
+    enum: ['Draft', 'Sent', 'Paid', 'Overdue', 'Cancelled', 'Partial'],
     default: 'Draft',
   },
+
+  paymentStatus: {
+    type: String,
+    enum: ['Pending', 'Partial', 'Paid'],
+    default: 'Pending'
+  },
+  paidAmount: { type: Number, default: 0 },
+  remainingAmount: { type: Number, default: 0 },
 
   // Source tracking
   source:       { type: String, enum: ['manual', 'excel_upload'], default: 'manual' },
@@ -123,5 +131,19 @@ invoiceSchema.index({ invoiceNo: 1 });
 invoiceSchema.index({ status: 1 });
 invoiceSchema.index({ partyName: 1 });
 invoiceSchema.index({ invoiceDate: -1 });
+
+invoiceSchema.pre('save', function(next) {
+  if (this.isModified('grandTotal') || this.isModified('paidAmount')) {
+    this.remainingAmount = Math.max(0, this.grandTotal - this.paidAmount);
+    if (this.paidAmount <= 0) {
+      this.paymentStatus = 'Pending';
+    } else if (this.paidAmount >= this.grandTotal) {
+      this.paymentStatus = 'Paid';
+    } else {
+      this.paymentStatus = 'Partial';
+    }
+  }
+  next();
+});
 
 export default mongoose.model('Invoice', invoiceSchema);

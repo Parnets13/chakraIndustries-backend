@@ -38,6 +38,12 @@ async function tick() {
     const cfg = await TallyConfig.findOne();
     if (!cfg?.autoSync) return;
 
+    // Check if Tally URL is configured and valid
+    if (!cfg.tallyUrl || cfg.tallyUrl === 'Not configured') {
+      console.log('[TallyScheduler] Tally URL not configured - skipping sync');
+      return;
+    }
+
     console.log('[TallyScheduler] Running scheduled import (Tally → ERP)...');
 
     // Always import only — never auto-export
@@ -45,7 +51,12 @@ async function tick() {
 
     console.log(`[TallyScheduler] Scheduled import done — ${result.records} records, ok=${result.ok}`);
   } catch (err) {
-    console.error('[TallyScheduler] Scheduled import error:', err.message);
+    // Suppress DNS/network errors to avoid log spam
+    if (err.message?.includes('ENOTFOUND') || err.message?.includes('getaddrinfo')) {
+      console.log('[TallyScheduler] Tally server unreachable - will retry on next interval');
+    } else {
+      console.error('[TallyScheduler] Scheduled import error:', err.message);
+    }
   } finally {
     _schedulerLock = false;
   }
