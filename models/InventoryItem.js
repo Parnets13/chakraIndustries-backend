@@ -1,12 +1,17 @@
 import mongoose from 'mongoose';
 
 const inventoryItemSchema = new mongoose.Schema({
-  itemCode:   { type: String, required: true, unique: true },
-  itemName:   { type: String, required: true },
+  itemCode:   { type: String, unique: true, sparse: true },
+  itemName:   { type: String, default: '' },
+  // Legacy-compatible aliases stored directly in the document
+  sku:        { type: String, unique: true, sparse: true },
+  name:       { type: String, default: '' },
   description: { type: String, default: '' },
-  currentQuantity: { type: Number, default: 0 },
+  qty:              { type: Number, default: 0 },  // primary qty field used by controller
+  currentQuantity:  { type: Number, default: 0 },  // item-master field
   reservedQuantity: { type: Number, default: 0 },
   incomingQuantity: { type: Number, default: 0 },
+  minQty:     { type: Number, default: 0 },   // used by controller for status calc
   unit:       { type: String, default: 'Nos' },
   unitPrice:  { type: Number, default: 0 },
   moq:        { type: Number, default: 1 },
@@ -27,5 +32,16 @@ const inventoryItemSchema = new mongoose.Schema({
     default: 'Active',
   },
 }, { timestamps: true });
+
+// Keep sku and itemCode in sync
+inventoryItemSchema.pre('save', function (next) {
+  if (this.sku && !this.itemCode) this.itemCode = this.sku;
+  if (this.itemCode && !this.sku) this.sku = this.itemCode;
+  if (this.name && !this.itemName) this.itemName = this.name;
+  if (this.itemName && !this.name) this.name = this.itemName;
+  if (this.qty != null && this.currentQuantity == null) this.currentQuantity = this.qty;
+  if (this.currentQuantity != null && this.qty == null) this.qty = this.currentQuantity;
+  next();
+});
 
 export default mongoose.model('InventoryItem', inventoryItemSchema);

@@ -50,11 +50,11 @@ const deliveryScheduleSchema = new mongoose.Schema(
     },
     slot: {
       type: String,
-      required: [true, 'Time slot is required']
+      default: 'Morning'
     },
     warehouse: {
       type: String,
-      required: [true, 'Warehouse is required']
+      default: 'WH-01'
     },
     vehicle: {
       type: String,

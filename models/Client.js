@@ -43,7 +43,6 @@ const clientSchema = new mongoose.Schema(
     },
     category: {
       type: String,
-      enum: ['Regular', 'Premium', 'Corporate', 'Distributor', 'Retailer', 'Manufacturing', 'Trading'],
       default: 'Regular'
     },
     creditLimit: {

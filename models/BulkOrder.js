@@ -33,7 +33,7 @@ const bulkOrderSchema = new mongoose.Schema(
     }],
     packaging: {
       type: String,
-      enum: ['Standard Box', 'Custom Branded', 'Bulk Loose', 'Premium Gift Box']
+      default: 'Standard Box'
     },
     packagingCost: {
       type: Number,

@@ -95,7 +95,7 @@ const getInventoryStockMap = async (skus = []) => {
 
 const toDealerProduct = (itemMaster, stockRow, discountPercentage) => {
   const stock = stockRow?.qty || 0;
-  const minQty = itemMaster.minQuantity || stockRow?.minQty || 0;
+  const minQty = itemMaster.minQuantity || stockRow?.minQty || 1; // Default to 1 instead of 0 or 24
 
   let stockStatus = 'In Stock';
   if (stock <= 0) stockStatus = 'Out of Stock';
@@ -105,7 +105,7 @@ const toDealerProduct = (itemMaster, stockRow, discountPercentage) => {
   const disc = Number(discountPercentage || 0);
   const discountAmount = basePrice * (disc / 100);
   const finalPrice = Math.max(0, +(basePrice - discountAmount).toFixed(2));
-  const moq = itemMaster.minQuantity || 24;
+  const moq = itemMaster.minQuantity || 1; // Default MOQ to 1 instead of 24 if not set
 
   return {
     id: itemMaster._id,
