@@ -32,6 +32,15 @@ const clientSchema = new mongoose.Schema(
       required: [true, 'City is required'],
       trim: true
     },
+    state: {
+      type: String,
+      trim: true
+    },
+    pincode: {
+      type: String,
+      trim: true,
+      match: [/^(\d{6})?$/, 'Pincode must be exactly 6 digits']
+    },
     category: {
       type: String,
       enum: ['Regular', 'Premium', 'Corporate', 'Distributor', 'Retailer', 'Manufacturing', 'Trading'],
@@ -50,6 +59,10 @@ const clientSchema = new mongoose.Schema(
       trim: true
     },
     address: {
+      type: String,
+      trim: true
+    },
+    remarks: {
       type: String,
       trim: true
     },

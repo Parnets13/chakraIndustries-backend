@@ -7,7 +7,7 @@ const oemBrandSchema = new mongoose.Schema({
   color:          { type: String, default: '#c0392b' },
   
   // Billing
-  billingType:    { type: String, enum: ['Per Unit', 'Per Order', 'Monthly'], default: 'Per Unit' },
+  billingType:    { type: String, enum: ['Per Unit', 'Per Order', 'Monthly', 'Lump Sum', 'Monthly Contract'], default: 'Per Unit' },
   ratePerUnit:    { type: Number, default: 0 },
   gstRate:        { type: Number, default: 18 },
   paymentTerms:   { type: String, default: 'Net 30' },

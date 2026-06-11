@@ -3,8 +3,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import connectDB from './config/database.js';
-import { execSync } from 'child_process';
 import authRoutes from './routes/authRoutes.js';
+import dealerRoutes from './routes/dealerRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import permissionRoutes from './routes/permissionRoutes.js';
 import activityLogRoutes from './routes/activityLogRoutes.js';
@@ -71,6 +71,7 @@ import debitNoteRoutes from './routes/debitNoteRoutes.js';
 import docketTrackingRoutes from './routes/docketTrackingRoutes.js';
 import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
 import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
+import brsRoutes from './routes/brsRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -163,6 +164,7 @@ app.use('/api/tally/webhook', rawXmlParser);
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/dealer', dealerRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/permissions', permissionRoutes);
 app.use('/api/activity-logs', activityLogRoutes);
@@ -227,6 +229,7 @@ app.use('/api/debit-notes',    debitNoteRoutes);
 app.use('/api/docket-tracking', docketTrackingRoutes);
 app.use('/api/loss-tracking', lossTrackingRoutes);
 app.use('/api/po-generator', poGeneratorRoutes);
+app.use('/api/brs', brsRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars
@@ -247,43 +250,14 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5001;
 
-function killPortAndStart(port) {
-  try {
-    // Find and kill any process using this port
-    const result = execSync(
-      `netstat -ano | findstr :${port}`,
-      { encoding: 'utf8', stdio: ['pipe','pipe','pipe'] }
-    );
-    const lines = result.split('\n').filter(l => l.includes('LISTENING'));
-    lines.forEach(line => {
-      const parts = line.trim().split(/\s+/);
-      const pid = parts[parts.length - 1];
-      if (pid && !isNaN(pid)) {
-        try {
-          execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' });
-          console.log(`✅ Killed old process PID ${pid} on port ${port}`);
-        } catch (_) {}
-      }
-    });
-  } catch (_) {
-    // No process found on port — that's fine
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  startTallyScheduler();
+}).on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Stop the other process and restart.`);
+    process.exit(1);
+  } else {
+    throw err;
   }
-
-  // Small delay then start
-  setTimeout(() => {
-    const server = app.listen(port, () => {
-      console.log(`Server running on port ${port}`);
-      startTallyScheduler();
-    });
-    server.on('error', (err) => {
-      if (err.code === 'EADDRINUSE') {
-        console.error(`Port ${port} still in use, retrying in 2s...`);
-        setTimeout(() => killPortAndStart(port), 2000);
-      } else {
-        throw err;
-      }
-    });
-  }, 500);
-}
-
-killPortAndStart(PORT);
+});

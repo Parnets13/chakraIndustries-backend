@@ -7,12 +7,6 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "pm2:start": "pm2 start ecosystem.config.cjs --env production",
-    "pm2:stop": "pm2 stop chakra-erp",
-    "pm2:restart": "pm2 restart chakra-erp",
-    "pm2:reload": "pm2 reload chakra-erp",
-    "pm2:logs": "pm2 logs chakra-erp",
-    "pm2:save": "pm2 save",
     "tally:sync": "node scripts/tallySyncNow.js",
     "tally:fix-config": "node scripts/fixTallyConfig.js",
     "seed": "node seed.js",
