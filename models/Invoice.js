@@ -22,6 +22,9 @@ const invoiceSchema = new mongoose.Schema({
   invoiceNo:    { type: String, unique: true, required: true },
   invoiceDate:  { type: Date, default: Date.now },
   dueDate:      { type: Date },
+  // Link to dealer and sales order
+  dealerId:     { type: mongoose.Schema.Types.ObjectId, ref: 'Dealer' },
+  salesOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'SalesOrder' },
 
   // Billed To
   partyName:    { type: String, required: true },

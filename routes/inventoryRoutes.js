@@ -5,6 +5,7 @@ import {
   getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getNextWarehouseId,
   getMovements, createMovement, deleteMovement,
   convertGRNToInventory,
+  getStockByWarehouse, getAllStock,
 } from '../controllers/inventoryController.js';
 import {
   getInventoryFlowDashboard,
@@ -38,6 +39,10 @@ router.delete('/movements/:id', deleteMovement);
 
 // GRN to Inventory conversion
 router.post('/convert-grn/:grnId', convertGRNToInventory);
+
+// Stock tracking
+router.get('/stock/warehouse/:warehouseId', getStockByWarehouse);
+router.get('/stock', getAllStock);
 
 // Inventory items
 router.get('/',              getAllInventory);

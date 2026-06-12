@@ -60,7 +60,7 @@ const tallySyncStateSchema = new mongoose.Schema({
 
   // Running sync started at
   syncStartedAt: { type: Date, default: null },
-}, { timestamps: true });
+}, { timestamps: true, versionKey: false, optimisticConcurrency: false });
 
 tallySyncStateSchema.index({ entityType: 1 }, { unique: true });
 

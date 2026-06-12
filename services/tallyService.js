@@ -33,12 +33,34 @@ async function getConfig() {
 }
 
 function tallyUrl(cfg) {
-  // Use the production endpoint if serverUrl is the default or majesticmall
-  const host = (cfg.serverUrl || 'https://erp.majesticmall.net').replace(/\/$/, '');
   const port = cfg.port || '9000';
-  // If host already contains a port or uses https, don't append port
-  if (host.startsWith('https://') || host.includes(':' + port)) return host;
-  return `${host}:${port}`;
+
+  // ── Priority 1: tallyLocalUrl (local machine address set in Settings) ──────
+  const local = (cfg.tallyLocalUrl || '').trim();
+  if (local) {
+    if (local.match(/:\d+$/) || local.startsWith('https://')) {
+      console.log('[Tally] tallyUrl → local URL (with port/https):', local.replace(/\/$/, ''));
+      return local.replace(/\/$/, '');
+    }
+    const resolved = `${local.replace(/\/$/, '')}:${port}`;
+    console.log('[Tally] tallyUrl → local URL:', resolved);
+    return resolved;
+  }
+
+  // ── Priority 2: serverUrl (legacy / cloud tunnel — NOT for local Tally) ───
+  const server = (cfg.serverUrl || '').trim();
+  if (server && !server.includes('majesticmall.net') && !server.includes('erp.')) {
+    const resolved = server.match(/:\d+$/) || server.startsWith('https://')
+      ? server.replace(/\/$/, '')
+      : `${server.replace(/\/$/, '')}:${port}`;
+    console.log('[Tally] tallyUrl → serverUrl:', resolved);
+    return resolved;
+  }
+
+  // ── Fallback: localhost ────────────────────────────────────────────────────
+  const fallback = `http://localhost:${port}`;
+  console.log('[Tally] tallyUrl → fallback localhost:', fallback);
+  return fallback;
 }
 
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
@@ -168,7 +190,8 @@ function tallyDate(d) {
 }
 
 function staticVars(cfg, extra = '') {
-  const company = (cfg.companyName || '').trim();
+  // Tally stores company names as UPPERCASE internally — always send uppercase
+  const company = (cfg.companyName || '').trim().toUpperCase();
   const tag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
   return `<STATICVARIABLES>${tag}${extra}</STATICVARIABLES>`;
 }

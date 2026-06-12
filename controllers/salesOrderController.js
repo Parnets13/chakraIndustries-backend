@@ -1,13 +1,6 @@
 import SalesOrder from '../models/SalesOrder.js';
-
-const genOrderId = async () => {
-  const year = new Date().getFullYear();
-  const prefix = `ORD-${year}-`;
-  const last = await SalesOrder.findOne({ orderId: new RegExp(`^${prefix}`) }).sort({ orderId: -1 });
-  if (!last) return `${prefix}001`;
-  const num = parseInt(last.orderId.split('-')[2]) || 0;
-  return `${prefix}${String(num + 1).padStart(3, '0')}`;
-};
+import Invoice from '../models/Invoice.js';
+import { genOrderId } from '../utils/orderIdGenerator.js';
 
 export const getAllOrders = async (req, res) => {
   try {
@@ -19,7 +12,23 @@ export const getAllOrders = async (req, res) => {
       { orderId: { $regex: search, $options: 'i' } },
       { customer: { $regex: search, $options: 'i' } },
     ];
-    const orders = await SalesOrder.find(filter).sort({ createdAt: -1 });
+    let orders = await SalesOrder.find(filter).sort({ createdAt: -1 });
+    
+    // Get invoices for all orders
+    const orderIds = orders.map(o => o._id);
+    const invoices = await Invoice.find({ salesOrderId: { $in: orderIds } });
+    const invoiceMap = {};
+    invoices.forEach(inv => {
+      invoiceMap[inv.salesOrderId.toString()] = inv;
+    });
+    
+    // Attach invoices to orders
+    orders = orders.map(order => {
+      const orderObj = order.toObject();
+      orderObj.invoice = invoiceMap[order._id.toString()] || null;
+      return orderObj;
+    });
+    
     res.json({ success: true, data: orders });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
@@ -47,32 +56,51 @@ export const getOrderById = async (req, res) => {
 };
 
 export const createOrder = async (req, res) => {
-  try {
-    const { customer, items, value, priority, status, orderDate, remarks, file, deliveryAddress, notes, expectedDeliveryDate } = req.body;
-    if (!customer) return res.status(400).json({ success: false, message: 'Customer is required' });
-    const orderId = await genOrderId();
-    
-    // items must always be an array in the new schema
-    const orderItems = Array.isArray(items) ? items : [];
-    const itemCount  = orderItems.length;
+  const maxRetries = 3;
+  let attempts = 0;
 
-    const order = await SalesOrder.create({
-      orderId, customer,
-      items: orderItems,
-      itemCount,
-      value: parseFloat(String(value).replace(/[^0-9.]/g, '')) || 0,
-      priority: priority || 'Normal',
-      status: status || 'Pending',
-      orderDate: orderDate ? new Date(orderDate) : new Date(),
-      remarks: remarks || '',
-      file: file || '',
-      deliveryAddress: deliveryAddress || '',
-      notes: notes || '',
-      expectedDeliveryDate: expectedDeliveryDate ? new Date(expectedDeliveryDate) : null,
-      createdBy: req.user?._id,
-    });
-    res.status(201).json({ success: true, data: order });
-  } catch (e) { res.status(400).json({ success: false, message: e.message }); }
+  while (attempts < maxRetries) {
+    try {
+      const { customer, items, value, priority, status, orderDate, remarks, file, deliveryAddress, notes, expectedDeliveryDate } = req.body;
+      if (!customer) return res.status(400).json({ success: false, message: 'Customer is required' });
+      const orderId = await genOrderId();
+      
+      // items must always be an array in the new schema
+      const orderItems = Array.isArray(items) ? items : [];
+      const itemCount  = orderItems.length;
+
+      const order = await SalesOrder.create({
+        orderId, customer,
+        items: orderItems,
+        itemCount,
+        value: parseFloat(String(value).replace(/[^0-9.]/g, '')) || 0,
+        priority: priority || 'Normal',
+        status: status || 'Pending',
+        orderDate: orderDate ? new Date(orderDate) : new Date(),
+        remarks: remarks || '',
+        file: file || '',
+        deliveryAddress: deliveryAddress || '',
+        notes: notes || '',
+        expectedDeliveryDate: expectedDeliveryDate ? new Date(expectedDeliveryDate) : null,
+        createdBy: req.user?._id,
+      });
+      res.status(201).json({ success: true, data: order });
+      return;
+    } catch (e) {
+      // Duplicate orderId (very rare race) — retry
+      if (e.code === 11000 && e.keyPattern?.orderId) {
+        attempts++;
+        if (attempts >= maxRetries) {
+          return res.status(409).json({ success: false, message: 'Order ID collision — please try again' });
+        }
+        // Wait a short time before retrying
+        await new Promise(resolve => setTimeout(resolve, 100 * attempts));
+      } else {
+        res.status(400).json({ success: false, message: e.message });
+        return;
+      }
+    }
+  }
 };
 
 export const updateOrder = async (req, res) => {
@@ -105,6 +133,10 @@ export const deleteOrder = async (req, res) => {
   try {
     const order = await SalesOrder.findByIdAndDelete(req.params.id);
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    
+    // Also delete any linked invoice
+    await Invoice.deleteMany({ salesOrderId: order._id });
+    
     res.json({ success: true, message: 'Order deleted' });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };

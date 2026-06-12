@@ -39,8 +39,8 @@ async function tick() {
     if (!cfg?.autoSync) return;
 
     // Check if Tally URL is configured and valid
-    if (!cfg.tallyUrl || cfg.tallyUrl === 'Not configured') {
-      console.log('[TallyScheduler] Tally URL not configured - skipping sync');
+    if (!cfg.tallyLocalUrl || cfg.tallyLocalUrl.trim() === '') {
+      console.log('[TallyScheduler] tallyLocalUrl not configured — skipping scheduled import');
       return;
     }
 

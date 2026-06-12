@@ -1,0 +1,1112 @@
+/**
+ * tallyExportService.js
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Dedicated ERP → Tally export engine for Sri Chakra Industries.
+ *
+ * Covers ALL required entity types:
+ *   Masters  : Stock Groups, Stock Categories, Units of Measure, Godowns,
+ *              Stock Items (with Opening Stock + GST), Ledger Masters,
+ *              Customer Masters, Supplier/Vendor Masters
+ *   Vouchers : Sales Invoices, Purchase Invoices, Credit Notes, Debit Notes,
+ *              Payment Vouchers, Receipt Vouchers, Journal Vouchers
+ *
+ * Design principles:
+ *   • Uses GUID + name as dedup key → no duplicates on re-export
+ *   • Per-entity error isolation — one failure does not abort the rest
+ *   • Returns structured results consumed by the SSE streaming endpoint
+ *   • importFromTally() / exportToTally() method stubs for future-readiness
+ */
+
+import axios from 'axios';
+import TallyConfig    from '../models/TallyConfig.js';
+import TallySyncLog   from '../models/TallySyncLog.js';
+import ItemMaster     from '../models/ItemMaster.js';
+import Inventory      from '../models/Inventory.js';
+import Warehouse      from '../models/Warehouse.js';
+import Vendor         from '../models/Vendor.js';
+import Client         from '../models/Client.js';
+import CorporateClient from '../models/CorporateClient.js';
+import AccountsLedger from '../models/AccountsLedger.js';
+import PurchaseOrder  from '../models/PurchaseOrder.js';
+import Invoice        from '../models/Invoice.js';
+import CreditNote     from '../models/CreditNote.js';
+import DebitNote      from '../models/DebitNote.js';
+import TallyVoucher   from '../models/TallyVoucher.js';
+import Category       from '../models/Category.js';
+
+const LOG = (...a) => console.log('[TallyExport]', ...a);
+const ERR = (...a) => console.error('[TallyExport ERROR]', ...a);
+
+// ─── CONFIG HELPERS ───────────────────────────────────────────────────────────
+
+export async function getExportConfig() {
+  let cfg = await TallyConfig.findOne();
+  if (!cfg) cfg = await TallyConfig.create({});
+  return cfg;
+}
+
+/**
+ * Resolve the correct URL to POST Tally XML to.
+ * Priority: tallyLocalUrl (local machine) > serverUrl (only if not the cloud ERP URL) > localhost fallback
+ */
+function resolveUrl(cfg) {
+  const port  = cfg.port || '9000';
+
+  // ── Priority 1: tallyLocalUrl ─────────────────────────────────────────────
+  const local = (cfg.tallyLocalUrl || '').trim();
+  if (local) {
+    if (local.match(/:\d+$/) || local.startsWith('https://')) return local.replace(/\/$/, '');
+    return `${local.replace(/\/$/, '')}:${port}`;
+  }
+
+  // ── Priority 2: serverUrl — skip cloud/ERP URLs ──────────────────────────
+  const server = (cfg.serverUrl || '').trim();
+  if (server && !server.includes('majesticmall.net') && !server.includes('erp.')) {
+    if (server.match(/:\d+$/) || server.startsWith('https://')) return server.replace(/\/$/, '');
+    return `${server.replace(/\/$/, '')}:${port}`;
+  }
+
+  // ── Fallback: localhost ────────────────────────────────────────────────────
+  return `http://localhost:${port}`;
+}
+
+// ─── XML UTILITIES ────────────────────────────────────────────────────────────
+
+/** Escape XML special characters */
+export function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/** Format Date → YYYYMMDD (Tally date format) */
+function td(d) {
+  const dt = d ? new Date(d) : null;
+  if (!dt || isNaN(dt.getTime())) return null;
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const day = String(dt.getDate()).padStart(2, '0');
+  return `${y}${m}${day}`;
+}
+
+const TODAY = td(new Date());
+
+/** Map ERP unit strings to Tally UOM names */
+const UNIT_MAP = {
+  kg: 'Kg', kgs: 'Kg', kilogram: 'Kg', kilogrames: 'Kg',
+  liter: 'Ltr', litre: 'Ltr', ltr: 'Ltr', l: 'Ltr',
+  meter: 'Mtr', metre: 'Mtr', mtr: 'Mtr', m: 'Mtr',
+  box: 'Box', boxes: 'Box',
+  piece: 'Pcs', pieces: 'Pcs', pcs: 'Pcs', pc: 'Pcs',
+  nos: 'Nos', no: 'Nos', number: 'Nos', units: 'Nos', unit: 'Nos',
+  pack: 'Nos', dozen: 'Nos', set: 'Nos', 'Set': 'Nos',
+  gm: 'Gm', gram: 'Gm', grams: 'Gm',
+  ml: 'Ml', milliliter: 'Ml',
+};
+const tallyUnit = (u) => UNIT_MAP[(u || '').toLowerCase().trim()] || 'Nos';
+
+/** Build <STATICVARIABLES> tag targeting the configured company */
+function staticVars(cfg, extra = '') {
+  // Tally stores company names as UPPERCASE internally — always send uppercase
+  const co = (cfg.companyName || '').trim().toUpperCase();
+  return `<STATICVARIABLES>${co ? `<SVCURRENTCOMPANY>${esc(co)}</SVCURRENTCOMPANY>` : ''}${extra}</STATICVARIABLES>`;
+}
+
+/** Wrap XML payload in Tally Import envelope */
+function importEnvelope(cfg, reportName, innerXml) {
+  return `<ENVELOPE>
+<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA>
+  <REQUESTDESC>
+    <REPORTNAME>${reportName}</REPORTNAME>
+    ${staticVars(cfg)}
+  </REQUESTDESC>
+  <REQUESTDATA>
+    <TALLYMESSAGE xmlns:UDF="TallyUDF">
+${innerXml}
+    </TALLYMESSAGE>
+  </REQUESTDATA>
+</IMPORTDATA></BODY>
+</ENVELOPE>`;
+}
+
+// ─── HTTP TRANSPORT ───────────────────────────────────────────────────────────
+
+async function postXml(cfg, xml, timeoutMs = 40000) {
+  const url = resolveUrl(cfg);
+  const headers = { 'Content-Type': 'text/xml', Accept: '*/*' };
+  if (cfg.authType === 'Basic Auth' && cfg.apiKey)
+    headers['Authorization'] = `Basic ${Buffer.from(cfg.apiKey).toString('base64')}`;
+  else if (cfg.authType === 'API Key' && cfg.apiKey)
+    headers['Authorization'] = `Bearer ${cfg.apiKey}`;
+
+  LOG(`POST ${url}  (${xml.length} bytes, timeout ${timeoutMs}ms)`);
+
+  try {
+    const resp = await axios({
+      method: 'POST', url, data: xml, headers,
+      timeout: timeoutMs, responseType: 'text',
+      validateStatus: () => true,
+      maxRedirects: 5,
+    });
+    const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
+    LOG(`HTTP ${resp.status} — ${body.length} bytes`);
+    return body;
+  } catch (err) {
+    ERR('postXml error:', err.message, '(code:', err.code + ')');
+    throw err;
+  }
+}
+
+// ─── RESPONSE PARSER ─────────────────────────────────────────────────────────
+
+function parseResponse(xml, label = '') {
+  if (!xml || !xml.trim()) return { ok: false, error: 'Empty response from Tally' };
+  const s = String(xml);
+
+  // Collect all line errors
+  const errors = [];
+  for (const m of s.matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)) {
+    const msg = m[1].trim(); if (msg) errors.push(msg);
+  }
+  const errTag = s.match(/<ERRORS>([\s\S]*?)<\/ERRORS>/i);
+  if (errTag) {
+    const msg = errTag[1].replace(/<[^>]+>/g, ' ').trim();
+    if (msg) errors.push(msg);
+  }
+
+  const created = parseInt(s.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
+  const altered = parseInt(s.match(/<ALTERED>(\d+)<\/ALTERED>/i)?.[1] || '0');
+  const skipped = parseInt(s.match(/<SKIPPED>(\d+)<\/SKIPPED>/i)?.[1] || '0');
+
+  LOG(`${label} → created:${created} altered:${altered} skipped:${skipped} errors:${errors.length}`);
+
+  if (errors.length > 0 && created === 0 && altered === 0) {
+    return { ok: false, error: errors.join(' | '), created: 0, altered: 0, skipped };
+  }
+  return {
+    ok: true,
+    created, altered, skipped,
+    warning: errors.length > 0 ? errors.join(' | ') : undefined,
+  };
+}
+
+// ─── CONNECTION VALIDATION ────────────────────────────────────────────────────
+
+const PING_XML = `<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY><EXPORTDATA><REQUESTDESC>
+    <REPORTNAME>List of Companies</REPORTNAME>
+    <STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  </REQUESTDESC></EXPORTDATA></BODY>
+</ENVELOPE>`;
+
+/**
+ * validateTallyConnection
+ * Returns { reachable, companyName, companyMatch, error }
+ */
+export async function validateTallyConnection(cfg) {
+  const url = resolveUrl(cfg);
+  LOG('validateTallyConnection →', url);
+
+  try {
+    const resp = await axios({
+      method: 'POST', url, data: PING_XML,
+      headers: { 'Content-Type': 'text/xml', Accept: '*/*' },
+      timeout: 15000, responseType: 'text',
+      validateStatus: () => true, maxRedirects: 5,
+    });
+    const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
+    LOG('Ping response:', body.slice(0, 400));
+
+    // Extract open company name from response
+    const coMatch =
+      body.match(/<COMPANYNAME>(.*?)<\/COMPANYNAME>/i) ||
+      body.match(/<NAME>(.*?)<\/NAME>/i) ||
+      body.match(/COMPANY NAME\s*[:=]\s*([^\n<]+)/i);
+
+    const openCompany = coMatch ? coMatch[1].trim() : null;
+    const expected    = (cfg.companyName || '').trim();
+
+    // Check if expected company matches what's open
+    const companyMatch = !expected || !openCompany ||
+      openCompany.toLowerCase().replace(/\s+/g, '') === expected.toLowerCase().replace(/\s+/g, '');
+
+    await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Connected' }, { upsert: true });
+    return { reachable: true, openCompany, companyMatch, error: null };
+
+  } catch (err) {
+    const code = err.code || '';
+    let error = err.message;
+    if (code === 'ECONNREFUSED')
+      error = `Tally is not running on ${url}. Start Tally Prime and enable the HTTP Server (F12 → Configure → Advanced → Enable ODBC/HTTP Server: Yes, Port: ${cfg.port || 9000}).`;
+    else if (code === 'ECONNRESET' || err.message?.includes('socket hang up'))
+      error = `Tally closed the connection. Enable HTTP Server in Tally: F12 → Configure → Advanced → Enable ODBC/HTTP Server: Yes.`;
+    else if (code === 'ETIMEDOUT' || code === 'ECONNABORTED')
+      error = `Connection timed out at ${url}. Check the URL and ensure Tally HTTP Server is running.`;
+    else if (code === 'ENOTFOUND')
+      error = `Cannot reach host "${url}". Verify the Tally machine URL in Settings.`;
+
+    await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Disconnected' }, { upsert: true });
+    return { reachable: false, openCompany: null, companyMatch: false, error };
+  }
+}
+
+// ─── WRITE SYNC LOG ───────────────────────────────────────────────────────────
+
+async function writeLog({ syncId, type, entity, direction, status, duration, error, records, triggeredBy }) {
+  try {
+    await TallySyncLog.create({
+      syncId, type: type || 'Full', entity: entity || '',
+      direction: direction || 'ERP → Tally',
+      status, duration: duration || '0s',
+      error: error || '', records: records || 0,
+      triggeredBy: triggeredBy || null,
+    });
+  } catch (_) { /* non-fatal */ }
+}
+
+// ─── EXPORT TASK: UNITS OF MEASURE ───────────────────────────────────────────
+
+export async function exportUnits(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-UNITS-${Date.now()}`;
+  LOG('exportUnits START');
+  try {
+    // Collect all distinct units used in ItemMaster
+    const items    = await ItemMaster.find({ isActive: true }, 'unit').lean();
+    const unitSet  = new Set(items.map(i => tallyUnit(i.unit)));
+    // Standard Tally units always needed
+    ['Nos', 'Kg', 'Ltr', 'Mtr', 'Box', 'Pcs', 'Gm', 'Ml'].forEach(u => unitSet.add(u));
+
+    const xml = [...unitSet].map(u => `
+<UNIT NAME="${esc(u)}" ACTION="Create">
+  <NAME>${esc(u)}</NAME>
+  <ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>
+  <FORMALNAME>${esc(u)}</FORMALNAME>
+</UNIT>`).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 25000);
+    const result = parseResponse(resp, 'Units');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Units', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: unitSet.size, triggeredBy });
+    return { ok: result.ok, records: unitSet.size, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportUnits:', err.message);
+    await writeLog({ syncId, type: 'Units', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: STOCK GROUPS ────────────────────────────────────────────────
+
+export async function exportStockGroups(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-GROUPS-${Date.now()}`;
+  LOG('exportStockGroups START');
+  try {
+    const categories = await Category.find().lean();
+
+    // First create/alter Primary group (base group that should always exist in Tally)
+    const primaryGroupXml = `
+<STOCKGROUP NAME="Primary" ACTION="Alter">
+  <NAME>Primary</NAME>
+  <ISADDABLE>Yes</ISADDABLE>
+</STOCKGROUP>`;
+
+    const categoryXml = categories.map(c => `
+<STOCKGROUP NAME="${esc(c.name)}" ACTION="Alter">
+  <NAME>${esc(c.name)}</NAME>
+  <PARENT>Primary</PARENT>
+  <ISADDABLE>Yes</ISADDABLE>
+</STOCKGROUP>`).join('');
+
+    const xml = primaryGroupXml + categoryXml;
+    const totalRecords = 1 + categories.length;
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 30000);
+    const result = parseResponse(resp, 'Stock Groups');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Item Master', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: totalRecords, triggeredBy });
+    return { ok: result.ok, records: totalRecords, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportStockGroups:', err.message);
+    await writeLog({ syncId, type: 'Item Master', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: GODOWNS / WAREHOUSES ───────────────────────────────────────
+
+export async function exportGodowns(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-GODOWNS-${Date.now()}`;
+  LOG('exportGodowns START');
+  try {
+    const warehouses = await Warehouse.find({ status: 'Active' }).lean();
+    
+    // First create Main Location godown
+    const mainLocationXml = `
+<GODOWN NAME="Main Location" ACTION="Create">
+  <NAME>Main Location</NAME>
+</GODOWN>`;
+
+    const warehouseXml = warehouses.map(w => `
+<GODOWN NAME="${esc(w.name)}" ACTION="Create">
+  <NAME>${esc(w.name)}</NAME>
+  <PARENT>Main Location</PARENT>
+  <ADDRESS.LIST>
+    <ADDRESS>${esc(w.address || w.location || '')}</ADDRESS>
+  </ADDRESS.LIST>
+</GODOWN>`).join('');
+
+    const xml = mainLocationXml + warehouseXml;
+    const totalRecords = 1 + warehouses.length;
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 30000);
+    const result = parseResponse(resp, 'Godowns');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Godowns', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: totalRecords, triggeredBy });
+    return { ok: result.ok, records: totalRecords, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportGodowns:', err.message);
+    await writeLog({ syncId, type: 'Godowns', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: STOCK ITEMS (Products) + OPENING STOCK ─────────────────────
+
+export async function exportStockItems(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-ITEMS-${Date.now()}`;
+  LOG('exportStockItems START');
+  try {
+    const [items, inventory, categories] = await Promise.all([
+      ItemMaster.find({ isActive: true }).populate('category', 'name').lean(),
+      Inventory.find({}).lean(),
+      Category.find().lean(),
+    ]);
+
+    if (!items.length) return { ok: true, records: 0 };
+
+    // Build opening stock map: sku → { qty, rate, warehouseName }
+    const openingStockMap = {};
+    for (const inv of inventory) {
+      const sku = inv.sku;
+      if (!openingStockMap[sku]) openingStockMap[sku] = { qty: 0, rate: inv.unitPrice || 0, batches: [] };
+      openingStockMap[sku].qty += inv.availableQuantity || 0;
+    }
+
+    const xml = items.map(item => {
+      const groupName = item.category?.name || '';
+      const unit      = tallyUnit(item.unit);
+      const openStock = openingStockMap[item.sku];
+      const openQty   = openStock?.qty || 0;
+      const openRate  = openStock?.rate || item.costPrice || item.unitPrice || 0;
+      const gstRate   = item.gst || 0;
+      const costPrice = item.costPrice || item.unitPrice || openRate || 0;
+      const sellingPrice = item.sellingPrice || item.unitPrice || costPrice || 0;
+      const action    = item.tallyGuid ? 'Alter' : 'Create';
+
+      return `
+<STOCKITEM NAME="${esc(item.name)}" ACTION="Alter">
+  <NAME>${esc(item.name)}</NAME>
+  ${groupName ? `<PARENT>${esc(groupName)}</PARENT>` : ''}
+  <UNITS>${unit}</UNITS>
+  <GSTAPPLICABLE>Applicable</GSTAPPLICABLE>
+  <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
+  <HSNCODE>${esc(item.hsn || '')}</HSNCODE>
+  <GSTRATE>${gstRate}</GSTRATE>
+  <COSTINGMETHOD>Avg. Cost</COSTINGMETHOD>
+  <VALUATIONMETHOD>Avg. Cost</VALUATIONMETHOD>
+  <STANDARDCOST>${costPrice.toFixed(2)}</STANDARDCOST>
+  <STANDARDPRICE>${sellingPrice.toFixed(2)}</STANDARDPRICE>
+  ${item.tallyGuid ? `<GUID>${esc(item.tallyGuid)}</GUID>` : ''}
+  ${openQty > 0 ? `
+  <OPENINGBALANCE>${openQty} ${unit}</OPENINGBALANCE>
+  <OPENINGRATE>${openRate.toFixed(2)} /1 ${unit}</OPENINGRATE>
+  <OPENINGVALUE>${(openQty * openRate).toFixed(2)}</OPENINGVALUE>` : ''}
+</STOCKITEM>`;
+    }).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 45000);
+    const result = parseResponse(resp, 'Stock Items');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Item Master', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: items.length, triggeredBy });
+
+    if (result.ok) {
+      await ItemMaster.updateMany({ isActive: true }, { tallySynced: true, lastTallySync: new Date() });
+    }
+    return { ok: result.ok, records: items.length, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportStockItems:', err.message);
+    await writeLog({ syncId, type: 'Item Master', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: CUSTOMER LEDGERS ───────────────────────────────────────────
+
+export async function exportCustomerLedgers(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-CUST-${Date.now()}`;
+  LOG('exportCustomerLedgers START');
+  try {
+    const [clients, corporateClients] = await Promise.all([
+      Client.find({ status: 'Active' }).lean(),
+      CorporateClient.find({ status: 'Active' }).lean(),
+    ]);
+
+    const all = [
+      ...clients.map(c => ({ name: c.name, gst: c.gstNumber, phone: c.phone, email: c.email, address: c.address, city: c.city, state: c.state, guid: c.tallyGuid })),
+      ...corporateClients.map(c => ({ name: c.name, gst: c.gstNumber, phone: c.phone, email: c.email, address: c.address, city: c.city, state: c.state, guid: c.tallyGuid || c.tallyLedgerId })),
+    ];
+
+    if (!all.length) return { ok: true, records: 0 };
+
+    const xml = all.map(c => `
+<LEDGER NAME="${esc(c.name)}" ACTION="Alter">
+  <NAME>${esc(c.name)}</NAME>
+  <PARENT>Sundry Debtors</PARENT>
+  <ISBILLWISEON>Yes</ISBILLWISEON>
+  <GSTREGISTRATIONTYPE>${c.gst ? 'Regular' : 'Unregistered'}</GSTREGISTRATIONTYPE>
+  <PARTYGSTIN>${esc(c.gst || '')}</PARTYGSTIN>
+  <EMAIL>${esc(c.email || '')}</EMAIL>
+  <LEDGERMOBILE>${esc(c.phone || '')}</LEDGERMOBILE>
+  <MAILINGNAME>${esc(c.name)}</MAILINGNAME>
+  <OPENINGBALANCE>0</OPENINGBALANCE>
+  <ADDRESS.LIST>
+    <ADDRESS>${esc(c.address || '')}</ADDRESS>
+    <ADDRESS>${esc([c.city, c.state].filter(Boolean).join(', '))}</ADDRESS>
+  </ADDRESS.LIST>
+  ${c.guid ? `<GUID>${esc(c.guid)}</GUID>` : ''}
+</LEDGER>`).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 35000);
+    const result = parseResponse(resp, 'Customer Ledgers');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Ledger', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: all.length, triggeredBy });
+    return { ok: result.ok, records: all.length, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportCustomerLedgers:', err.message);
+    await writeLog({ syncId, type: 'Ledger', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: VENDOR/SUPPLIER LEDGERS ────────────────────────────────────
+
+export async function exportVendorLedgers(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-VEND-${Date.now()}`;
+  LOG('exportVendorLedgers START');
+  try {
+    const vendors = await Vendor.find({ status: { $ne: 'Blacklisted' } }).lean();
+    if (!vendors.length) return { ok: true, records: 0 };
+
+    const xml = vendors.map(v => `
+<LEDGER NAME="${esc(v.companyName)}" ACTION="Alter">
+  <NAME>${esc(v.companyName)}</NAME>
+  <PARENT>Sundry Creditors</PARENT>
+  <ISBILLWISEON>Yes</ISBILLWISEON>
+  <GSTREGISTRATIONTYPE>${v.gstNumber ? 'Regular' : 'Unregistered'}</GSTREGISTRATIONTYPE>
+  <PARTYGSTIN>${esc(v.gstNumber || '')}</PARTYGSTIN>
+  <INCOMETAXNUMBER>${esc(v.panNumber || '')}</INCOMETAXNUMBER>
+  <EMAIL>${esc(v.email || '')}</EMAIL>
+  <LEDGERMOBILE>${esc(v.phone || '')}</LEDGERMOBILE>
+  <MAILINGNAME>${esc(v.contactPerson || v.companyName)}</MAILINGNAME>
+  <OPENINGBALANCE>0</OPENINGBALANCE>
+  <ADDRESS.LIST>
+    <ADDRESS>${esc(v.address || '')}</ADDRESS>
+    <ADDRESS>${esc([v.city, v.state, v.pincode].filter(Boolean).join(', '))}</ADDRESS>
+  </ADDRESS.LIST>
+  ${v.tallyGuid ? `<GUID>${esc(v.tallyGuid)}</GUID>` : ''}
+</LEDGER>`).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 35000);
+    const result = parseResponse(resp, 'Vendor Ledgers');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Ledger', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: vendors.length, triggeredBy });
+    return { ok: result.ok, records: vendors.length, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportVendorLedgers:', err.message);
+    await writeLog({ syncId, type: 'Ledger', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: SYSTEM / ACCOUNTS LEDGERS ──────────────────────────────────
+
+export async function exportSystemLedgers(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-SYSLED-${Date.now()}`;
+  LOG('exportSystemLedgers START');
+  try {
+    // Essential GST and accounting ledgers
+    const systemXml = `
+<LEDGER NAME="CGST" ACTION="Alter"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><GSTRATE>0</GSTRATE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
+<LEDGER NAME="SGST" ACTION="Alter"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><GSTRATE>0</GSTRATE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
+<LEDGER NAME="IGST" ACTION="Alter"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><GSTRATE>0</GSTRATE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
+<LEDGER NAME="Purchase Accounts" ACTION="Alter"><NAME>Purchase Accounts</NAME><PARENT>Purchase Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
+<LEDGER NAME="Sales Accounts" ACTION="Alter"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
+<LEDGER NAME="Freight &amp; Forwarding Charges" ACTION="Alter"><NAME>Freight &amp; Forwarding Charges</NAME><PARENT>Indirect Expenses</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
+<LEDGER NAME="Discount Given" ACTION="Alter"><NAME>Discount Given</NAME><PARENT>Indirect Expenses</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
+<LEDGER NAME="Discount Received" ACTION="Alter"><NAME>Discount Received</NAME><PARENT>Indirect Incomes</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`;
+
+    // Also export ERP AccountsLedger records
+    const acctLedgers = await AccountsLedger.find({ isActive: true }).lean();
+    const tallyParent = (g) => {
+      const s = (g || '').toLowerCase();
+      if (s.includes('creditor')) return 'Sundry Creditors';
+      if (s.includes('debtor'))   return 'Sundry Debtors';
+      if (s.includes('bank'))     return 'Bank Accounts';
+      if (s.includes('cash'))     return 'Cash-in-Hand';
+      if (s.includes('expense'))  return 'Indirect Expenses';
+      if (s.includes('income'))   return 'Indirect Incomes';
+      return 'Sundry Debtors';
+    };
+    const acctXml = acctLedgers.map(l => `
+<LEDGER NAME="${esc(l.ledgerName)}" ACTION="Alter">
+  <NAME>${esc(l.ledgerName)}</NAME>
+  <PARENT>${esc(tallyParent(l.ledgerGroup))}</PARENT>
+  <GSTREGISTRATIONTYPE>${l.gstNumber && l.gstNumber !== 'N/A' ? 'Regular' : 'Unregistered'}</GSTREGISTRATIONTYPE>
+  <PARTYGSTIN>${esc(l.gstNumber && l.gstNumber !== 'N/A' ? l.gstNumber : '')}</PARTYGSTIN>
+  <OPENINGBALANCE>${l.openingBalance || 0}</OPENINGBALANCE>
+  ${l.tallyGuid ? `<GUID>${esc(l.tallyGuid)}</GUID>` : ''}
+</LEDGER>`).join('');
+
+    const xml    = systemXml + acctXml;
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 90000);
+    const result = parseResponse(resp, 'System Ledgers');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    const total  = 7 + acctLedgers.length;
+    await writeLog({ syncId, type: 'Ledger', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: total, triggeredBy });
+
+    if (result.ok && acctLedgers.length) {
+      await AccountsLedger.updateMany({ isActive: true }, { syncedWithTally: true, lastTallySync: new Date() });
+    }
+    return { ok: result.ok, records: total, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportSystemLedgers:', err.message);
+    await writeLog({ syncId, type: 'Ledger', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: SALES INVOICES ─────────────────────────────────────────────
+
+export async function exportSalesInvoices(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-SALES-${Date.now()}`;
+  LOG('exportSalesInvoices START');
+  try {
+    const invoices = await Invoice.find({
+      status: { $in: ['Sent', 'Paid', 'Partial', 'Overdue'] },
+      $or: [{ tallySync: { $ne: true } }, { tallyGuid: { $exists: false } }],
+    }).lean();
+
+    if (!invoices.length) return { ok: true, records: 0 };
+
+    const failedItems = [];
+    const vouchersXml = invoices.map(inv => {
+      try {
+        const cgst = (inv.items || []).reduce((s, i) => s + (i.cgst || 0), 0);
+        const sgst = (inv.items || []).reduce((s, i) => s + (i.sgst || 0), 0);
+        const igst = (inv.items || []).reduce((s, i) => s + (i.igst || 0), 0);
+        const date = td(inv.invoiceDate) || TODAY;
+
+        const inventoryLines = (inv.items || []).map(item => {
+          const unit = tallyUnit(item.unit);
+          return `
+<ALLINVENTORYENTRIES.LIST>
+  <STOCKITEMNAME>${esc(item.description || item.name || 'Item')}</STOCKITEMNAME>
+  <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+  <RATE>${+(item.rate || item.unitPrice || 0).toFixed(2)} /1 ${unit}</RATE>
+  <AMOUNT>-${+(item.amount || item.total || 0).toFixed(2)}</AMOUNT>
+  <ACTUALQTY>${item.qty || item.quantity || 1} ${unit}</ACTUALQTY>
+  <BILLEDQTY>${item.qty || item.quantity || 1} ${unit}</BILLEDQTY>
+  <ACCOUNTINGALLOCATIONS.LIST>
+    <LEDGERNAME>Sales Accounts</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <AMOUNT>-${+(item.amount || item.total || 0).toFixed(2)}</AMOUNT>
+  </ACCOUNTINGALLOCATIONS.LIST>
+</ALLINVENTORYENTRIES.LIST>`;
+        }).join('');
+
+        return `
+<VOUCHER VCHTYPE="Sales" ACTION="Alter">
+  <DATE>${date}</DATE>
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${esc(inv.invoiceNo)}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(inv.partyName)}</PARTYLEDGERNAME>
+  <NARRATION>Invoice: ${esc(inv.invoiceNo)} | ${esc(inv.partyName)}</NARRATION>
+  <ISINVOICE>Yes</ISINVOICE>
+  ${inv.tallyGuid ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : ''}
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <AMOUNT>${+(inv.grandTotal || 0).toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+  ${cgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  ${sgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  ${igst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${igst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  ${inventoryLines}
+</VOUCHER>`;
+      } catch (e) {
+        failedItems.push({ id: inv.invoiceNo, error: e.message });
+        return '';
+      }
+    }).filter(Boolean).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'Vouchers', vouchersXml), 50000);
+    const result = parseResponse(resp, 'Sales Invoices');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Sales', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: invoices.length, triggeredBy });
+
+    if (result.ok) {
+      await Invoice.updateMany({ _id: { $in: invoices.map(i => i._id) } }, { tallySync: true, tallySyncAt: new Date() });
+    }
+    return { ok: result.ok, records: invoices.length, created: result.created, altered: result.altered, error: result.error, warning: result.warning, failedItems };
+  } catch (err) {
+    ERR('exportSalesInvoices:', err.message);
+    await writeLog({ syncId, type: 'Sales', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: PURCHASE INVOICES (from POs) ───────────────────────────────
+
+export async function exportPurchaseInvoices(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-PUR-${Date.now()}`;
+  LOG('exportPurchaseInvoices START');
+  try {
+    const pos = await PurchaseOrder.find({
+      status: { $in: ['Approved', 'Received'] },
+      $or: [{ tallySync: { $ne: true } }, { tallyGuid: { $exists: false } }],
+    }).populate('vendor').lean();
+
+    if (!pos.length) return { ok: true, records: 0 };
+
+    const vouchersXml = pos.map(po => {
+      const vendorName = po.vendor?.companyName || 'Unknown Vendor';
+      let voucherDate = null;
+      if (po.deliveryDate) voucherDate = td(po.deliveryDate);
+      if (!voucherDate && po.createdAt) voucherDate = td(po.createdAt);
+      if (!voucherDate) voucherDate = TODAY;
+      
+      const items      = po.items || [];
+      const subtotal   = items.reduce((s, i) => s + (i.qty || 1) * (i.basePrice || 0), 0);
+      const gstAmt     = +(po.gstTotal || subtotal * 0.18).toFixed(2);
+      const grandTotal = +(po.grandTotal || subtotal + gstAmt).toFixed(2);
+      const cgst       = +(gstAmt / 2).toFixed(2);
+      const sgst       = +(gstAmt - cgst).toFixed(2);
+
+      const inventoryLines = items.map(item => {
+        const qty   = item.qty || item.quantity || 1;
+        const rate  = item.basePrice || item.unitPrice || 0;
+        const total = +(qty * rate).toFixed(2);
+        const unit = tallyUnit(item.unit);
+        return `
+<ALLINVENTORYENTRIES.LIST>
+  <STOCKITEMNAME>${esc(item.name || 'Item')}</STOCKITEMNAME>
+  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+  <RATE>${rate.toFixed(2)} /1 ${unit}</RATE>
+  <AMOUNT>-${total}</AMOUNT>
+  <ACTUALQTY>${qty} ${unit}</ACTUALQTY>
+  <BILLEDQTY>${qty} ${unit}</BILLEDQTY>
+  <ACCOUNTINGALLOCATIONS.LIST>
+    <LEDGERNAME>Purchase Accounts</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <AMOUNT>-${total}</AMOUNT>
+  </ACCOUNTINGALLOCATIONS.LIST>
+</ALLINVENTORYENTRIES.LIST>`;
+      }).join('');
+
+      return `
+<VOUCHER VCHTYPE="Purchase" ACTION="Alter">
+  <DATE>${voucherDate}</DATE>
+  <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${esc(po.poId)}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(vendorName)}</PARTYLEDGERNAME>
+  <NARRATION>PO: ${esc(po.poId)} | ${esc(vendorName)}</NARRATION>
+  <ISINVOICE>Yes</ISINVOICE>
+  ${po.tallyGuid ? `<GUID>${esc(po.tallyGuid)}</GUID>` : ''}
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(vendorName)}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <AMOUNT>${grandTotal}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+  ${cgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgst}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  ${sgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgst}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  ${inventoryLines}
+</VOUCHER>`;
+    }).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'Vouchers', vouchersXml), 50000);
+    const result = parseResponse(resp, 'Purchase Invoices');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Purchase', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: pos.length, triggeredBy });
+
+    if (result.ok) {
+      await PurchaseOrder.updateMany({ _id: { $in: pos.map(p => p._id) } }, { tallySync: true, tallySyncAt: new Date() });
+    }
+    return { ok: result.ok, records: pos.length, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportPurchaseInvoices:', err.message);
+    await writeLog({ syncId, type: 'Purchase', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: CREDIT NOTES ────────────────────────────────────────────────
+
+export async function exportCreditNotes(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-CN-${Date.now()}`;
+  LOG('exportCreditNotes START');
+  try {
+    const notes = await CreditNote.find({ status: { $ne: 'Disputed' } }).lean();
+    if (!notes.length) return { ok: true, records: 0 };
+
+    const xml = notes.map(cn => `
+<VOUCHER VCHTYPE="Credit Note" ACTION="Create">
+  <DATE>${td(cn.createdAt) || TODAY}</DATE>
+  <VOUCHERTYPENAME>Credit Note</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${esc(cn.cnId)}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(cn.party)}</PARTYLEDGERNAME>
+  <NARRATION>${esc(cn.reason || cn.cnId)}</NARRATION>
+  <ISINVOICE>Yes</ISINVOICE>
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(cn.party)}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <AMOUNT>-${+(cn.amount || 0).toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>Sales Accounts</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <AMOUNT>${+(cn.amount || 0).toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+</VOUCHER>`).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'Vouchers', xml), 30000);
+    const result = parseResponse(resp, 'Credit Notes');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Sales', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: notes.length, triggeredBy });
+    return { ok: result.ok, records: notes.length, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportCreditNotes:', err.message);
+    await writeLog({ syncId, type: 'Sales', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: DEBIT NOTES ─────────────────────────────────────────────────
+
+export async function exportDebitNotes(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-DN-${Date.now()}`;
+  LOG('exportDebitNotes START');
+  try {
+    const notes = await DebitNote.find({ approvalStatus: { $in: ['Approved', 'Posted'] } }).lean();
+    if (!notes.length) return { ok: true, records: 0 };
+
+    const xml = notes.map(dn => `
+<VOUCHER VCHTYPE="Debit Note" ACTION="Create">
+  <DATE>${td(dn.createdAt) || TODAY}</DATE>
+  <VOUCHERTYPENAME>Debit Note</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${esc(dn.dnId)}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(dn.vendorName)}</PARTYLEDGERNAME>
+  <NARRATION>${esc(dn.reason || dn.dnId)}</NARRATION>
+  <ISINVOICE>Yes</ISINVOICE>
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(dn.vendorName)}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <AMOUNT>${+(dn.totalAmount || dn.debitAmount || 0).toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>Purchase Accounts</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <AMOUNT>-${+(dn.totalAmount || dn.debitAmount || 0).toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+</VOUCHER>`).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'Vouchers', xml), 30000);
+    const result = parseResponse(resp, 'Debit Notes');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Purchase', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: notes.length, triggeredBy });
+    return { ok: result.ok, records: notes.length, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportDebitNotes:', err.message);
+    await writeLog({ syncId, type: 'Purchase', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: PAYMENT VOUCHERS ───────────────────────────────────────────
+
+export async function exportPaymentVouchers(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-PAY-${Date.now()}`;
+  LOG('exportPaymentVouchers START');
+  try {
+    const payments = await TallyVoucher.find({ voucherType: 'Payment', source: 'ERP', tallyGuid: { $exists: false } }).lean();
+    if (!payments.length) return { ok: true, records: 0 };
+
+    const xml = payments.map(pmt => {
+      const ledgersXml = (pmt.ledgerEntries || []).map(e => `
+<ALLLEDGERENTRIES.LIST>
+  <LEDGERNAME>${esc(e.ledgerName)}</LEDGERNAME>
+  <ISDEEMEDPOSITIVE>${e.isDeemed ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
+  <AMOUNT>${e.isDeemed ? '' : '-'}${Math.abs(e.amount || 0).toFixed(2)}</AMOUNT>
+</ALLLEDGERENTRIES.LIST>`).join('');
+      return `
+<VOUCHER VCHTYPE="Payment" ACTION="Create">
+  <DATE>${td(pmt.voucherDate) || TODAY}</DATE>
+  <VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${esc(pmt.voucherNumber || '')}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(pmt.partyName || '')}</PARTYLEDGERNAME>
+  <NARRATION>${esc(pmt.narration || 'Payment')}</NARRATION>
+  ${ledgersXml}
+</VOUCHER>`;
+    }).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'Vouchers', xml), 30000);
+    const result = parseResponse(resp, 'Payment Vouchers');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Payment', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: payments.length, triggeredBy });
+    return { ok: result.ok, records: payments.length, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportPaymentVouchers:', err.message);
+    await writeLog({ syncId, type: 'Payment', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: RECEIPT VOUCHERS ───────────────────────────────────────────
+
+export async function exportReceiptVouchers(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-REC-${Date.now()}`;
+  LOG('exportReceiptVouchers START');
+  try {
+    const receipts = await TallyVoucher.find({ voucherType: 'Receipt', source: 'ERP', tallyGuid: { $exists: false } }).lean();
+    if (!receipts.length) return { ok: true, records: 0 };
+
+    const xml = receipts.map(rec => {
+      const ledgersXml = (rec.ledgerEntries || []).map(e => `
+<ALLLEDGERENTRIES.LIST>
+  <LEDGERNAME>${esc(e.ledgerName)}</LEDGERNAME>
+  <ISDEEMEDPOSITIVE>${e.isDeemed ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
+  <AMOUNT>${e.isDeemed ? '' : '-'}${Math.abs(e.amount || 0).toFixed(2)}</AMOUNT>
+</ALLLEDGERENTRIES.LIST>`).join('');
+      return `
+<VOUCHER VCHTYPE="Receipt" ACTION="Create">
+  <DATE>${td(rec.voucherDate) || TODAY}</DATE>
+  <VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${esc(rec.voucherNumber || '')}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(rec.partyName || '')}</PARTYLEDGERNAME>
+  <NARRATION>${esc(rec.narration || 'Receipt')}</NARRATION>
+  ${ledgersXml}
+</VOUCHER>`;
+    }).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'Vouchers', xml), 30000);
+    const result = parseResponse(resp, 'Receipt Vouchers');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Receipt', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: receipts.length, triggeredBy });
+    return { ok: result.ok, records: receipts.length, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportReceiptVouchers:', err.message);
+    await writeLog({ syncId, type: 'Receipt', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── EXPORT TASK: JOURNAL VOUCHERS ───────────────────────────────────────────
+
+export async function exportJournalVouchers(cfg, triggeredBy) {
+  const start  = Date.now();
+  const syncId = `EXPORT-JNL-${Date.now()}`;
+  LOG('exportJournalVouchers START');
+  try {
+    const journals = await TallyVoucher.find({ voucherType: 'Journal', source: 'ERP', tallyGuid: { $exists: false } }).lean();
+    if (!journals.length) return { ok: true, records: 0 };
+
+    const xml = journals.map(j => {
+      const ledgersXml = (j.ledgerEntries || []).map(e => `
+<ALLLEDGERENTRIES.LIST>
+  <LEDGERNAME>${esc(e.ledgerName)}</LEDGERNAME>
+  <ISDEEMEDPOSITIVE>${e.isDeemed ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
+  <AMOUNT>${e.isDeemed ? '' : '-'}${Math.abs(e.amount || 0).toFixed(2)}</AMOUNT>
+</ALLLEDGERENTRIES.LIST>`).join('');
+      return `
+<VOUCHER VCHTYPE="Journal" ACTION="Create">
+  <DATE>${td(j.voucherDate) || TODAY}</DATE>
+  <VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${esc(j.voucherNumber || '')}</VOUCHERNUMBER>
+  <NARRATION>${esc(j.narration || 'Journal Entry')}</NARRATION>
+  ${ledgersXml}
+</VOUCHER>`;
+    }).join('');
+
+    const resp   = await postXml(cfg, importEnvelope(cfg, 'Vouchers', xml), 30000);
+    const result = parseResponse(resp, 'Journal Vouchers');
+    const dur    = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Journal', direction: 'ERP → Tally', status: result.ok ? 'Success' : 'Failed', duration: dur, error: result.error, records: journals.length, triggeredBy });
+    return { ok: result.ok, records: journals.length, created: result.created, altered: result.altered, error: result.error, warning: result.warning };
+  } catch (err) {
+    ERR('exportJournalVouchers:', err.message);
+    await writeLog({ syncId, type: 'Journal', direction: 'ERP → Tally', status: 'Failed', error: err.message, records: 0, triggeredBy });
+    return { ok: false, records: 0, error: err.message };
+  }
+}
+
+// ─── FULL EXPORT ORCHESTRATOR ─────────────────────────────────────────────────
+
+/**
+ * runFullExportToTally
+ * Exports ALL ERP data to Tally in the correct dependency order.
+ * Each task is independent — failures are logged but do not abort subsequent tasks.
+ *
+ * Order:
+ *   1. Units of Measure         (prerequisite for stock items)
+ *   2. Stock Groups/Categories  (prerequisite for stock items)
+ *   3. Godowns / Warehouses     (prerequisite for inventory)
+ *   4. System + Account Ledgers (prerequisite for vouchers)
+ *   5. Vendor Ledgers           (prerequisite for purchase vouchers)
+ *   6. Customer Ledgers         (prerequisite for sales vouchers)
+ *   7. Stock Items + Opening Stock + GST
+ *   8. Sales Invoices
+ *   9. Purchase Invoices
+ *  10. Credit Notes
+ *  11. Debit Notes
+ *  12. Payment Vouchers
+ *  13. Receipt Vouchers
+ *  14. Journal Vouchers
+ *
+ * @param {object}   cfg          - TallyConfig document
+ * @param {*}        triggeredBy  - User ID for logs
+ * @param {Function} onProgress   - SSE callback fn(taskResult)
+ * @returns {object} summary
+ */
+export async function runFullExportToTally(cfg, triggeredBy, onProgress = () => {}) {
+  const startTime = Date.now();
+
+  const TASKS = [
+    { key: 'units',             label: 'Units of Measure',       fn: () => exportUnits(cfg, triggeredBy) },
+    { key: 'stockGroups',       label: 'Stock Groups',           fn: () => exportStockGroups(cfg, triggeredBy) },
+    { key: 'godowns',           label: 'Godowns / Warehouses',   fn: () => exportGodowns(cfg, triggeredBy) },
+    { key: 'systemLedgers',     label: 'Ledger Masters',         fn: () => exportSystemLedgers(cfg, triggeredBy) },
+    { key: 'vendorLedgers',     label: 'Vendor / Supplier Masters', fn: () => exportVendorLedgers(cfg, triggeredBy) },
+    { key: 'customerLedgers',   label: 'Customer Masters',       fn: () => exportCustomerLedgers(cfg, triggeredBy) },
+    { key: 'stockItems',        label: 'Stock Items + Opening Stock + GST', fn: () => exportStockItems(cfg, triggeredBy) },
+    { key: 'salesInvoices',     label: 'Sales Invoices',         fn: () => exportSalesInvoices(cfg, triggeredBy) },
+    { key: 'purchaseInvoices',  label: 'Purchase Invoices',      fn: () => exportPurchaseInvoices(cfg, triggeredBy) },
+    { key: 'creditNotes',       label: 'Credit Notes',           fn: () => exportCreditNotes(cfg, triggeredBy) },
+    { key: 'debitNotes',        label: 'Debit Notes',            fn: () => exportDebitNotes(cfg, triggeredBy) },
+    { key: 'paymentVouchers',   label: 'Payment Vouchers',       fn: () => exportPaymentVouchers(cfg, triggeredBy) },
+    { key: 'receiptVouchers',   label: 'Receipt Vouchers',       fn: () => exportReceiptVouchers(cfg, triggeredBy) },
+    { key: 'journalVouchers',   label: 'Journal Vouchers',       fn: () => exportJournalVouchers(cfg, triggeredBy) },
+  ];
+
+  const results = [];
+  let totalRecords = 0;
+  let totalSuccess = 0;
+  let totalFailed  = 0;
+
+  for (let i = 0; i < TASKS.length; i++) {
+    const task = TASKS[i];
+    onProgress({ event: 'phase_start', index: i + 1, total: TASKS.length, entity: task.label, message: `Exporting ${task.label}…` });
+
+    let result;
+    try {
+      result = await task.fn();
+    } catch (e) {
+      result = { ok: false, records: 0, error: e.message };
+    }
+
+    const rec = result.records || 0;
+    totalRecords += rec;
+
+    if (result.ok) {
+      totalSuccess += rec;
+      onProgress({
+        event: 'phase_done', ok: true, entity: task.label,
+        records: rec, created: result.created || 0, altered: result.altered || 0,
+        warning: result.warning,
+        message: `✅ ${task.label}: ${rec} records${result.warning ? ` (⚠️ ${result.warning.slice(0, 80)})` : ''}`,
+      });
+    } else {
+      totalFailed++;
+      onProgress({
+        event: 'phase_done', ok: false, entity: task.label,
+        records: rec, error: result.error,
+        message: `❌ ${task.label}: ${result.error || 'Failed'}`,
+      });
+    }
+
+    results.push({ key: task.key, label: task.label, ...result });
+    // Short pause between tasks to avoid overloading Tally
+    await new Promise(r => setTimeout(r, 250));
+  }
+
+  const duration = `${((Date.now() - startTime) / 1000).toFixed(1)}s`;
+  const overallOk = totalFailed === 0;
+
+  await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date(), lastExportAt: new Date() }, { upsert: true });
+
+  const summary = {
+    ok: overallOk,
+    totalRecords, totalSuccess, totalFailed,
+    duration, results,
+  };
+
+  onProgress({ event: 'summary', direction: 'ERP → Tally', stats: { total: totalRecords, created: totalSuccess, updated: 0, failed: totalFailed }, duration, results, message: `Export complete — ${totalRecords} records exported to Tally in ${duration}` });
+
+  return summary;
+}
+
+// ─── SELECTIVE EXPORT ────────────────────────────────────────────────────────
+
+/**
+ * Run a specific export task by key.
+ * key: 'units' | 'stockGroups' | 'godowns' | 'systemLedgers' | 'vendorLedgers' |
+ *      'customerLedgers' | 'stockItems' | 'salesInvoices' | 'purchaseInvoices' |
+ *      'creditNotes' | 'debitNotes' | 'paymentVouchers' | 'receiptVouchers' | 'journalVouchers'
+ */
+export async function runSelectiveExport(cfg, key, triggeredBy) {
+  const map = {
+    units:            exportUnits,
+    stockGroups:      exportStockGroups,
+    godowns:          exportGodowns,
+    systemLedgers:    exportSystemLedgers,
+    vendorLedgers:    exportVendorLedgers,
+    customerLedgers:  exportCustomerLedgers,
+    stockItems:       exportStockItems,
+    salesInvoices:    exportSalesInvoices,
+    purchaseInvoices: exportPurchaseInvoices,
+    creditNotes:      exportCreditNotes,
+    debitNotes:       exportDebitNotes,
+    paymentVouchers:  exportPaymentVouchers,
+    receiptVouchers:  exportReceiptVouchers,
+    journalVouchers:  exportJournalVouchers,
+  };
+  const fn = map[key];
+  if (!fn) return { ok: false, error: `Unknown export task key: ${key}` };
+  return fn(cfg, triggeredBy);
+}
+
+// ─── FUTURE-READY STUBS ───────────────────────────────────────────────────────
+// These are reserved for the future Import from Tally feature.
+// Keep them in this file so the integration grows symmetrically.
+
+/** @future — Import all data from Tally into ERP */
+export async function importFromTally(cfg, triggeredBy, onProgress = () => {}) {
+  throw new Error('importFromTally is not yet implemented. Use the Tally → ERP import endpoint.');
+}

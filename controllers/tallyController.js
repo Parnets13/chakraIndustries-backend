@@ -22,6 +22,12 @@ import {
   pullPaymentReceiptFromTally,
 } from '../services/tallyService.js';
 import { pullEntityFromTally, runRobustFullPull } from '../services/tallyFetchEngine.js';
+import {
+  validateTallyConnection,
+  getExportConfig,
+  runFullExportToTally,
+  runSelectiveExport,
+} from '../services/tallyExportService.js';
 
 // ── SSE helper ────────────────────────────────────────────────────────────────
 function sseSetup(res) {
@@ -669,4 +675,188 @@ export const exportToTally = async (req, res) => {
     const ok     = failed.length === 0;
     res.json({ success: ok, data: { results, total, failed: failed.length }, message: ok ? `Exported ${total} records to Tally` : `Export partial — ${failed.length} tasks failed` });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+// ─── VALIDATE TALLY COMPANY ───────────────────────────────────────────────────
+/**
+ * POST /api/tally/validate-company
+ * Connects to the local Tally instance, reads the open company name,
+ * and checks if it matches the configured company ("Sri Chakra Industries").
+ */
+export const validateCompany = async (req, res) => {
+  try {
+    const cfg = await TallyConfig.findOne();
+    if (!cfg || !cfg.tallyLocalUrl) {
+      return res.json({
+        success: true,
+        data: {
+          reachable: false,
+          openCompany: null,
+          companyMatch: false,
+          error: 'Tally Local URL is not configured. Go to Settings tab and set the Tally machine URL (e.g. http://localhost or http://192.168.1.10).',
+        },
+      });
+    }
+    const result = await validateTallyConnection(cfg);
+    res.json({ success: true, data: result });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+};
+
+// ─── FULL EXPORT STREAM (new complete version) ───────────────────────────────
+/**
+ * GET /api/tally/full-export-stream?token=<jwt>
+ * Streams all 14 export tasks as SSE events.
+ * Direction: ERP → Tally.
+ */
+export const fullExportToTallyStream = async (req, res) => {
+  const send = sseSetup(res);
+  const syncId = `FULL-EXPORT-${Date.now()}`;
+  const start  = Date.now();
+
+  const user = await authenticateSseRequest(req);
+  if (!user) {
+    send({ event: 'error', message: 'Unauthorized — invalid or missing token' });
+    return res.end();
+  }
+
+  send({ event: 'start', message: 'Full Export to Tally started (ERP → Tally)', syncId, direction: 'ERP → Tally' });
+
+  try {
+    const cfg = await TallyConfig.findOne();
+    if (!cfg || !cfg.tallyLocalUrl) {
+      send({ event: 'error', message: 'Tally Local URL is not configured. Go to Settings tab first.' });
+      return res.end();
+    }
+
+    // Validate connection + company before starting
+    send({ event: 'log', level: 'info', entity: 'Connection', message: 'Validating Tally connection and company…' });
+    const validation = await validateTallyConnection(cfg);
+    if (!validation.reachable) {
+      send({ event: 'error', message: `Cannot connect to Tally: ${validation.error}` });
+      return res.end();
+    }
+
+    const expectedCo = (cfg.companyName || '').trim();
+    if (expectedCo && validation.openCompany && !validation.companyMatch) {
+      send({
+        event: 'error',
+        message: `Wrong company open in Tally! Expected "${expectedCo}" but "${validation.openCompany}" is currently open. Please open the correct company in Tally Prime and try again.`,
+        openCompany: validation.openCompany,
+        expectedCompany: expectedCo,
+      });
+      return res.end();
+    }
+
+    send({ event: 'log', level: 'success', entity: 'Connection', message: `✅ Connected to Tally — Company: ${validation.openCompany || 'detected'}` });
+
+    // Run full export with progress callbacks
+    await runFullExportToTally(cfg, user._id, (evt) => {
+      send(evt);
+    });
+
+    const duration = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    send({ event: 'done', direction: 'ERP → Tally', duration, message: `Full export completed in ${duration}` });
+
+  } catch (err) {
+    const duration = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+    await TallySyncLog.create({
+      syncId, type: 'Full', entity: '', direction: 'ERP → Tally',
+      status: 'Failed', duration, error: err.message, records: 0, triggeredBy: user._id,
+    }).catch(() => {});
+    send({ event: 'error', message: `Export failed: ${err.message}`, error: err.message });
+  }
+
+  res.end();
+};
+
+// ─── SELECTIVE EXPORT STREAM ─────────────────────────────────────────────────
+/**
+ * GET /api/tally/selective-export-stream?key=<taskKey>&token=<jwt>
+ * Runs a single named export task.
+ */
+export const selectiveExportStream = async (req, res) => {
+  const send = sseSetup(res);
+
+  const user = await authenticateSseRequest(req);
+  if (!user) {
+    send({ event: 'error', message: 'Unauthorized — invalid or missing token' });
+    return res.end();
+  }
+
+  const key = req.query.key || '';
+  if (!key) {
+    send({ event: 'error', message: 'Missing ?key= parameter' });
+    return res.end();
+  }
+
+  try {
+    const cfg = await TallyConfig.findOne();
+    if (!cfg || !cfg.tallyLocalUrl) {
+      send({ event: 'error', message: 'Tally Local URL not configured' });
+      return res.end();
+    }
+
+    send({ event: 'start', message: `Exporting ${key}…`, direction: 'ERP → Tally' });
+    const result = await runSelectiveExport(cfg, key, user._id);
+    send({ event: 'done', ok: result.ok, records: result.records, error: result.error, warning: result.warning, message: result.ok ? `✅ ${key}: ${result.records} records exported` : `❌ ${key}: ${result.error}` });
+  } catch (err) {
+    send({ event: 'error', message: err.message });
+  }
+
+  res.end();
+};
+
+// ─── EXPORT COUNTS (pre-flight data counts) ──────────────────────────────────
+/**
+ * GET /api/tally/export-counts
+ * Returns how many records of each type will be exported.
+ */
+export const getExportCounts = async (req, res) => {
+  try {
+    const [
+      itemCount, warehouseCount, categoryCount, vendorCount, clientCount, corporateCount,
+      ledgerCount, invoiceCount, poCount, creditNoteCount, debitNoteCount,
+      paymentCount, receiptCount, journalCount,
+    ] = await Promise.all([
+      ItemMaster.countDocuments({ isActive: true }),
+      (await import('../models/Warehouse.js')).default.countDocuments({ status: 'Active' }),
+      (await import('../models/Category.js')).default.countDocuments(),
+      Vendor.countDocuments({ status: { $ne: 'Blacklisted' } }),
+      Client.countDocuments({ status: 'Active' }),
+      (await import('../models/CorporateClient.js')).default.countDocuments({ status: 'Active' }),
+      AccountsLedger.countDocuments({ isActive: true }),
+      Invoice.countDocuments({ status: { $in: ['Sent', 'Paid', 'Partial', 'Overdue'] } }),
+      PurchaseOrder.countDocuments({ status: { $in: ['Approved', 'Received'] } }),
+      (await import('../models/CreditNote.js')).default.countDocuments({ status: { $ne: 'Disputed' } }),
+      (await import('../models/DebitNote.js')).default.countDocuments({ approvalStatus: { $in: ['Approved', 'Posted'] } }),
+      TallyVoucher.countDocuments({ voucherType: 'Payment', source: 'ERP', tallyGuid: { $exists: false } }),
+      TallyVoucher.countDocuments({ voucherType: 'Receipt', source: 'ERP', tallyGuid: { $exists: false } }),
+      TallyVoucher.countDocuments({ voucherType: 'Journal', source: 'ERP', tallyGuid: { $exists: false } }),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        units:           { label: 'Units of Measure',       count: 8 },
+        stockGroups:     { label: 'Stock Groups',           count: categoryCount },
+        godowns:         { label: 'Godowns / Warehouses',   count: warehouseCount },
+        systemLedgers:   { label: 'Ledger Masters',         count: 7 + ledgerCount },
+        vendorLedgers:   { label: 'Vendor Masters',         count: vendorCount },
+        customerLedgers: { label: 'Customer Masters',       count: clientCount + corporateCount },
+        stockItems:      { label: 'Stock Items + Opening Stock', count: itemCount },
+        salesInvoices:   { label: 'Sales Invoices',         count: invoiceCount },
+        purchaseInvoices:{ label: 'Purchase Invoices',      count: poCount },
+        creditNotes:     { label: 'Credit Notes',           count: creditNoteCount },
+        debitNotes:      { label: 'Debit Notes',            count: debitNoteCount },
+        paymentVouchers: { label: 'Payment Vouchers',       count: paymentCount },
+        receiptVouchers: { label: 'Receipt Vouchers',       count: receiptCount },
+        journalVouchers: { label: 'Journal Vouchers',       count: journalCount },
+        total: itemCount + warehouseCount + categoryCount + vendorCount + clientCount + corporateCount + ledgerCount + invoiceCount + poCount + creditNoteCount + debitNoteCount + paymentCount + receiptCount + journalCount,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
 };

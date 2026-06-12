@@ -3,7 +3,7 @@ import { protect } from '../middleware/authMiddleware.js';
 import {
   getAll, getStats, getById,
   create, bulkUpload, update, updateStatus,
-  remove, removeAll, sendEmail, migrateTypes, getByInvoiceNo
+  remove, removeAll, sendEmail, migrateTypes, getByInvoiceNo, createFromSalesOrder
 } from '../controllers/invoiceController.js';
 
 const router = express.Router();
@@ -14,6 +14,7 @@ router.get('/',                    getAll);
 router.get('/stats',               getStats);
 router.get('/no/:invoiceNo',       getByInvoiceNo);
 router.post('/',                   create);
+router.post('/from-order/:orderId', createFromSalesOrder);
 router.post('/bulk-upload',        bulkUpload);
 router.post('/delete-all',         removeAll);
 router.post('/migrate-types',      migrateTypes);

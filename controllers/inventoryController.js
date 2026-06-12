@@ -163,6 +163,7 @@ export const createInventoryItem = async (req, res) => {
     const status = q === 0 ? 'Dead' : q < m ? 'Critical' : 'Active';
 
     const item = await InventoryItem.create({ 
+      itemMasterId: req.body.itemMasterId || undefined,
       sku, 
       name: finalName, 
       qty: q, 
@@ -572,7 +573,17 @@ export const getStockByWarehouse = async (req, res) => {
     const { warehouseId } = req.params;
     const stock = await InventoryItem.find({ warehouse: warehouseId })
       .populate('category', 'name');
-    res.json({ success: true, data: stock });
+    const stockWithBreakdown = stock.map(item => ({
+      ...item.toObject(),
+      itemName: item.name,
+      available: item.status === 'Active' ? item.qty : 0,
+      reserved: 0,
+      damaged: 0,
+      expired: 0,
+      transit: 0,
+      total: item.qty,
+    }));
+    res.json({ success: true, data: stockWithBreakdown });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error fetching warehouse stock', error: error.message });
   }
@@ -635,8 +646,12 @@ export const getAllStock = async (req, res) => {
       .sort({ sku: 1 });
     const stockWithBreakdown = stock.map(item => ({
       ...item.toObject(),
+      itemName: item.name,
       available: item.status === 'Active' ? item.qty : 0,
-      reserved: 0, damaged: 0, expired: 0, transit: 0,
+      reserved: 0,
+      damaged: 0,
+      expired: 0,
+      transit: 0,
       total: item.qty,
     }));
     res.json({ success: true, data: stockWithBreakdown });
