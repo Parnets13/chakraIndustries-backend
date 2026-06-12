@@ -11,9 +11,10 @@ const genOrderId = async () => {
 
 export const getAllOrders = async (req, res) => {
   try {
-    const { status, search } = req.query;
+    const { status, search, source } = req.query;
     const filter = {};
     if (status && status !== 'All') filter.status = status;
+    if (source) filter.source = source;
     if (search) filter.$or = [
       { orderId: { $regex: search, $options: 'i' } },
       { customer: { $regex: search, $options: 'i' } },
@@ -51,15 +52,14 @@ export const createOrder = async (req, res) => {
     if (!customer) return res.status(400).json({ success: false, message: 'Customer is required' });
     const orderId = await genOrderId();
     
-    // items can be a number (from legacy) or an array (from dealer/new UI)
-    const isArray = Array.isArray(items);
-    const orderItems = isArray ? items : [];
-    const itemCount = isArray ? items.length : (parseInt(items) || 0);
+    // items must always be an array in the new schema
+    const orderItems = Array.isArray(items) ? items : [];
+    const itemCount  = orderItems.length;
 
     const order = await SalesOrder.create({
       orderId, customer,
       items: orderItems,
-      itemCount: itemCount,
+      itemCount,
       value: parseFloat(String(value).replace(/[^0-9.]/g, '')) || 0,
       priority: priority || 'Normal',
       status: status || 'Pending',
@@ -82,9 +82,8 @@ export const updateOrder = async (req, res) => {
     if (customer !== undefined) update.customer = customer;
     
     if (items !== undefined) {
-      const isArray = Array.isArray(items);
-      update.items = isArray ? items : [];
-      update.itemCount = isArray ? items.length : (parseInt(items) || 0);
+      update.items     = Array.isArray(items) ? items : [];
+      update.itemCount = update.items.length;
     }
 
     if (value !== undefined) update.value = parseFloat(String(value).replace(/[^0-9.]/g, '')) || 0;

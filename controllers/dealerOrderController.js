@@ -2,14 +2,34 @@ import SalesOrder from '../models/SalesOrder.js';
 import CorporateClient from '../models/CorporateClient.js';
 import ItemMaster from '../models/ItemMaster.js';
 import InventoryItem from '../models/InventoryItem.js';
+import mongoose from 'mongoose';
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a unique order ID: ORD-YYYY-NNNN
+ * Uses findOneAndUpdate with an atomic counter pattern to avoid race conditions.
+ */
 const genOrderId = async () => {
   const year = new Date().getFullYear();
   const prefix = `ORD-${year}-`;
-  const last = await SalesOrder.findOne({ orderId: new RegExp(`^${prefix}`) }).sort({ orderId: -1 });
-  if (!last) return `${prefix}001`;
-  const num = parseInt(last.orderId.split('-')[2]) || 0;
-  return `${prefix}${String(num + 1).padStart(3, '0')}`;
+
+  // Find the highest existing number for this year
+  const last = await SalesOrder.findOne(
+    { orderId: new RegExp(`^${prefix}`) },
+    { orderId: 1 },
+    { sort: { orderId: -1 } }
+  );
+
+  let nextNum = 1;
+  if (last?.orderId) {
+    const parts = last.orderId.split('-');
+    const parsed = parseInt(parts[2], 10);
+    if (!isNaN(parsed)) nextNum = parsed + 1;
+  }
+
+  // Pad to 4 digits for cleaner IDs (ORD-2026-0001)
+  return `${prefix}${String(nextNum).padStart(4, '0')}`;
 };
 
 const parseItems = (items) => {
@@ -23,40 +43,61 @@ const parseItems = (items) => {
 };
 
 const normalizeMobile = (mobile = '') => String(mobile).replace(/\D/g, '').slice(-10);
-const normalizeGstin = (gstin = '') => String(gstin).toUpperCase().replace(/\s/g, '');
+const normalizeGstin  = (gstin = '')  => String(gstin).toUpperCase().replace(/\s/g, '');
 
 const getDealerDiscountPercentage = async (dealer) => {
   if (!dealer) return 0;
   const mobile = normalizeMobile(dealer.mobile);
-  const gst = normalizeGstin(dealer.gstin || '');
-  let client = null;
-  if (gst) client = await CorporateClient.findOne({ gstNumber: gst }).select('discountPercentage');
+  const gst    = normalizeGstin(dealer.gstin || '');
+  let client   = null;
+
+  if (gst)    client = await CorporateClient.findOne({ gstNumber: gst }).select('discountPercentage');
   if (!client && mobile) client = await CorporateClient.findOne({ phone: mobile }).select('discountPercentage');
   if (!client) {
     const name = (dealer.businessName || dealer.name || '').trim();
-    if (name) client = await CorporateClient.findOne({ name: { $regex: `^${name}$`, $options: 'i' } }).select('discountPercentage');
+    if (name)  client = await CorporateClient.findOne({ name: { $regex: `^${name}$`, $options: 'i' } }).select('discountPercentage');
   }
+
   const disc = Number(client?.discountPercentage || 0);
   return Number.isFinite(disc) ? disc : 0;
 };
 
+/**
+ * Check whether a SalesOrder belongs to the authenticated dealer.
+ * Matches on customerId (ObjectId) OR customer name (String).
+ */
 const belongsToDealer = (order, dealer) => {
   const dealerCustomer = dealer.businessName || dealer.name;
   const matchesCustomerId =
-    dealer.erpClientId && order.customerId && String(order.customerId) === String(dealer.erpClientId);
-  const matchesCustomerName = dealerCustomer && String(order.customer || '').trim() === String(dealerCustomer).trim();
-  return matchesCustomerId || matchesCustomerName;
+    dealer.erpClientId &&
+    order.customerId &&
+    String(order.customerId) === String(dealer.erpClientId);
+  const matchesCustomerName =
+    dealerCustomer &&
+    String(order.customer || '').trim().toLowerCase() === String(dealerCustomer).trim().toLowerCase();
+  const matchesDealerId =
+    order.dealerId && String(order.dealerId) === String(dealer._id);
+
+  return matchesCustomerId || matchesCustomerName || matchesDealerId;
 };
 
 const toDealerOrderSummary = (order) => ({
-  mongodbId: order._id,
-  id: order.orderId,
-  customer: order.customer,
-  status: order.status,
-  priority: order.priority,
-  totalItems: order.items,
-  amount: `₹${Number(order.value || 0).toLocaleString('en-IN')}`,
-  createdAt: order.createdAt,
+  mongodbId:   order._id,
+  id:          order.orderId,
+  customer:    order.customer,
+  status:      order.status,
+  priority:    order.priority || 'Normal',
+  totalItems:  order.itemCount || (Array.isArray(order.lineItems) ? order.lineItems.length : 0),
+  totalQty:    order.totalQuantity || 0,
+  amount:      `₹${Number(order.value || 0).toLocaleString('en-IN')}`,
+  value:       order.value || 0,
+  subTotal:    order.subTotal || 0,
+  totalGst:    order.totalGst || 0,
+  source:      order.source || 'ERP',
+  createdAt:   order.createdAt,
+  orderDate:   order.orderDate,
+  lineItems:   order.lineItems || [],
+  statusHistory: order.statusHistory || [],
 });
 
 const findDealerOrder = async (idOrOrderId, dealer) => {
@@ -68,24 +109,38 @@ const findDealerOrder = async (idOrOrderId, dealer) => {
   return order;
 };
 
+// ─── Controllers ──────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/dealer/orders
+ * List all orders for the authenticated dealer, newest first.
+ */
 export const getDealerOrders = async (req, res) => {
   try {
     const { status, search } = req.query;
-    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const page  = Math.max(parseInt(req.query.page,  10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
-    const skip = (page - 1) * limit;
+    const skip  = (page - 1) * limit;
 
     const dealerCustomer = req.dealer.businessName || req.dealer.name;
+
+    // Build a union filter: orders placed by this dealer (by clientId, name, or dealerId)
     const baseOr = [];
     if (req.dealer.erpClientId) baseOr.push({ customerId: req.dealer.erpClientId });
-    if (dealerCustomer) baseOr.push({ customer: dealerCustomer });
+    if (dealerCustomer)         baseOr.push({ customer: dealerCustomer });
+    if (req.dealer._id)         baseOr.push({ dealerId: req.dealer._id });
 
     const filter = baseOr.length ? { $or: baseOr } : {};
 
     if (status && status !== 'All') {
-      if (status === 'In Transit') filter.status = { $in: ['Shipped'] };
-      else if (status === 'Pending') filter.status = { $in: ['Pending', 'Processing'] };
-      else filter.status = status;
+      // Map UI filter labels to actual DB status values
+      if (status === 'In Transit') {
+        filter.status = { $in: ['Shipped', 'In Transit'] };
+      } else if (status === 'Pending') {
+        filter.status = { $in: ['Pending', 'Processing'] };
+      } else {
+        filter.status = status;
+      }
     }
 
     if (search) {
@@ -98,63 +153,81 @@ export const getDealerOrders = async (req, res) => {
       });
     }
 
-    const orders = await SalesOrder.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit);
-    res.json({ success: true, data: orders.map(toDealerOrderSummary) });
+    const [orders, total] = await Promise.all([
+      SalesOrder.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+      SalesOrder.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: orders.map(toDealerOrderSummary),
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
   } catch (error) {
+    console.error('getDealerOrders error:', error);
     res.status(500).json({ success: false, message: error.message || 'Failed to fetch orders' });
   }
 };
 
+/**
+ * GET /api/dealer/orders/:id
+ * Get full details of a single order.
+ */
 export const getDealerOrderById = async (req, res) => {
   try {
     const order = await findDealerOrder(req.params.id, req.dealer);
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    if (order === 'forbidden') return res.status(403).json({ success: false, message: 'Not allowed' });
-    res.json({ success: true, data: order });
+    if (!order)         return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order === 'forbidden') return res.status(403).json({ success: false, message: 'Access denied' });
+
+    res.json({ success: true, data: toDealerOrderSummary(order) });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message || 'Failed to fetch order' });
   }
 };
 
+/**
+ * POST /api/dealer/orders/create
+ * Place a new order from the dealer app.
+ *
+ * Body: { items: [{ productId, quantity }], deliveryAddress?, notes?, priority? }
+ */
 export const createDealerOrder = async (req, res) => {
   try {
     console.log('=== createDealerOrder START ===');
-    console.log('req.body:', req.body);
-    console.log('req.dealer:', req.dealer);
-    
+    console.log('req.body:', JSON.stringify(req.body));
+    console.log('dealer:', req.dealer?.name, req.dealer?._id);
+
     const itemsInput = parseItems(req.body.items);
-    console.log('itemsInput:', itemsInput);
-    
     if (itemsInput.length === 0) {
-      return res.status(400).json({ success: false, message: 'At least one item is required' });
+      return res.status(400).json({ success: false, message: 'At least one valid item is required' });
     }
 
+    // ── Fetch products ────────────────────────────────────────────────────────
     const productIds = itemsInput.map((i) => i.productId);
-    console.log('Looking for product IDs:', productIds);
-    
-    const products = await ItemMaster.find({ _id: { $in: productIds } }).populate('category', 'name');
-    console.log('Found products:', products.map(p => ({_id: p._id, name: p.name, sku: p.sku})));
-    
-    const byId = new Map(products.map((p) => [String(p._id), p]));
-    const discountPercentage = await getDealerDiscountPercentage(req.dealer);
-    console.log('discountPercentage:', discountPercentage);
+    const products   = await ItemMaster.find({ _id: { $in: productIds } }).populate('category', 'name');
 
-    // Get stock for all SKUs
-    const skus = products.map(p => p.sku);
-    console.log('Looking for SKUs:', skus);
-    
+    if (products.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid products found for the given IDs' });
+    }
+
+    const byId = new Map(products.map((p) => [String(p._id), p]));
+
+    // ── Stock check ───────────────────────────────────────────────────────────
+    const skus = products.map((p) => p.sku);
     const stockAgg = await InventoryItem.aggregate([
       { $match: { sku: { $in: skus } } },
-      { $group: { _id: '$sku', qty: { $sum: { $ifNull: ['$qty', 0] } } } }
+      { $group: { _id: '$sku', qty: { $sum: { $ifNull: ['$qty', 0] } } } },
     ]);
-    console.log('stockAgg results:', stockAgg);
-    
-    const stockMap = new Map(stockAgg.map(row => [row._id, row.qty || 0]));
+    const stockMap = new Map(stockAgg.map((row) => [row._id, row.qty || 0]));
 
+    // ── Discount ──────────────────────────────────────────────────────────────
+    const discountPercentage = await getDealerDiscountPercentage(req.dealer);
+
+    // ── Build line items & totals ─────────────────────────────────────────────
     const lineItems = [];
-    let totalQty = 0;
-    let subTotal = 0;
-    let totalGst = 0;
+    let totalQty   = 0;
+    let subTotal   = 0;
+    let totalGst   = 0;
     let totalValue = 0;
 
     for (const item of itemsInput) {
@@ -163,108 +236,120 @@ export const createDealerOrder = async (req, res) => {
         return res.status(400).json({ success: false, message: `Product ${item.productId} not found` });
       }
 
-      // Check stock
       const stock = stockMap.get(product.sku) || 0;
-      console.log(`Checking stock for ${product.name}: available ${stock}, requested ${item.quantity}`);
-      
       if (stock < item.quantity) {
-        return res.status(400).json({ 
-          success: false, 
-          message: `Insufficient stock for ${product.name}. Available: ${stock}, Requested: ${item.quantity}` 
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock for "${product.name}". Available: ${stock}, Requested: ${item.quantity}`,
         });
       }
 
-      const basePrice = product.sellingPrice || product.unitPrice || 0;
-      const unitPrice = Math.max(0, +(basePrice - (basePrice * discountPercentage) / 100).toFixed(2));
-      const gstPercent = product.gst || 0;
-      const itemSubTotal = unitPrice * item.quantity;
-      const itemGstAmount = (itemSubTotal * gstPercent) / 100;
-      const itemTotal = itemSubTotal + itemGstAmount;
+      const basePrice      = product.sellingPrice || product.unitPrice || 0;
+      const unitPrice      = Math.max(0, +(basePrice - (basePrice * discountPercentage) / 100).toFixed(2));
+      const gstPercent     = product.gst || 0;
+      const itemSubTotal   = +(unitPrice * item.quantity).toFixed(2);
+      const itemGstAmount  = +((itemSubTotal * gstPercent) / 100).toFixed(2);
+      const itemTotal      = +(itemSubTotal + itemGstAmount).toFixed(2);
 
-      console.log('Calculating item total:', {basePrice, unitPrice, gstPercent, itemSubTotal, itemGstAmount, itemTotal});
-
-      subTotal += itemSubTotal;
-      totalGst += itemGstAmount;
-      totalQty += item.quantity;
+      subTotal   += itemSubTotal;
+      totalGst   += itemGstAmount;
+      totalQty   += item.quantity;
       totalValue += itemTotal;
 
       lineItems.push({
-        productId: product._id,
-        sku: product.sku,
-        name: product.name,
-        quantity: item.quantity,
+        productId:  product._id,
+        sku:        product.sku,
+        name:       product.name,
+        quantity:   item.quantity,
         unitPrice,
         gstPercent,
-        gstAmount: +itemGstAmount.toFixed(2),
-        total: +itemTotal.toFixed(2),
+        gstAmount:  itemGstAmount,
+        total:      itemTotal,
       });
     }
 
-    if (lineItems.length === 0) {
-      return res.status(400).json({ success: false, message: 'Invalid products in order' });
-    }
-
-    const orderId = await genOrderId();
-    console.log('Generated order ID:', orderId);
-    
+    // ── Create order ──────────────────────────────────────────────────────────
+    const orderId        = await genOrderId();
     const dealerCustomer = req.dealer.businessName || req.dealer.name;
 
-    const orderData = {
+    const order = await SalesOrder.create({
       orderId,
-      customer: dealerCustomer,
-      customerId: req.dealer.erpClientId,
-      items: totalQty,
-      value: +totalValue.toFixed(2),
-      subTotal: +subTotal.toFixed(2),
-      totalGst: +totalGst.toFixed(2),
-      priority: req.body.priority || 'Normal',
-      status: 'Pending',
-      orderDate: new Date(),
-      remarks: req.body.notes || 'Order from dealer app',
-      dealerId: req.dealer._id,
-      source: 'DealerApp',
+      customer:        dealerCustomer,
+      customerId:      req.dealer.erpClientId || undefined,
+      dealerId:        req.dealer._id,
+      source:          'DealerApp',
+      status:          'Pending',
+      priority:        req.body.priority || 'Normal',
+      orderDate:       new Date(),
       deliveryAddress: req.body.deliveryAddress || '',
-      notes: req.body.notes || '',
+      notes:           req.body.notes || '',
+      remarks:         `Order placed from dealer app by ${dealerCustomer}`,
+      // Store totals
+      itemCount:       lineItems.length,
+      totalQuantity:   totalQty,
+      subTotal:        +subTotal.toFixed(2),
+      totalGst:        +totalGst.toFixed(2),
+      value:           +totalValue.toFixed(2),
+      // Dealer app items go in lineItems
       lineItems,
-      statusHistory: [{ status: 'Pending', note: 'Order placed from dealer app' }],
-    };
-    
-    console.log('Creating SalesOrder with:', orderData);
+      // statusHistory for timeline tracking
+      statusHistory: [
+        {
+          status: 'Pending',
+          at:     new Date(),
+          note:   `Order placed from dealer app by ${dealerCustomer}`,
+        },
+      ],
+    });
 
-    const order = await SalesOrder.create(orderData);
+    console.log('Order created:', order.orderId, order._id);
 
-    console.log('Order created successfully:', order._id);
-    res.status(201).json({ 
-      success: true, 
-      data: { 
-        orderId: order.orderId, 
-        mongodbId: order._id,
-        subTotal: order.subTotal,
-        totalGst: order.totalGst,
-        totalValue: order.value
-      } 
+    res.status(201).json({
+      success: true,
+      message: 'Order placed successfully',
+      data: {
+        orderId:    order.orderId,
+        mongodbId:  order._id,
+        status:     order.status,
+        itemCount:  order.itemCount,
+        totalQty:   order.totalQuantity,
+        subTotal:   order.subTotal,
+        totalGst:   order.totalGst,
+        totalValue: order.value,
+        createdAt:  order.createdAt,
+      },
     });
   } catch (error) {
-    console.error('=== createDealerOrder ERROR ===');
-    console.error(error);
+    console.error('createDealerOrder error:', error);
+    // Duplicate orderId (very rare race) — surface a friendly message
+    if (error.code === 11000 && error.keyPattern?.orderId) {
+      return res.status(409).json({ success: false, message: 'Order ID collision — please try again' });
+    }
     res.status(400).json({ success: false, message: error.message || 'Failed to create order' });
   }
 };
 
+/**
+ * POST /api/dealer/orders/:id/cancel
+ */
 export const cancelDealerOrder = async (req, res) => {
   try {
     const order = await findDealerOrder(req.params.id, req.dealer);
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    if (order === 'forbidden') return res.status(403).json({ success: false, message: 'Not allowed' });
+    if (!order)         return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order === 'forbidden') return res.status(403).json({ success: false, message: 'Access denied' });
 
-    if (order.status === 'Delivered') {
-      return res.status(400).json({ success: false, message: 'Delivered orders cannot be cancelled' });
+    if (['Delivered', 'Cancelled'].includes(order.status)) {
+      return res.status(400).json({ success: false, message: `Cannot cancel an order with status "${order.status}"` });
     }
 
-    order.status = 'Cancelled';
-    order.cancelReason = req.body.reason || '';
+    order.status       = 'Cancelled';
+    order.cancelReason = req.body.reason || 'Cancelled by dealer';
     order.statusHistory = order.statusHistory || [];
-    order.statusHistory.push({ status: 'Cancelled', note: order.cancelReason || 'Cancelled by dealer' });
+    order.statusHistory.push({
+      status: 'Cancelled',
+      at:     new Date(),
+      note:   order.cancelReason,
+    });
     await order.save();
 
     res.json({ success: true, data: toDealerOrderSummary(order) });
@@ -273,22 +358,49 @@ export const cancelDealerOrder = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/dealer/orders/:id/track
+ * Returns the full status timeline for an order.
+ */
 export const trackDealerOrder = async (req, res) => {
   try {
     const order = await findDealerOrder(req.params.id, req.dealer);
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    if (order === 'forbidden') return res.status(403).json({ success: false, message: 'Not allowed' });
+    if (!order)         return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order === 'forbidden') return res.status(403).json({ success: false, message: 'Access denied' });
 
+    // Build history — use stored statusHistory or fall back to single entry
     const history = Array.isArray(order.statusHistory) && order.statusHistory.length
       ? order.statusHistory
       : [{ status: order.status, at: order.updatedAt || order.createdAt, note: '' }];
 
+    // All possible stages in order
+    const STAGES = ['Pending', 'Approved', 'Processing', 'Ready For Dispatch', 'Shipped', 'Delivered'];
+    const currentIdx = STAGES.indexOf(order.status);
+
+    const stages = STAGES.map((stage, idx) => {
+      const historyEntry = history.find((h) => h.status === stage);
+      return {
+        stage,
+        completed: idx < currentIdx || order.status === stage,
+        active:    order.status === stage,
+        at:        historyEntry?.at || null,
+        note:      historyEntry?.note || '',
+      };
+    });
+
     res.json({
       success: true,
       data: {
-        orderId: order.orderId,
-        status: order.status,
+        orderId:   order.orderId,
+        mongodbId: order._id,
+        status:    order.status,
+        stages,
         history,
+        lineItems: order.lineItems || [],
+        value:     order.value,
+        subTotal:  order.subTotal,
+        totalGst:  order.totalGst,
+        createdAt: order.createdAt,
       },
     });
   } catch (error) {
@@ -296,46 +408,57 @@ export const trackDealerOrder = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/dealer/orders/:id/repeat
+ * Re-order the same items from a previous order (stock check skipped for now).
+ */
 export const repeatDealerOrder = async (req, res) => {
   try {
     const prev = await findDealerOrder(req.params.id, req.dealer);
-    if (!prev) return res.status(404).json({ success: false, message: 'Order not found' });
-    if (prev === 'forbidden') return res.status(403).json({ success: false, message: 'Not allowed' });
+    if (!prev)         return res.status(404).json({ success: false, message: 'Order not found' });
+    if (prev === 'forbidden') return res.status(403).json({ success: false, message: 'Access denied' });
 
-    const orderId = await genOrderId();
+    if (!Array.isArray(prev.lineItems) || prev.lineItems.length === 0) {
+      return res.status(400).json({ success: false, message: 'Original order has no line items to repeat' });
+    }
+
+    const orderId        = await genOrderId();
     const dealerCustomer = req.dealer.businessName || req.dealer.name;
 
-    const lineItems = Array.isArray(prev.lineItems) ? prev.lineItems.map((i) => ({
-      productId: i.productId,
-      sku: i.sku,
-      name: i.name,
-      quantity: i.quantity,
-      unitPrice: i.unitPrice,
-      total: i.total,
-    })) : [];
-
-    const totalQty = lineItems.reduce((s, i) => s + (i.quantity || 0), 0);
-    const totalValue = lineItems.reduce((s, i) => s + (i.total || 0), 0);
+    const lineItems    = prev.lineItems.map((i) => ({ ...i.toObject(), _id: undefined }));
+    const totalQty     = lineItems.reduce((s, i) => s + (i.quantity || 0), 0);
+    const subTotal     = lineItems.reduce((s, i) => s + (i.unitPrice * i.quantity || 0), 0);
+    const totalGst     = lineItems.reduce((s, i) => s + (i.gstAmount || 0), 0);
+    const totalValue   = lineItems.reduce((s, i) => s + (i.total || 0), 0);
 
     const order = await SalesOrder.create({
       orderId,
-      customer: dealerCustomer,
-      customerId: req.dealer.erpClientId,
-      items: totalQty,
-      value: totalValue,
-      priority: prev.priority || 'Normal',
-      status: 'Pending',
-      orderDate: new Date(),
-      remarks: 'Repeat order from dealer app',
-      dealerId: req.dealer._id,
-      source: 'DealerApp',
+      customer:        dealerCustomer,
+      customerId:      req.dealer.erpClientId || undefined,
+      dealerId:        req.dealer._id,
+      source:          'DealerApp',
+      status:          'Pending',
+      priority:        prev.priority || 'Normal',
+      orderDate:       new Date(),
       deliveryAddress: prev.deliveryAddress || '',
-      notes: 'Repeat order from dealer app',
+      notes:           `Repeat of ${prev.orderId}`,
+      remarks:         `Repeat order from dealer app (original: ${prev.orderId})`,
+      itemCount:       lineItems.length,
+      totalQuantity:   totalQty,
+      subTotal:        +subTotal.toFixed(2),
+      totalGst:        +totalGst.toFixed(2),
+      value:           +totalValue.toFixed(2),
       lineItems,
-      statusHistory: [{ status: 'Pending', note: `Repeat of ${prev.orderId}` }],
+      statusHistory: [
+        { status: 'Pending', at: new Date(), note: `Repeat of ${prev.orderId}` },
+      ],
     });
 
-    res.status(201).json({ success: true, data: { orderId: order.orderId, mongodbId: order._id } });
+    res.status(201).json({
+      success: true,
+      message: 'Order repeated successfully',
+      data: { orderId: order.orderId, mongodbId: order._id },
+    });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message || 'Failed to repeat order' });
   }

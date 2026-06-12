@@ -35,7 +35,7 @@ const itemMasterSchema = new mongoose.Schema({
     type: String,
     required: true,
     default: 'units',
-    enum: ['units', 'kg', 'liter', 'meter', 'box', 'pack', 'piece', 'dozen']
+    enum: ['units', 'kg', 'g', 'mg', 'liter', 'litre', 'ml', 'meter', 'metre', 'cm', 'box', 'pack', 'set', 'piece', 'dozen', 'Nos', 'Set', 'Pcs', 'Kg', 'Ltr', 'Mtr', 'Box', 'Gm', 'Ml']
   },
   
   // Pricing & Costing
