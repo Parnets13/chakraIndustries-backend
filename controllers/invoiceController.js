@@ -60,10 +60,11 @@ const computeTotals = (items = []) => {
 // ── GET /api/invoices ─────────────────────────────────────────────────────────
 export const getAll = async (req, res) => {
   try {
-    const { status, search, page = 1, limit = 0, invoiceType } = req.query;
+    const { status, search, page = 1, limit = 0, invoiceType, invoiceSource } = req.query;
     const filter = {};
     if (status) filter.status = status;
     if (invoiceType) filter.invoiceType = invoiceType;
+    if (invoiceSource) filter.invoiceSource = invoiceSource;
     if (search) filter.$or = [
       { invoiceNo:  { $regex: search, $options: 'i' } },
       { partyName:  { $regex: search, $options: 'i' } },

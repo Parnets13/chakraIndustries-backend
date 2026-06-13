@@ -328,9 +328,11 @@ export const generateInvoiceFromPDF = async (req, res) => {
 };
 export const listInvoices = async (req, res) => {
   try {
-    const { status, search } = req.query;
+    const { status, search, prefix } = req.query;
     const filter = {};
     if (status) filter.status = status;
+    // prefix filter — e.g. prefix=GRNINV to show only GRN receipt invoices
+    if (prefix) filter.invoiceNo = { $regex: `^${prefix}`, $options: 'i' };
     if (search) {
       filter.$or = [
         { invoiceNo:  { $regex: search, $options: 'i' } },

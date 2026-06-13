@@ -6,6 +6,7 @@ import GRN from '../models/GRN.js';
 import Warehouse from '../models/Warehouse.js';
 import StockMovement from '../models/StockMovement.js';
 import Location from '../models/Location.js';
+import Invoice from '../models/Invoice.js';
 
 // ── ID generator ──────────────────────────────────────────────────────────────
 const genId = async (Model, field, prefix) => {
@@ -14,6 +15,17 @@ const genId = async (Model, field, prefix) => {
   const parts = last[field].split('-');
   const num = parseInt(parts[parts.length - 1]) || 0;
   return `${prefix}-${String(num + 1).padStart(3, '0')}`;
+};
+
+// ── Manual Stock Entry Invoice number: MSEI-YYYY-NNNN ────────────────────────
+const genManualStockInvoiceNo = async () => {
+  const year = new Date().getFullYear();
+  const prefix = `MSEI-${year}-`;
+  const last = await Invoice.findOne({ invoiceNo: new RegExp(`^${prefix}`) }).sort({ createdAt: -1 });
+  if (!last) return `${prefix}0001`;
+  const parts = last.invoiceNo.split('-');
+  const num = parseInt(parts[parts.length - 1]) || 0;
+  return `${prefix}${String(num + 1).padStart(4, '0')}`;
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -173,6 +185,58 @@ export const createInventoryItem = async (req, res) => {
       category: category || null, 
       status 
     });
+
+    // ── Auto-generate Manual Stock Entry Invoice when qty > 0 ─────────────────
+    if (q > 0) {
+      try {
+        const unitPrice = Number(req.body.unitPrice || req.body.costPrice || 0);
+        const gstRate   = Number(req.body.gst || 18);
+        const taxableValue = +(q * unitPrice).toFixed(2);
+        const gstAmt    = +(taxableValue * gstRate / 100).toFixed(2);
+        const cgstVal   = +(gstAmt / 2).toFixed(2);
+        const sgstVal   = +(gstAmt / 2).toFixed(2);
+        const grandTotal = +(taxableValue + gstAmt).toFixed(2);
+        const invoiceNo  = await genManualStockInvoiceNo();
+
+        await Invoice.create({
+          invoiceNo,
+          invoiceDate: new Date(),
+          partyName:   'Manual Stock Entry',
+          companyName: 'Sri Chakra Industries',
+          items: [{
+            description: finalName,
+            hsn:         req.body.hsn || '',
+            qty:         q,
+            unit:        unit || 'Nos',
+            rate:        unitPrice,
+            discount:    0,
+            taxRate:     gstRate,
+            basic:       taxableValue,
+            amount:      taxableValue,
+            taxAmount:   gstAmt,
+            total:       grandTotal,
+            cgst:        cgstVal,
+            sgst:        sgstVal,
+            igst:        0,
+          }],
+          subtotal:      taxableValue,
+          totalDiscount: 0,
+          totalTax:      gstAmt,
+          grandTotal,
+          status:        'Draft',
+          source:        'manual',
+          invoiceSource: 'manual_stock_entry',
+          inventoryItemId: item._id,
+          notes: `Auto-generated for manual stock entry of ${finalName} (SKU: ${sku}) — ${q} ${unit || 'Nos'} added to warehouse ${warehouse || 'WH-01'}`,
+        });
+
+        console.log(`[INVENTORY] ✅ Manual Stock Entry Invoice ${invoiceNo} created for SKU ${sku}`);
+      } catch (invoiceErr) {
+        // Don't fail stock creation if invoice generation fails
+        console.error(`[INVENTORY] ⚠ Manual Stock Invoice creation failed (non-fatal): ${invoiceErr.message}`);
+      }
+    }
+
     res.status(201).json({ success: true, data: item });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
