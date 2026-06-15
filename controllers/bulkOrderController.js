@@ -228,25 +228,41 @@ export const convertToPO = async (req, res) => {
     const num = last ? (parseInt(last.poId.split('-').pop()) || 0) : 0;
     const poId = `${prefix}${String(num + 1).padStart(3, '0')}`;
 
-    // Map quotation items to PO items
-    const items = (quote.items || []).map(it => ({
+    // Map quotation line items to PO items
+    const items = (Array.isArray(quote.lineItems) ? quote.lineItems : []).map(it => ({
       name:      it.item || it.description || 'Item',
-      qty:       it.qty  || 1,
+      qty:       it.qty || 1,
       unit:      it.unit || 'Nos',
       basePrice: it.unitPrice || 0,
       gst:       18,
-      total:     it.total || (it.qty * it.unitPrice) || 0,
+      total:     it.total || ((it.qty || 0) * (it.unitPrice || 0)),
     }));
 
     const subtotal   = items.reduce((s, i) => s + (i.basePrice * i.qty), 0);
     const gstTotal   = Math.round(subtotal * 0.18);
     const grandTotal = subtotal + gstTotal;
 
-    // PO requires a vendor — use a placeholder if none linked
-    // In a real flow the user would select a vendor; here we use the client as reference
+    // PO requires a vendor. Try the supplied vendorId first, then match by client name.
+    let vendorId = req.body.vendorId;
+    const clientName = (quote.client || '').trim();
+    if (!vendorId && clientName) {
+      const Vendor = (await import('../models/Vendor.js')).default;
+      const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const existingVendor = await Vendor.findOne({ companyName: { $regex: `^${escapeRegExp(clientName)}$`, $options: 'i' } });
+      if (existingVendor) vendorId = existingVendor._id;
+      else {
+        const newVendor = await Vendor.create({ companyName: clientName, status: 'Active' });
+        vendorId = newVendor._id;
+      }
+    }
+
+    if (!vendorId) {
+      return res.status(400).json({ success: false, message: 'Vendor is required to convert quotation to PO' });
+    }
+
     const po = await PurchaseOrder.create({
       poId,
-      vendor:       req.body.vendorId || quote.clientId,  // caller can pass vendorId
+      vendor:       vendorId,
       items,
       subtotal,
       gstTotal,
@@ -284,8 +300,8 @@ export const convertToDispatch = async (req, res) => {
       orderRef: quote.quoteId,
       customer: quote.clientName,
       destination: '',
-      items: quote.items?.length || 0,
-      value: quote.grandTotal || 0,
+      items: Array.isArray(quote.lineItems) ? quote.lineItems.length : 0,
+      value: quote.grandTotal || quote.value || 0,
       status: 'Pending',
       instructions: `Converted from Bulk Quotation ${quote.quoteId}`,
     });

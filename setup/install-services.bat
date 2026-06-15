@@ -122,7 +122,7 @@ echo  3. Run Tally sync:
 echo     node scripts\syncWhenTallyUp.js
 echo.
 echo  Verify everything is working:
-echo     curl http://localhost:5001/api/health
+echo     curl http://localhost:5001/api/api/health
 echo     curl https://erp.majesticmall.net/api/health
 echo.
 pause

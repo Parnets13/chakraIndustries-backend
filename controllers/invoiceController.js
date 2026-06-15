@@ -1,6 +1,7 @@
 import Invoice from '../models/Invoice.js';
 import SalesOrder from '../models/SalesOrder.js';
 import Dealer from '../models/Dealer.js';
+import AccountsReceivable from '../models/AccountsReceivable.js';
 import { sendInvoiceEmail } from '../utils/emailService.js';
 
 // ── ID generator ──────────────────────────────────────────────────────────────
@@ -135,6 +136,15 @@ export const create = async (req, res) => {
     const totals = computeTotals(items);
     const invoiceType = items.length > 1 ? 'multi' : 'single';
     const inv = await Invoice.create({ invoiceNo, ...rest, ...totals, source: 'manual', invoiceType });
+    await AccountsReceivable.create({
+      dealer: inv.dealerId,
+      salesOrder: inv.salesOrderId,
+      invoice: inv._id,
+      invoiceNumber: inv.invoiceNo,
+      invoiceDate: inv.invoiceDate,
+      dueDate: inv.dueDate,
+      invoiceAmount: inv.grandTotal
+    });
     res.status(201).json({ success: true, data: inv });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
@@ -396,6 +406,16 @@ export const createFromSalesOrder = async (req, res) => {
       paymentStatus: 'Pending',
       source: 'manual',
       invoiceType: items.length > 1 ? 'multi' : 'single'
+    });
+    
+    await AccountsReceivable.create({
+      dealer: invoice.dealerId,
+      salesOrder: invoice.salesOrderId,
+      invoice: invoice._id,
+      invoiceNumber: invoice.invoiceNo,
+      invoiceDate: invoice.invoiceDate,
+      dueDate: invoice.dueDate,
+      invoiceAmount: invoice.grandTotal
     });
     
     res.status(201).json({ success: true, data: invoice });

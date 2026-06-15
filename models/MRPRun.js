@@ -6,6 +6,7 @@ import mongoose from 'mongoose';
  * checks current inventory, and generates purchase requirements.
  */
 const mrpLineSchema = new mongoose.Schema({
+  itemMasterId:    { type: mongoose.Schema.Types.ObjectId, ref: 'ItemMaster', default: null },
   itemName:        { type: String, required: true },
   itemCode:        { type: String, default: '' },
   inventoryItemId: { type: mongoose.Schema.Types.ObjectId, ref: 'InventoryItem', default: null },

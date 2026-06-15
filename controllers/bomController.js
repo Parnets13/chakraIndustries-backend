@@ -1,4 +1,5 @@
 import BOM from '../models/BOM.js';
+import ItemMaster from '../models/ItemMaster.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function generateBomId() {
@@ -29,7 +30,12 @@ export const getAllBOMs = async (req, res) => {
     if (type)     filter.type = type;
 
     const boms = await BOM.find(filter)
+      .populate('productItemMasterId', 'itemId sku name unit description')
       .populate('oemBrand', 'brandId name code color status')
+      .populate({
+        path: 'components.itemMasterId',
+        select: 'itemId sku name unit description'
+      })
       .populate({
         path: 'components.vendorId',
         select: 'vendorId companyName'
@@ -63,7 +69,12 @@ export const getAllBOMs = async (req, res) => {
 export const getBOMById = async (req, res) => {
   try {
     const bom = await BOM.findById(req.params.id)
+      .populate('productItemMasterId', 'itemId sku name unit description')
       .populate('oemBrand', 'brandId name code color status')
+      .populate({
+        path: 'components.itemMasterId',
+        select: 'itemId sku name unit description'
+      })
       .populate({
         path: 'components.vendorId',
         select: 'vendorId companyName contactPerson email phone'
@@ -108,10 +119,32 @@ export const getBOMVersions = async (req, res) => {
 // ── CREATE BOM ────────────────────────────────────────────────────────────────
 export const createBOM = async (req, res) => {
   try {
-    const { product } = req.body;
+    const { product, productItemMasterId } = req.body;
     if (!product?.trim()) return res.status(400).json({ success: false, message: 'Product name is required' });
+    let productCode = req.body.productCode || '';
+    let uom = req.body.uom || 'Set';
+    
+    if (productItemMasterId) {
+      const productItem = await ItemMaster.findById(productItemMasterId);
+      if (productItem) {
+        productCode = productItem.sku;
+        uom = productItem.unit;
+      }
+    }
+
     const bomId = await generateBomId();
-    const bom = await BOM.create({ bomId, ...req.body, status: 'Draft', approvalStatus: 'Draft' });
+    const bom = await BOM.create({ 
+      bomId, 
+      ...req.body, 
+      productCode, 
+      uom,
+      status: 'Draft', 
+      approvalStatus: 'Draft' 
+    });
+    
+    // Populate product item master
+    await bom.populate('productItemMasterId', 'itemId sku name unit description');
+    
     res.status(201).json({ success: true, message: 'BOM created', data: { ...bom.toObject(), componentCount: 0, materialCost: 0, totalCost: 0 } });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
@@ -226,12 +259,32 @@ export const addComponent = async (req, res) => {
   try {
     const bom = await BOM.findById(req.params.id);
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
-    const { itemName, qty } = req.body;
-    if (!itemName?.trim()) return res.status(400).json({ success: false, message: 'Item name is required' });
+    const { itemMasterId, qty, scrapFactor } = req.body;
+    if (!itemMasterId) return res.status(400).json({ success: false, message: 'Item Master ID is required' });
     if (!qty || qty <= 0)  return res.status(400).json({ success: false, message: 'Quantity must be > 0' });
 
-    bom.components.push(req.body);
+    // Fetch Item Master
+    const item = await ItemMaster.findById(itemMasterId);
+    if (!item) return res.status(404).json({ success: false, message: 'Item not found in Item Master' });
+
+    // Check for duplicates
+    const existingComponent = bom.components.find(c => String(c.itemMasterId) === String(itemMasterId));
+    if (existingComponent) return res.status(400).json({ success: false, message: 'Item already exists in BOM' });
+
+    bom.components.push({
+      itemMasterId: item._id,
+      itemName: item.name,
+      itemCode: item.sku,
+      description: item.description,
+      unit: item.unit,
+      qty: qty,
+      scrapFactor: scrapFactor || 0,
+      unitCost: item.costPrice || 0,
+      ...req.body
+    });
     await bom.save();
+    // Populate components before returning
+    await bom.populate('components.itemMasterId', 'itemId sku name unit description');
     res.status(201).json({ success: true, message: 'Component added', data: { ...bom.toObject(), ...calcCosts(bom) } });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };

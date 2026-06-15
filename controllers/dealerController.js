@@ -270,11 +270,14 @@ export const getDealerDashboard = async (req, res) => {
       createdAt: { $gte: startOfMonth }
     });
 
-    // Calculate stats
+    // Calculate stats using new statuses
     const totalOrders = allOrders.length;
-    const pendingOrders = allOrders.filter(o => ['Pending', 'Processing', 'Approved'].includes(o.status)).length;
+    const pendingApprovalOrders = allOrders.filter(o => o.status === 'Pending Approval').length;
     const approvedOrders = allOrders.filter(o => o.status === 'Approved').length;
-    const dispatchedOrders = allOrders.filter(o => ['Shipped', 'In Transit'].includes(o.status)).length;
+    const pickingOrders = allOrders.filter(o => ['Picking Started', 'Picking Completed'].includes(o.status)).length;
+    const sortingOrders = allOrders.filter(o => ['Sorting Started', 'Sorting Completed'].includes(o.status)).length;
+    const packingOrders = allOrders.filter(o => ['Packing Started', 'Packing Completed'].includes(o.status)).length;
+    const dispatchedOrders = allOrders.filter(o => ['Dispatched'].includes(o.status)).length;
     const deliveredOrders = allOrders.filter(o => o.status === 'Delivered').length;
     
     const monthlyPurchaseAmount = monthOrders.reduce((sum, o) => sum + (Number(o.value) || 0), 0);
@@ -288,7 +291,7 @@ export const getDealerDashboard = async (req, res) => {
       orderId: o.orderId || o._id,
       date: o.createdAt,
       amount: o.value || 0,
-      status: o.status || 'Pending'
+      status: o.status || 'Order Placed'
     }));
 
     res.json({
@@ -302,8 +305,11 @@ export const getDealerDashboard = async (req, res) => {
         stats: {
           totalOrders,
           monthOrders: monthOrders.length,
-          pendingOrders,
+          pendingApprovalOrders,
           approvedOrders,
+          pickingOrders,
+          sortingOrders,
+          packingOrders,
           dispatchedOrders,
           deliveredOrders,
           monthlyPurchaseAmount,
@@ -314,26 +320,10 @@ export const getDealerDashboard = async (req, res) => {
     });
   } catch (error) {
     console.error('Dashboard Error:', error);
-    res.json({
-      success: true,
-      data: {
-        dealer: {
-          ...publicDealer(dealer),
-          usedCredit,
-          availableCredit: Math.max(creditLimit - usedCredit, 0),
-        },
-        stats: {
-          totalOrders: 0,
-          monthOrders: 0,
-          pendingOrders: 0,
-          approvedOrders: 0,
-          dispatchedOrders: 0,
-          deliveredOrders: 0,
-          monthlyPurchaseAmount: 0,
-          pendingInvoices: 0,
-        },
-        recentOrders: [],
-      },
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch dashboard data',
+      error: error.message
     });
   }
 };

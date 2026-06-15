@@ -109,9 +109,9 @@ export const getDealerOrders = async (req, res) => {
     if (status && status !== 'All') {
       // Map UI filter labels to actual DB status values
       if (status === 'In Transit') {
-        filter.status = { $in: ['Shipped', 'In Transit'] };
+        filter.status = { $in: ['Shipped', 'In Transit', 'Dispatched'] };
       } else if (status === 'Pending') {
-        filter.status = { $in: ['Pending', 'Processing'] };
+        filter.status = { $in: ['Pending Approval', 'Pending', 'Processing'] };
       } else {
         filter.status = status;
       }
@@ -164,21 +164,54 @@ export const getDealerOrderById = async (req, res) => {
  * Place a new order from the dealer app.
  *
  * Body: { items: [{ productId, quantity }], deliveryAddress?, notes?, priority? }
+ * Headers: X-Idempotency-Key (optional, to prevent duplicate orders)
  */
 export const createDealerOrder = async (req, res) => {
   const maxRetries = 3;
   let attempts = 0;
+
+  // Get idempotency key from headers
+  const idempotencyKey = req.headers['x-idempotency-key'];
 
   while (attempts < maxRetries) {
     try {
       console.log('=== createDealerOrder START ===');
       console.log('req.body:', JSON.stringify(req.body));
       console.log('dealer:', req.dealer?.name, req.dealer?._id);
+      console.log('idempotencyKey:', idempotencyKey);
       console.log(`Attempt ${attempts + 1} of ${maxRetries}`);
 
       const itemsInput = parseItems(req.body.items);
       if (itemsInput.length === 0) {
         return res.status(400).json({ success: false, message: 'At least one valid item is required' });
+      }
+
+      // Check for existing order with this idempotency key (to prevent duplicates)
+      if (idempotencyKey) {
+        const existingOrder = await SalesOrder.findOne({
+          dealerId: req.dealer._id,
+          source: 'DealerApp',
+          'metadata.idempotencyKey': idempotencyKey
+        });
+
+        if (existingOrder) {
+          console.log('Returning existing order for idempotency key:', idempotencyKey);
+          return res.status(200).json({
+            success: true,
+            message: 'Order already placed (idempotent)',
+            data: {
+              orderId:    existingOrder.orderId,
+              mongodbId:  existingOrder._id,
+              status:     existingOrder.status,
+              itemCount:  existingOrder.itemCount,
+              totalQty:   existingOrder.totalQuantity,
+              subTotal:   existingOrder.subTotal,
+              totalGst:   existingOrder.totalGst,
+              totalValue: existingOrder.value,
+              createdAt:  existingOrder.createdAt,
+            },
+          });
+        }
       }
 
       // ── Fetch products ────────────────────────────────────────────────────────
@@ -257,7 +290,7 @@ export const createDealerOrder = async (req, res) => {
         customerId:      req.dealer.erpClientId || undefined,
         dealerId:        req.dealer._id,
         source:          'DealerApp',
-        status:          'Pending',
+        status:          'Order Placed',
         priority:        req.body.priority || 'Normal',
         orderDate:       new Date(),
         deliveryAddress: req.body.deliveryAddress || '',
@@ -274,11 +307,20 @@ export const createDealerOrder = async (req, res) => {
         // statusHistory for timeline tracking
         statusHistory: [
           {
-            status: 'Pending',
+            status: 'Order Placed',
             at:     new Date(),
             note:   `Order placed from dealer app by ${dealerCustomer}`,
           },
+          {
+            status: 'Pending Approval',
+            at:     new Date(),
+            note:   `Order awaiting approval`,
+          },
         ],
+        // Store idempotency key for duplicate prevention
+        metadata: {
+          idempotencyKey: idempotencyKey || undefined
+        }
       });
 
       console.log('Order created:', order.orderId, order._id);
@@ -305,6 +347,7 @@ export const createDealerOrder = async (req, res) => {
       if (error.code === 11000 && error.keyPattern?.orderId) {
         attempts++;
         if (attempts >= maxRetries) {
+          console.error('Max retries reached for order ID collision');
           return res.status(409).json({ success: false, message: 'Order ID collision — please try again' });
         }
         // Wait a short time before retrying
@@ -362,14 +405,28 @@ export const trackDealerOrder = async (req, res) => {
       : [{ status: order.status, at: order.updatedAt || order.createdAt, note: '' }];
 
     // All possible stages in order
-    const STAGES = ['Pending', 'Approved', 'Processing', 'Ready For Dispatch', 'Shipped', 'Delivered'];
+    const STAGES = [
+      'Order Placed',
+      'Pending Approval',
+      'Approved',
+      'Picking Started',
+      'Picking Completed',
+      'Sorting Started',
+      'Sorting Completed',
+      'Packing Started',
+      'Packing Completed',
+      'Invoice Generated',
+      'Ready for Dispatch',
+      'Dispatched',
+      'Delivered'
+    ];
     const currentIdx = STAGES.indexOf(order.status);
 
     const stages = STAGES.map((stage, idx) => {
       const historyEntry = history.find((h) => h.status === stage);
       return {
         stage,
-        completed: idx < currentIdx || order.status === stage,
+        completed: idx < currentIdx,
         active:    order.status === stage,
         at:        historyEntry?.at || null,
         note:      historyEntry?.note || '',
@@ -389,6 +446,7 @@ export const trackDealerOrder = async (req, res) => {
         subTotal:  order.subTotal,
         totalGst:  order.totalGst,
         createdAt: order.createdAt,
+        dispatchInfo: order.dispatchInfo,
       },
     });
   } catch (error) {
@@ -429,7 +487,7 @@ export const repeatDealerOrder = async (req, res) => {
         customerId:      req.dealer.erpClientId || undefined,
         dealerId:        req.dealer._id,
         source:          'DealerApp',
-        status:          'Pending',
+        status:          'Order Placed',
         priority:        prev.priority || 'Normal',
         orderDate:       new Date(),
         deliveryAddress: prev.deliveryAddress || '',
@@ -442,7 +500,8 @@ export const repeatDealerOrder = async (req, res) => {
         value:           +totalValue.toFixed(2),
         lineItems,
         statusHistory: [
-          { status: 'Pending', at: new Date(), note: `Repeat of ${prev.orderId}` },
+          { status: 'Order Placed', at: new Date(), note: `Repeat of ${prev.orderId}` },
+          { status: 'Pending Approval', at: new Date(), note: `Order awaiting approval` },
         ],
       });
 

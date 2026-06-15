@@ -58,11 +58,34 @@ export const getOrderById = async (req, res) => {
 export const createOrder = async (req, res) => {
   const maxRetries = 3;
   let attempts = 0;
+  
+  // Get idempotency key from headers
+  const idempotencyKey = req.headers['x-idempotency-key'];
 
   while (attempts < maxRetries) {
     try {
       const { customer, items, value, priority, status, orderDate, remarks, file, deliveryAddress, notes, expectedDeliveryDate } = req.body;
       if (!customer) return res.status(400).json({ success: false, message: 'Customer is required' });
+      
+      // Check for existing order with this idempotency key
+      if (idempotencyKey) {
+        const existingOrder = await SalesOrder.findOne({
+          $or: [
+            { createdBy: req.user?._id, 'metadata.idempotencyKey': idempotencyKey },
+            { customer: customer, 'metadata.idempotencyKey': idempotencyKey }
+          ]
+        });
+
+        if (existingOrder) {
+          console.log('Returning existing order for idempotency key:', idempotencyKey);
+          return res.status(200).json({
+            success: true,
+            message: 'Order already placed (idempotent)',
+            data: existingOrder
+          });
+        }
+      }
+
       const orderId = await genOrderId();
       
       // items must always be an array in the new schema
@@ -83,14 +106,19 @@ export const createOrder = async (req, res) => {
         notes: notes || '',
         expectedDeliveryDate: expectedDeliveryDate ? new Date(expectedDeliveryDate) : null,
         createdBy: req.user?._id,
+        metadata: {
+          idempotencyKey: idempotencyKey || undefined
+        }
       });
       res.status(201).json({ success: true, data: order });
       return;
     } catch (e) {
+      console.error('Create sales order error:', e);
       // Duplicate orderId (very rare race) — retry
       if (e.code === 11000 && e.keyPattern?.orderId) {
         attempts++;
         if (attempts >= maxRetries) {
+          console.error('Max retries reached for order ID collision');
           return res.status(409).json({ success: false, message: 'Order ID collision — please try again' });
         }
         // Wait a short time before retrying

@@ -11,6 +11,10 @@ const packingJobSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  salesOrderId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SalesOrder'
+  },
   items: Number,
   weight: String,
   boxType: {

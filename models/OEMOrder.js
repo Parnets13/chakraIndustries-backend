@@ -7,10 +7,15 @@ const oemOrderSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  oemBrand: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'OEMBrand',
+    required: true
+  },
   brandOrderId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'BrandOrder',
-    required: true
+    default: null
   },
   workOrderId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -25,7 +30,10 @@ const oemOrderSchema = new mongoose.Schema({
     required: true,
     min: 1
   },
-  unit: String,
+  unit: {
+    type: String,
+    default: 'Nos'
+  },
   bomId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'BOM',
@@ -142,6 +150,7 @@ const oemOrderSchema = new mongoose.Schema({
 
 oemOrderSchema.index({ oemOrderId: 1 });
 oemOrderSchema.index({ brandOrderId: 1 });
+oemOrderSchema.index({ oemBrand: 1 });
 oemOrderSchema.index({ status: 1 });
 oemOrderSchema.index({ createdAt: -1 });
 

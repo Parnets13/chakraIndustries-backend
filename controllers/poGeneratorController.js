@@ -2,6 +2,8 @@ import PurchaseOrder from '../models/PurchaseOrder.js';
 import Inventory from '../models/Inventory.js';
 import POInvoice from '../models/POInvoice.js';
 import PendingOrder from '../models/PendingOrder.js';
+import AccountsPayable from '../models/AccountsPayable.js';
+import Vendor from '../models/Vendor.js';
 
 // ── ID generator ──────────────────────────────────────────────────────────────
 const genInvoiceNo = async () => {
@@ -367,8 +369,34 @@ export const updateInvoiceStatus = async (req, res) => {
     const { status } = req.body;
     const invoice = await POInvoice.findByIdAndUpdate(
       req.params.id, { status }, { new: true }
-    );
+    ).populate('poId');
     if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+    // When status is set to Approved, automatically create an AccountsPayable entry if it doesn't exist
+    if (status === 'Approved') {
+      const existingAP = await AccountsPayable.findOne({ invoiceNumber: invoice.invoiceNo });
+      if (!existingAP) {
+        let vendorId = invoice.poId?.vendor || null;
+        // If we don't have a vendor from poId, try to find by vendorName
+        if (!vendorId && invoice.vendorName) {
+          const vendor = await Vendor.findOne({ companyName: invoice.vendorName });
+          vendorId = vendor?._id || null;
+        }
+        await AccountsPayable.create({
+          supplier: vendorId,
+          purchaseOrder: invoice.poId?._id || null,
+          poInvoice: invoice._id,
+          invoiceNumber: invoice.invoiceNo,
+          invoiceDate: invoice.createdAt,
+          dueDate: invoice.poId?.deliveryDate || null,
+          invoiceAmount: invoice.grandTotal,
+          paidAmount: 0,
+          balanceAmount: invoice.grandTotal,
+          paymentStatus: 'Unpaid'
+        });
+      }
+    }
+
     res.json({ success: true, data: invoice });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

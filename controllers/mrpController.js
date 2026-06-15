@@ -53,7 +53,7 @@ export const runMRP = async (req, res) => {
     const run = await MRPRun.create({ mrpId, description, runBy, workOrders: workOrderIds, status: 'Running' });
 
     // ── Step 1: Explode BOMs for all WOs ──────────────────────────────────────
-    const demandMap = new Map(); // itemCode/itemName → { qty, unit, unitCost, vendorId, oemBrand }
+    const demandMap = new Map(); // itemMasterId → { qty, unit, unitCost, vendorId, oemBrand }
 
     const wos = await WorkOrder.find({ _id: { $in: workOrderIds } }).populate('bomId');
     const bomIds = [];
@@ -64,12 +64,13 @@ export const runMRP = async (req, res) => {
       const bom = wo.bomId;
 
       for (const c of bom.components) {
-        const key = c.itemCode || c.itemName;
+        const key = c.itemMasterId?.toString() || (c.itemCode || c.itemName);
         const needed = c.qty * (1 + (c.scrapFactor || 0) / 100) * wo.qty;
         if (demandMap.has(key)) {
           demandMap.get(key).grossRequirement += needed;
         } else {
           demandMap.set(key, {
+            itemMasterId: c.itemMasterId || null,
             itemName:    c.itemName,
             itemCode:    c.itemCode || '',
             unit:        c.unit,
@@ -132,6 +133,7 @@ export const runMRP = async (req, res) => {
       }
 
       lines.push({
+        itemMasterId:     demand.itemMasterId || null,
         itemName:          demand.itemName,
         itemCode:          demand.itemCode,
         unit:              demand.unit,

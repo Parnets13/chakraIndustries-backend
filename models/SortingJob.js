@@ -11,6 +11,10 @@ const sortingJobSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  salesOrderId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SalesOrder'
+  },
   sku: String,
   itemName: String,
   quantity: Number,

@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 
 // ── Material consumption line ─────────────────────────────────────────────────
 const consumptionSchema = new mongoose.Schema({
+  itemMasterId:    { type: mongoose.Schema.Types.ObjectId, ref: 'ItemMaster', default: null },
   itemName:        { type: String, required: true },
   itemCode:        { type: String, default: '' },
   inventoryItemId: { type: mongoose.Schema.Types.ObjectId, ref: 'InventoryItem', default: null },
@@ -16,7 +17,7 @@ const consumptionSchema = new mongoose.Schema({
   oemBrand:        { type: mongoose.Schema.Types.ObjectId, ref: 'OEMBrand', default: null },
   // Was an alternate used?
   isAlternate:     { type: Boolean, default: false },
-  alternateFor:    { type: String, default: '' },  // original item name
+  alternateFor:    { type: String, default: '' }, // original item name
   unitCost:        { type: Number, default: 0 },
   consumedAt:      { type: Date },
   consumedBy:      { type: String, default: '' },
@@ -37,6 +38,7 @@ const wipStageSchema = new mongoose.Schema({
 // ── QC result on WO ───────────────────────────────────────────────────────────
 const woQcSchema = new mongoose.Schema({
   passedQty:   { type: Number, default: 0 },
+  reworkQty:   { type: Number, default: 0 },
   rejectedQty: { type: Number, default: 0 },
   defectType:  { type: String, default: '' },
   inspectedBy: { type: String, default: '' },
@@ -47,6 +49,7 @@ const woQcSchema = new mongoose.Schema({
 // ── Work Order ────────────────────────────────────────────────────────────────
 const workOrderSchema = new mongoose.Schema({
   woId:       { type: String, required: true, unique: true, index: true },
+  productItemMasterId: { type: mongoose.Schema.Types.ObjectId, ref: 'ItemMaster', default: null },
   product:    { type: String, required: true, trim: true },
   bomId:      { type: mongoose.Schema.Types.ObjectId, ref: 'BOM', default: null },
   oemBrand:   { type: mongoose.Schema.Types.ObjectId, ref: 'OEMBrand', default: null },

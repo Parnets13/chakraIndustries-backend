@@ -1,43 +1,50 @@
+import Counter from '../models/Counter.js';
 import SalesOrder from '../models/SalesOrder.js';
 
-/**
- * Generate a unique order ID: ORD-YYYY-NNNN
- * Uses retry logic for duplicate key errors to avoid race conditions
- */
 export const genOrderId = async () => {
-  const maxRetries = 3;
-  let attempts = 0;
+  const year = new Date().getFullYear();
+  
+  console.log(`[genOrderId] Starting atomic order ID generation for year ${year}`);
 
-  while (attempts < maxRetries) {
-    try {
-      const year = new Date().getFullYear();
-      const prefix = `ORD-${year}-`;
+  try {
+    // Step 1: First check the MAX sequence from existing SalesOrders for this year
+    const prefix = `ORD-${year}-`;
+    const lastOrder = await SalesOrder.findOne(
+      { orderId: { $regex: `^${prefix}` } },
+      { orderId: 1 }
+    ).sort({ orderId: -1 });
 
-      // Find the highest existing order ID for this year
-      const last = await SalesOrder.findOne(
-        { orderId: new RegExp(`^${prefix}`) },
-        { orderId: 1 },
-        { sort: { orderId: -1 } }
-      );
-
-      let nextNum = 1;
-      if (last?.orderId) {
-        const parts = last.orderId.split('-');
-        const parsed = parseInt(parts[2], 10);
-        if (!isNaN(parsed)) {
-          nextNum = parsed + 1;
-        }
+    let initialSequence = 0;
+    if (lastOrder?.orderId) {
+      const parts = lastOrder.orderId.split('-');
+      const parsed = parseInt(parts[2], 10);
+      if (!isNaN(parsed)) {
+        initialSequence = parsed;
       }
-
-      // Always use 4-digit padding for consistency
-      return `${prefix}${String(nextNum).padStart(4, '0')}`;
-    } catch (error) {
-      attempts++;
-      if (attempts >= maxRetries) {
-        throw error;
-      }
-      // Wait a short time before retrying
-      await new Promise(resolve => setTimeout(resolve, 100 * attempts));
     }
+    console.log(`[genOrderId] Initial sequence from last order: ${initialSequence}`);
+
+    // Step 2: ATOMIC findOneAndUpdate with upsert that ensures we never get duplicates
+    // This is a single MongoDB operation, so no race conditions!
+    const counter = await Counter.findOneAndUpdate(
+      { name: 'orderId', year: year },
+      {
+        $setOnInsert: { sequence: initialSequence },
+        $inc: { sequence: 1 }
+      },
+      {
+        new: true,
+        upsert: true,
+        setDefaultsOnInsert: true
+      }
+    );
+
+    const orderId = `ORD-${year}-${String(counter.sequence).padStart(6, '0')}`;
+    console.log(`[genOrderId] ✅ Successfully generated order ID: ${orderId} (sequence: ${counter.sequence})`);
+    return orderId;
+
+  } catch (error) {
+    console.error(`[genOrderId] ❌ Error generating order ID:`, error);
+    throw error;
   }
 };
