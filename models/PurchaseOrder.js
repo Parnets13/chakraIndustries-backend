@@ -44,6 +44,12 @@ const purchaseOrderSchema = new mongoose.Schema({
   paymentTerms: String,
   shippingAddress: String,
   remarks: String,
+  sentHistory: [{
+    sentAt: { type: Date, default: Date.now },
+    sentBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    method: { type: String, enum: ['email', 'whatsapp'], required: true },
+    recipient: { type: String, required: true }
+  }],
   // Tally sync tracking
   tallySync: { type: Boolean, default: false },
   tallySyncAt: { type: Date },

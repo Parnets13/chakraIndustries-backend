@@ -11,9 +11,13 @@ const genDNId = async () => {
 
 export const getAll = async (req, res) => {
   try {
-    const { status } = req.query;
-    const filter = status ? { approvalStatus: status } : {};
-    const list = await DebitNote.find(filter).sort({ createdAt: -1 });
+    const { status, vendorId } = req.query;
+    const filter = {};
+    if (status) filter.approvalStatus = status;
+    if (vendorId) filter.vendorId = vendorId;
+    const list = await DebitNote.find(filter)
+      .populate('vendorId')
+      .sort({ createdAt: -1 });
     res.json({ success: true, data: list });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -45,6 +49,7 @@ export const create = async (req, res) => {
       dnId,
       createdBy: req.user?.name || 'System',
     });
+    await dn.populate('vendorId');
     res.status(201).json({ success: true, data: dn });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -58,7 +63,7 @@ export const updateStatus = async (req, res) => {
       approvalStatus: status,
       ...(status === 'Approved' ? { approvedBy: req.user?.name || 'System', approvalDate: new Date() } : {}),
     };
-    const dn = await DebitNote.findByIdAndUpdate(req.params.id, update, { new: true });
+    const dn = await DebitNote.findByIdAndUpdate(req.params.id, update, { new: true }).populate('vendorId');
     if (!dn) return res.status(404).json({ success: false, message: 'Not found' });
     res.json({ success: true, data: dn });
   } catch (err) {

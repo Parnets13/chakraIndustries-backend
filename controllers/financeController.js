@@ -1,10 +1,12 @@
-
 import AccountsPayable from '../models/AccountsPayable.js';
 import AccountsReceivable from '../models/AccountsReceivable.js';
 import SupplierPayment from '../models/SupplierPayment.js';
 import DealerReceipt from '../models/DealerReceipt.js';
 import Vendor from '../models/Vendor.js';
 import Invoice from '../models/Invoice.js';
+import BankAccount from '../models/BankAccount.js';
+import CreditNote from '../models/CreditNote.js';
+import DebitNote from '../models/DebitNote.js';
 
 export const getDashboardStats = async (req, res) => {
   try {
@@ -33,7 +35,6 @@ export const getDashboardStats = async (req, res) => {
       DealerReceipt.find().sort({ createdAt: -1 }).limit(5).populate('dealer')
     ]);
 
-    // Format recent transactions for frontend
     const recentTransactions = [
       ...recentPayments.map(p => ({
         id: p._id.toString(),
@@ -116,7 +117,6 @@ export const getAccountsPayable = async (req, res) => {
       .populate('purchaseOrder')
       .populate('poInvoice');
 
-    // Format for frontend
     const formattedData = accountsPayable.map(ap => ({
       id: ap._id.toString(),
       supplierName: ap.supplier?.companyName || 'Unknown',
@@ -176,7 +176,6 @@ export const getAccountsReceivable = async (req, res) => {
       .populate('salesOrder')
       .populate('invoice');
 
-    // Format for frontend
     const formattedData = accountsReceivable.map(ar => ({
       id: ar._id.toString(),
       dealerName: ar.dealer?.businessName || ar.dealer?.name || 'Unknown',
@@ -235,7 +234,6 @@ export const getSupplierPayments = async (req, res) => {
       .populate('supplier')
       .populate('accountsPayable');
 
-    // Format for frontend
     const formattedData = payments.map(p => ({
       id: p._id.toString(),
       supplierName: p.supplier?.companyName || 'Unknown',
@@ -280,7 +278,6 @@ export const getDealerReceipts = async (req, res) => {
       .populate('dealer')
       .populate('accountsReceivable');
 
-    // Format for frontend
     const formattedData = receipts.map(r => ({
       id: r._id.toString(),
       dealerName: r.dealer?.businessName || r.dealer?.name || 'Unknown',
@@ -330,11 +327,9 @@ export const getSupplierLedger = async (req, res) => {
       SupplierPayment.find(filter).sort({ createdAt: 1 }).populate('supplier')
     ]);
 
-    // Format for frontend
     const ledger = [];
     let balance = 0;
 
-    // Add invoices (debits)
     accountsPayable.forEach(ap => {
       const date = ap.invoiceDate ? new Date(ap.invoiceDate).toISOString().split('T')[0] : new Date(ap.createdAt).toISOString().split('T')[0];
       balance += ap.invoiceAmount;
@@ -349,7 +344,6 @@ export const getSupplierLedger = async (req, res) => {
       });
     });
 
-    // Add payments (credits)
     payments.forEach(p => {
       const date = p.paymentDate ? new Date(p.paymentDate).toISOString().split('T')[0] : new Date(p.createdAt).toISOString().split('T')[0];
       balance -= p.paymentAmount;
@@ -364,9 +358,7 @@ export const getSupplierLedger = async (req, res) => {
       });
     });
 
-    // Sort by date
     ledger.sort((a, b) => new Date(a.date) - new Date(b.date));
-
     res.json({ success: true, data: ledger });
   } catch (err) {
     console.error('getSupplierLedger error:', err);
@@ -384,11 +376,9 @@ export const getDealerLedger = async (req, res) => {
       DealerReceipt.find(filter).sort({ createdAt: 1 }).populate('dealer')
     ]);
 
-    // Format for frontend
     const ledger = [];
     let balance = 0;
 
-    // Add invoices (credits)
     accountsReceivable.forEach(ar => {
       const date = ar.invoiceDate ? new Date(ar.invoiceDate).toISOString().split('T')[0] : new Date(ar.createdAt).toISOString().split('T')[0];
       balance += ar.invoiceAmount;
@@ -403,7 +393,6 @@ export const getDealerLedger = async (req, res) => {
       });
     });
 
-    // Add receipts (debits)
     receipts.forEach(r => {
       const date = r.receiptDate ? new Date(r.receiptDate).toISOString().split('T')[0] : new Date(r.createdAt).toISOString().split('T')[0];
       balance -= r.receiptAmount;
@@ -418,9 +407,7 @@ export const getDealerLedger = async (req, res) => {
       });
     });
 
-    // Sort by date
     ledger.sort((a, b) => new Date(a.date) - new Date(b.date));
-
     res.json({ success: true, data: ledger });
   } catch (err) {
     console.error('getDealerLedger error:', err);
@@ -484,11 +471,28 @@ export const getOutstandingInvoices = async (req, res) => {
 
 export const getBankCashAccounts = async (req, res) => {
   try {
-    const accounts = [];
-    res.json({ success: true, data: accounts });
+    const accounts = await BankAccount.find().sort({ createdAt: -1 });
+    const formattedData = accounts.map(a => ({
+      id: a._id.toString(),
+      accountName: a.accountName,
+      accountNumber: a.accountNumber || '—',
+      type: a.type,
+      balance: a.balance
+    }));
+    res.json({ success: true, data: formattedData });
   } catch (err) {
     console.error('getBankCashAccounts error:', err);
     res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const createBankCashAccount = async (req, res) => {
+  try {
+    const account = await BankAccount.create(req.body);
+    res.status(201).json({ success: true, data: account });
+  } catch (err) {
+    console.error('createBankCashAccount error:', err);
+    res.status(400).json({ success: false, message: err.message });
   }
 };
 
@@ -536,6 +540,44 @@ export const getFinancialReports = async (req, res) => {
     res.json({ success: true, data: report });
   } catch (err) {
     console.error('getFinancialReports error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const getVendorCreditNotes = async (req, res) => {
+  try {
+    const { vendorId } = req.query;
+    const filter = {};
+    if (vendorId) filter.vendorId = vendorId;
+    const creditNotes = await CreditNote.find(filter)
+      .sort({ createdAt: -1 })
+      .populate('vendorId');
+
+    const calcDaysOpen = (createdAt) =>
+      Math.floor((Date.now() - new Date(createdAt).getTime()) / (1000 * 60 * 60 * 24));
+
+    const formattedData = creditNotes.map(cn => ({
+      ...cn.toObject(),
+      daysOpen: calcDaysOpen(cn.createdAt),
+    }));
+    res.json({ success: true, data: formattedData });
+  } catch (err) {
+    console.error('getVendorCreditNotes error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const getVendorDebitNotes = async (req, res) => {
+  try {
+    const { vendorId } = req.query;
+    const filter = {};
+    if (vendorId) filter.vendorId = vendorId;
+    const debitNotes = await DebitNote.find(filter)
+      .sort({ createdAt: -1 })
+      .populate('vendorId');
+    res.json({ success: true, data: debitNotes });
+  } catch (err) {
+    console.error('getVendorDebitNotes error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };

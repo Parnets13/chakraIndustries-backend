@@ -31,12 +31,30 @@ async function getCfg() {
 }
 
 function tallyBaseUrl(cfg) {
-  const local = (cfg.tallyLocalUrl || '').trim();
   const port  = cfg.port || '9000';
-  if (!local) throw new Error('tallyLocalUrl not set in TallyConfig. Go to Tally → Configuration and set the Tally machine URL.');
-  if (local.startsWith('https://')) return local.replace(/\/$/, '');
-  if (local.match(/:\d+$/)) return local.replace(/\/$/, '');
-  return `${local.replace(/\/$/, '')}:${port}`;
+
+  // Priority 1: tallyLocalUrl (local machine address set in Settings
+  const local = (cfg.tallyLocalUrl || '').trim();
+  if (local) {
+    console.log('[TallyFetch] Using tallyLocalUrl:', local);
+    if (local.startsWith('https://')) return local.replace(/\/$/, '');
+    if (local.match(/:\d+$/)) return local.replace(/\/$/, '');
+    return `${local.replace(/\/$/, '')}:${port}`;
+  }
+
+  // Priority 2: serverUrl (legacy / cloud tunnel)
+  const server = (cfg.serverUrl || '').trim();
+  if (server) {
+    console.log('[TallyFetch] Using serverUrl:', server);
+    if (server.startsWith('https://')) return server.replace(/\/$/, '');
+    if (server.match(/:\d+$/)) return server.replace(/\/$/, '');
+    return `${server.replace(/\/$/, '')}:${port}`;
+  }
+
+  // Fallback to localhost
+  const fallback = `http://localhost:${port}`;
+  console.log('[TallyFetch] Using fallback localhost:', fallback);
+  return fallback;
 }
 
 function buildHeaders(cfg) {
@@ -229,18 +247,35 @@ function buildChunkFetchXml(cfg, reportName, fromDate, toDate, extraVars = '') {
 
 function parseStockItems(xml) {
   const items = [];
-  for (const m of xml.matchAll(/<STOCKITEM[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
-    const name = m[1]?.trim();
+  const matches = [...xml.matchAll(/<STOCKITEM([^>]*)>([\s\S]*?)<\/STOCKITEM>/gi)];
+  LOG(`[parseStockItems] Found ${matches.length} stock item matches in XML`);
+  
+  for (const m of matches) {
+    const attrs = m[1];
+    const block = m[2];
+    
+    // Extract name from various places
+    let name = '';
+    const nameAttrMatch = attrs.match(/NAME="([^"]*)"/i);
+    if (nameAttrMatch) name = decodeXmlEntities(nameAttrMatch[1].trim());
+    
+    if (!name) {
+      // Try LANGUAGENAME.LIST -> NAME.LIST -> NAME
+      const langNameMatch = block.match(/<LANGUAGENAME\.LIST>[\s\S]*?<NAME\.LIST[\s\S]*?<NAME>([\s\S]*?)<\/NAME>/i);
+      if (langNameMatch) name = decodeXmlEntities(langNameMatch[1].trim());
+    }
+    
     if (!name) continue;
-    const block   = m[2];
-    const guid    = extractGuid(block);
+    
+    const guid = extractGuid(block);
     const alterId = extractAlterId(block);
-    const hsn     = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1] || '').trim();
-    const gst     = parseFloat(block.match(/<GSTRATE>(.*?)<\/GSTRATE>/i)?.[1]) || 0;
-    const unit    = (block.match(/<BASEUNITS>(.*?)<\/BASEUNITS>/i)?.[1] || 'Nos').trim();
-    const cost    = parseFloat(block.match(/<STANDARDCOST>(.*?)<\/STANDARDCOST>/i)?.[1]) || 0;
+    const hsn = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1] || '').trim();
+    const gst = parseFloat(block.match(/<GSTRATE>(.*?)<\/GSTRATE>/i)?.[1]) || 0;
+    const unit = (block.match(/<BASEUNITS>(.*?)<\/BASEUNITS>/i)?.[1] || 'Nos').trim();
+    const cost = parseFloat(block.match(/<STANDARDCOST>(.*?)<\/STANDARDCOST>/i)?.[1]) || 0;
     items.push({ name, guid, alterId, hsn, gst, unit, cost });
   }
+  LOG(`[parseStockItems] Successfully parsed ${items.length} items`);
   return items;
 }
 
@@ -347,23 +382,50 @@ function parseTallyAddress(block) {
 
 function parseLedgers(xml) {
   const ledgers = [];
-  for (const m of xml.matchAll(/<LEDGER[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
-    const name = decodeXmlEntities(m[1]?.trim());
+  const matches = [...xml.matchAll(/<LEDGER([^>]*)>([\s\S]*?)<\/LEDGER>/gi)];
+  LOG(`[parseLedgers] Found ${matches.length} ledger matches in XML`);
+  
+  for (const m of matches) {
+    const attrs = m[1];
+    const block = m[2] || '';
+    
+    // Extract name from various places
+    let name = '';
+    const nameAttrMatch = attrs.match(/NAME="([^"]*)"/i);
+    if (nameAttrMatch) name = decodeXmlEntities(nameAttrMatch[1].trim());
+    
+    if (!name) {
+      // Try LANGUAGENAME.LIST -> NAME.LIST -> NAME
+      const langNameMatch = block.match(/<LANGUAGENAME\.LIST>[\s\S]*?<NAME\.LIST[\s\S]*?<NAME>([\s\S]*?)<\/NAME>/i);
+      if (langNameMatch) name = decodeXmlEntities(langNameMatch[1].trim());
+    }
+    if (!name) {
+      // Try LEDGSTNAME
+      const gstNameMatch = block.match(/<LEDGSTNAME>([\s\S]*?)<\/LEDGSTNAME>/i);
+      if (gstNameMatch) name = decodeXmlEntities(gstNameMatch[1].trim());
+    }
+    if (!name) {
+      // Try MAILINGNAME
+      const mailingNameMatch = block.match(/<MAILINGNAME>([\s\S]*?)<\/MAILINGNAME>/i);
+      if (mailingNameMatch) name = decodeXmlEntities(mailingNameMatch[1].trim());
+    }
+    
     if (!name) continue;
-    const block          = m[2] || '';
-    const parent         = decodeXmlEntities((block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim());
+    
+    const parent = decodeXmlEntities((block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim());
     if (!parent.toLowerCase().includes('sundry')) continue;
-    const guid           = extractGuid(block);
-    const alterId        = extractAlterId(block);
-    const gstNumber      = decodeXmlEntities((block.match(/<PARTYGSTIN>(.*?)<\/PARTYGSTIN>/i)?.[1] || 'N/A').trim());
+    const guid = extractGuid(block);
+    const alterId = extractAlterId(block);
+    const gstNumber = decodeXmlEntities((block.match(/<PARTYGSTIN>(.*?)<\/PARTYGSTIN>/i)?.[1] || 'N/A').trim());
     const openingBalance = parseFloat(block.match(/<OPENINGBALANCE>(.*?)<\/OPENINGBALANCE>/i)?.[1]) || 0;
-    const email          = decodeXmlEntities((block.match(/<EMAIL>(.*?)<\/EMAIL>/i)?.[1] || '').trim());
-    const phone          = decodeXmlEntities((block.match(/<LEDGERMOBILE>(.*?)<\/LEDGERMOBILE>/i)?.[1] || '').trim());
-    const contactPerson  = decodeXmlEntities((block.match(/<MAILINGNAME>(.*?)<\/MAILINGNAME>/i)?.[1] || '').trim());
-    const isCreditor     = parent.toLowerCase().includes('creditor');
-    const addrInfo       = parseTallyAddress(block);
+    const email = decodeXmlEntities((block.match(/<EMAIL>(.*?)<\/EMAIL>/i)?.[1] || '').trim());
+    const phone = decodeXmlEntities((block.match(/<LEDGERMOBILE>(.*?)<\/LEDGERMOBILE>/i)?.[1] || '').trim());
+    const contactPerson = decodeXmlEntities((block.match(/<MAILINGNAME>(.*?)<\/MAILINGNAME>/i)?.[1] || '').trim());
+    const isCreditor = parent.toLowerCase().includes('creditor');
+    const addrInfo = parseTallyAddress(block);
     ledgers.push({ name, guid, alterId, gstNumber, openingBalance, email, phone, contactPerson, isCreditor, ...addrInfo });
   }
+  LOG(`[parseLedgers] Successfully parsed ${ledgers.length} ledgers`);
   return ledgers;
 }
 
@@ -390,7 +452,9 @@ function ledgersToOps(ledgers) {
     const { name, guid, alterId, gstNumber, openingBalance, email, phone, contactPerson, isCreditor,
             address, city, state, pincode, country } = l;
     const ledgerGroup = isCreditor ? 'Sundry Creditors' : 'Sundry Debtors';
-    const ledgerCode  = `TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 20)}-${Date.now() % 10000}`;
+    const ledgerCode  = guid 
+      ? `TALLY-${guid.replace(/[^A-Z0-9]/gi, '').slice(0, 20)}` 
+      : `TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30)}-${Math.random().toString(36).substring(2, 8)}`;
     const lFilter     = guid ? { tallyGuid: guid } : { ledgerName: name };
 
     // Normalise phone
@@ -426,25 +490,23 @@ function ledgersToOps(ledgers) {
         update: {
           $set: {
             tallySynced: true, lastTallySync: new Date(),
-            ...(safePhone !== '0000000000'                   ? { phone:   safePhone } : {}),
-            ...(email                                        ? { email:   safeEmail } : {}),
-            ...(contactPerson                                ? { contactPerson }      : {}),
-            ...(address                                      ? { address }            : {}),
-            ...(city                                         ? { city }               : {}),
-            ...(state                                        ? { state }              : {}),
-            ...(pincode                                      ? { pincode }            : {}),
-            ...(gstNumber && gstNumber !== 'N/A'             ? { gstNumber }          : {}),
-            ...(guid    ? { tallyGuid:   guid }               : {}),
-            ...(alterId ? { tallyAlterId:alterId }            : {}),
+            phone: safePhone,
+            email: safeEmail,
+            contactPerson: contactPerson || name,
+            address: address || 'Imported from Tally',
+            city: city || 'Unknown',
+            state: state || 'Unknown',
+            pincode: pincode || '000000',
+            ...(gstNumber && gstNumber !== 'N/A' ? { gstNumber } : {}),
+            ...(guid ? { tallyGuid: guid } : {}),
+            ...(alterId ? { tallyAlterId: alterId } : {}),
           },
           $setOnInsert: {
-            vendorId: `VND-TALLY-${Date.now() % 100000}`, companyName: name,
-            category: 'General', contactPerson: contactPerson || name,
-            phone: safePhone, email: safeEmail,
-            address: address || 'Imported from Tally',
-            city:    city    || 'Unknown',
-            state:   state   || 'Unknown',
-            pincode: pincode || '000000',
+            vendorId: guid 
+              ? `VND-TALLY-${guid.replace(/[^A-Z0-9]/gi, '').slice(0, 20)}` 
+              : `VND-TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30)}-${Math.random().toString(36).substring(2, 8)}`,
+            companyName: name,
+            category: 'General',
             status: 'Active',
           },
         },
@@ -456,20 +518,24 @@ function ledgersToOps(ledgers) {
         update: {
           $set: {
             tallySynced: true, lastTallySync: new Date(),
-            ...(safePhone !== '0000000000'                   ? { phone:   safePhone } : {}),
-            ...(email                                        ? { email:   safeEmail } : {}),
-            ...(contactPerson                                ? { contact: contactPerson } : {}),
-            ...(address                                      ? { address }            : {}),
-            ...(city                                         ? { city }               : {}),
-            ...(gstNumber && gstNumber !== 'N/A'             ? { gstNumber }          : {}),
-            ...(guid    ? { tallyGuid:   guid }               : {}),
-            ...(alterId ? { tallyAlterId:alterId }            : {}),
+            phone: safePhone,
+            email: safeEmail,
+            contact: contactPerson || name,
+            address: address || 'Imported from Tally',
+            city: city || 'Unknown',
+            state: state || 'Unknown',
+            pincode: pincode || '000000',
+            ...(gstNumber && gstNumber !== 'N/A' ? { gstNumber } : {}),
+            ...(guid ? { tallyGuid: guid } : {}),
+            ...(alterId ? { tallyAlterId: alterId } : {}),
           },
           $setOnInsert: {
-            clientId: `CLT-TALLY-${Date.now() % 100000}`, name,
-            contact: contactPerson || name, phone: safePhone, email: safeEmail,
-            city:    city    || 'Unknown',
-            category: 'Trading', status: 'Active',
+            clientId: guid 
+              ? `CLT-TALLY-${guid.replace(/[^A-Z0-9]/gi, '').slice(0, 20)}` 
+              : `CLT-TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30)}-${Math.random().toString(36).substring(2, 8)}`,
+            name,
+            category: 'Trading',
+            status: 'Active',
           },
         },
         upsert: true,
@@ -595,17 +661,53 @@ async function writeTallyVouchersToDb(ops) {
 // Performs one Tally request (full or chunked) and writes results to DB.
 // Returns { records, complete }
 
+// Helper to build custom TDL collection XML for Stock Items
+function buildStockItemTdlXml(cfg) {
+  return `<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>StockItemList</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        ${companyTag(cfg)}
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <REPORT NAME="StockItemList">
+            <FORMS>StockItemForm</FORMS>
+          </REPORT>
+          <FORM NAME="StockItemForm">
+            <TOPPARTS>StockItemPart</TOPPARTS>
+          </FORM>
+          <PART NAME="StockItemPart">
+            <REPEAT>StockItemLine : StockItems</REPEAT>
+          </PART>
+          <COLLECTION NAME="StockItems">
+            <TYPE>StockItem</TYPE>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+}
+
 async function fetchAndSave(cfg, entityType, fromDate, toDate) {
   const reportMap = {
-    Items:   { report: 'List of Stock Items', tag: '<STOCKITEM', fallbackReports: ['Stock Summary'] },
-    Ledgers: { report: 'List of Ledgers',     tag: '<LEDGER',    fallbackReports: ['Ledger', 'List of Accounts'] },
-    Purchase:{ report: 'Day Book',            tag: '<VOUCHER',   voucherType: 'Purchase' },
-    Sales:   { report: 'Day Book',            tag: '<VOUCHER',   voucherType: 'Sales' },
-    Payment: { report: 'Day Book',            tag: '<VOUCHER',   voucherType: 'Payment' },
-    Receipt: { report: 'Day Book',            tag: '<VOUCHER',   voucherType: 'Receipt' },
-    Journal: { report: 'Day Book',            tag: '<VOUCHER',   voucherType: 'Journal' },
-    Contra:  { report: 'Day Book',            tag: '<VOUCHER',   voucherType: 'Contra'  },
-    Vouchers:{ report: 'Day Book',            tag: '<VOUCHER',   voucherType: null },
+    Items:   { report: 'List of Accounts', tag: '<STOCKITEM', fallbackReports: ['All Masters', 'Stock Summary', 'Stock Items', 'Stock Item'], useTdl: true },
+    Ledgers: { report: 'List of Accounts', tag: '<LEDGER',    fallbackReports: ['Ledger', 'List of Ledgers'] },
+    Purchase:{ report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Purchase' },
+    Sales:   { report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Sales' },
+    Payment: { report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Payment' },
+    Receipt: { report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Receipt' },
+    Journal: { report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Journal' },
+    Contra:  { report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Contra'  },
+    Vouchers:{ report: 'Day Book',         tag: '<VOUCHER',   voucherType: null },
   };
 
   const meta = reportMap[entityType];
@@ -624,9 +726,14 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate) {
 
   let resp = await postXmlWithRetry(cfg, xml, fromDate ? CHUNK_TIMEOUT : FULL_FETCH_TIMEOUT, MAX_CHUNK_RETRIES);
 
-  // For Items — try fallback reports if primary returned nothing
-  if (entityType === 'Items' && (!resp || !resp.includes(meta.tag))) {
-    for (const fallback of (meta.fallbackReports || [])) {
+  LOG(`[${entityType}] Response length: ${resp?.length || 0}, contains tag: ${!!(resp && resp.includes(meta.tag))}`);
+  if (resp && resp.length > 0) {
+    LOG(`[${entityType}] Response preview (first 500 chars):\n${resp.substring(0, 500)}`);
+  }
+
+  // Try fallback reports if primary returned nothing (for all entity types)
+  if ((!resp || !resp.includes(meta.tag)) && meta.fallbackReports && meta.fallbackReports.length > 0) {
+    for (const fallback of meta.fallbackReports) {
       LOG(`Primary report empty, trying fallback: "${fallback}"`);
       const fallbackXml = fromDate
         ? buildChunkFetchXml(cfg, fallback, fromDate, toDate, extraVars)
@@ -634,6 +741,13 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate) {
       resp = await postXmlWithRetry(cfg, fallbackXml, CHUNK_TIMEOUT, 2).catch(() => '');
       if (resp && resp.includes(meta.tag)) break;
     }
+  }
+
+  // Try custom TDL collection for Stock Items if still no data
+  if ((!resp || !resp.includes(meta.tag)) && meta.useTdl) {
+    LOG(`Trying custom TDL collection for ${entityType}...`);
+    const tdlXml = buildStockItemTdlXml(cfg);
+    resp = await postXmlWithRetry(cfg, tdlXml, FULL_FETCH_TIMEOUT, 2).catch(() => '');
   }
 
   if (!resp || !resp.includes(meta.tag)) {

@@ -42,6 +42,12 @@ router.get('/bank-cash-accounts', protect, financeController.getBankCashAccounts
 // Payment History
 router.get('/payment-history', protect, financeController.getPaymentHistory);
 
+// Vendor Credit Notes
+router.get('/vendor-credit-notes', protect, financeController.getVendorCreditNotes);
+
+// Vendor Debit Notes
+router.get('/vendor-debit-notes', protect, financeController.getVendorDebitNotes);
+
 // Financial Reports
 router.get('/reports/:type', protect, financeController.getFinancialReports);
 

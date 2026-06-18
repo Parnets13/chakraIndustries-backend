@@ -1,6 +1,7 @@
 import BulkOrderApproval from '../models/BulkOrderApproval.js';
 import BulkQuotation from '../models/BulkQuotation.js';
 import CorporateClient from '../models/CorporateClient.js';
+import { logActivity } from '../utils/activityLogger.js';
 
 const generateApprovalId = async () => {
   const last = await BulkOrderApproval.findOne({}, {}, { sort: { createdAt: -1 } });
@@ -57,6 +58,14 @@ export const createApprovalWorkflow = async (req, res) => {
       approvalChain,
       createdBy: req.user?._id
     });
+    if (req.user) {
+      await logActivity(req, req.user, 'CREATE_BULK_ORDER_APPROVAL', {
+        module: 'procurement',
+        description: `Created bulk approval ${approval.approvalId} for quotation ${approval.quotationId}`,
+        targetId: approval._id.toString(),
+        targetType: 'BulkOrderApproval'
+      });
+    }
 
     res.status(201).json({ success: true, data: approval });
   } catch (err) {
@@ -124,6 +133,14 @@ export const approveAtLevel = async (req, res) => {
     }
 
     await approval.save();
+    if (req.user) {
+      await logActivity(req, req.user, 'APPROVE_BULK_ORDER_APPROVAL', {
+        module: 'procurement',
+        description: `Approved bulk approval ${approval.approvalId}`,
+        targetId: approval._id.toString(),
+        targetType: 'BulkOrderApproval'
+      });
+    }
     res.json({ success: true, data: approval, message: 'Approval recorded' });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -146,6 +163,14 @@ export const rejectApproval = async (req, res) => {
     );
 
     await approval.save();
+    if (req.user) {
+      await logActivity(req, req.user, 'REJECT_BULK_ORDER_APPROVAL', {
+        module: 'procurement',
+        description: `Rejected bulk approval ${approval.approvalId}`,
+        targetId: approval._id.toString(),
+        targetType: 'BulkOrderApproval'
+      });
+    }
     res.json({ success: true, data: approval, message: 'Approval rejected' });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });

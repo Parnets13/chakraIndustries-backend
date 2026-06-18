@@ -152,9 +152,6 @@ dotenv.config();
 // Server configuration
 const app = express();
 
-// Connect to MongoDB
-connectDB();
-
 // Rate limiting middleware — relaxed for local dev, tighter for production
 const limiter = rateLimit({
   windowMs: 1000, // 1 second
@@ -302,12 +299,15 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5001;
 
+// Start server immediately, connect to MongoDB in background
+connectDB(); 
+
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✓ Server running on port ${PORT}`);
   startTallyScheduler();
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use. Stop the other process and restart.`);
+    console.error(`✗ Port ${PORT} is already in use. Stop the other process and restart.`);
     process.exit(1);
   } else {
     throw err;
