@@ -72,7 +72,7 @@ const invoiceSchema = new mongoose.Schema({
   remainingAmount: { type: Number, default: 0 },
 
   // Source tracking
-  source:       { type: String, enum: ['manual', 'excel_upload'], default: 'manual' },
+  source:       { type: String, enum: ['manual', 'excel_upload', 'Tally', 'tally'], default: 'manual' },
   uploadBatch:  { type: String, default: '' },  // batch ID for bulk uploads
 
   // Invoice type — set automatically based on item count

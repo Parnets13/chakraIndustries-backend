@@ -1,16 +1,18 @@
+
 /**
  * tallyScheduler.js
  *
- * Automatic scheduled import: Tally → ERP only.
- * The scheduler NEVER pushes ERP data to Tally — that must be triggered
- * explicitly by the user via the "Export to Tally" action in the UI.
- *
- * Uses the robust pull engine (tallyFetchEngine.js) which supports
- * full-fetch + chunk-sync fallback, state tracking, and resume on failure.
+ * Hybrid Tally Sync Scheduler:
+ * - Masters (Stock Items, Ledgers, Groups): Import via TDL file export
+ * - Transactions (Purchase, Sales, Payment, Receipt, Journal, Contra): Import via Tally API
  */
 
 import TallyConfig from '../models/TallyConfig.js';
-import { runRobustFullPull } from './tallyFetchEngine.js';
+import { pullEntityFromTally } from './tallyFetchEngine.js';
+import { startFileWatcher } from './tallyFileImporter.js';
+
+const LOG = (msg) => console.log(`[TallyScheduler] ${msg}`);
+const ERR = (msg, err) => console.error(`[TallyScheduler Error] ${msg}`, err ? err.message || err : '');
 
 const INTERVAL_MAP = {
   'Every 30 seconds': 30  * 1000,
@@ -22,15 +24,15 @@ const INTERVAL_MAP = {
   'Manual only':      null,
 };
 
-let _timer = null;
-let _currentInterval = null;
+const TRANSACTION_TYPES = ['Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra'];
 
-// In-process lock — prevents overlapping scheduled runs
+let _transactionTimer = null;
+let _currentTransactionInterval = null;
 let _schedulerLock = false;
 
-async function tick() {
+async function syncTransactions() {
   if (_schedulerLock) {
-    console.log('[TallyScheduler] Skipping tick — previous import still running');
+    LOG('Skipping transaction sync — previous sync still running');
     return;
   }
   _schedulerLock = true;
@@ -38,64 +40,74 @@ async function tick() {
     const cfg = await TallyConfig.findOne();
     if (!cfg?.autoSync) return;
 
-    // Check if Tally URL is configured and valid
     if (!cfg.tallyLocalUrl || cfg.tallyLocalUrl.trim() === '') {
-      console.log('[TallyScheduler] tallyLocalUrl not configured — skipping scheduled import');
+      LOG('tallyLocalUrl not configured — skipping transaction sync');
       return;
     }
 
-    console.log('[TallyScheduler] Running scheduled import (Tally → ERP)...');
-
-    // Always import only — never auto-export
-    const result = await runRobustFullPull({ triggeredBy: null });
-
-    console.log(`[TallyScheduler] Scheduled import done — ${result.records} records, ok=${result.ok}`);
+    LOG('Starting transaction sync...');
+    for (const type of TRANSACTION_TYPES) {
+      try {
+        LOG(`Syncing ${type}...`);
+        await pullEntityFromTally(type);
+      } catch (err) {
+        ERR(`Failed to sync ${type}`, err);
+      }
+    }
+    LOG('Transaction sync complete');
   } catch (err) {
-    // Suppress DNS/network errors to avoid log spam
     if (err.message?.includes('ENOTFOUND') || err.message?.includes('getaddrinfo')) {
-      console.log('[TallyScheduler] Tally server unreachable - will retry on next interval');
+      LOG('Tally server unreachable - will retry on next interval');
     } else {
-      console.error('[TallyScheduler] Scheduled import error:', err.message);
+      ERR('Transaction sync error', err);
     }
   } finally {
     _schedulerLock = false;
   }
 }
 
-/** Start (or restart) the scheduler. Called once from server.js after DB connects. */
 export function startTallyScheduler() {
+  // Start file watcher for master data (Stock Items, Ledgers)
+  try {
+    startFileWatcher();
+    LOG('Started file watcher for master data exports');
+  } catch (err) {
+    ERR('Failed to start file watcher', err);
+  }
+
   // Check config every 60 seconds and adjust timer if interval changed
   setInterval(async () => {
     try {
       const cfg = await TallyConfig.findOne();
       if (!cfg?.autoSync) {
-        if (_timer) { clearInterval(_timer); _timer = null; _currentInterval = null; }
+        if (_transactionTimer) { clearInterval(_transactionTimer); _transactionTimer = null; _currentTransactionInterval = null; }
         return;
       }
       const ms = INTERVAL_MAP[cfg.syncInterval] ?? INTERVAL_MAP['Every 15 minutes'];
       if (ms === null) {
-        if (_timer) { clearInterval(_timer); _timer = null; _currentInterval = null; }
+        if (_transactionTimer) { clearInterval(_transactionTimer); _transactionTimer = null; _currentTransactionInterval = null; }
         return;
       }
-      if (_currentInterval !== ms) {
-        if (_timer) clearInterval(_timer);
-        _timer = setInterval(tick, ms);
-        _currentInterval = ms;
-        console.log(`[TallyScheduler] Import interval set to ${cfg.syncInterval}`);
+      if (_currentTransactionInterval !== ms) {
+        if (_transactionTimer) clearInterval(_transactionTimer);
+        _transactionTimer = setInterval(syncTransactions, ms);
+        _currentTransactionInterval = ms;
+        LOG(`Transaction sync interval set to ${cfg.syncInterval}`);
       }
     } catch (_) { /* DB not ready yet */ }
   }, 60_000);
 
-  // Run once on startup after a short delay
+  // Run initial sync after a short delay
   setTimeout(async () => {
     try {
       const cfg = await TallyConfig.findOne();
       if (cfg?.autoSync && cfg.syncInterval !== 'Manual only') {
         const ms = INTERVAL_MAP[cfg.syncInterval] ?? INTERVAL_MAP['Every 15 minutes'];
         if (ms) {
-          _timer = setInterval(tick, ms);
-          _currentInterval = ms;
-          console.log(`[TallyScheduler] Started — auto-importing from Tally ${cfg.syncInterval}`);
+          _transactionTimer = setInterval(syncTransactions, ms);
+          _currentTransactionInterval = ms;
+          LOG(`Started — auto-syncing transactions from Tally ${cfg.syncInterval}`);
+          LOG('Master data sync via TDL file exports (C:\\TallyExports)');
         }
       }
     } catch (_) { /* ignore */ }

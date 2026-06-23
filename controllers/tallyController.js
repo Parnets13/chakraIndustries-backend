@@ -21,13 +21,14 @@ import {
   pullVouchersFromTally,
   pullPaymentReceiptFromTally,
 } from '../services/tallyService.js';
-import { pullEntityFromTally, runRobustFullPull } from '../services/tallyFetchEngine.js';
+import { pullEntityFromTally, clearVoucherCache } from '../services/tallyFetchEngine.js';
 import {
   validateTallyConnection,
   getExportConfig,
   runFullExportToTally,
   runSelectiveExport,
 } from '../services/tallyExportService.js';
+import { importFromFiles } from '../services/tallyFileImporter.js';
 
 // ── SSE helper ────────────────────────────────────────────────────────────────
 function sseSetup(res) {
@@ -166,28 +167,92 @@ export const getSyncStats = async (req, res) => {
 };
 
 // ── Master Data Status ────────────────────────────────────────────────────────
+// Returns ALL imported entities — masters + every voucher type — dynamically.
+// A module only appears if it has been imported (count > 0) or has a sync log.
 export const getMasterDataStatus = async (req, res) => {
   try {
-    const [itemCount, poCount] = await Promise.all([
+    // ── 1. Master collection counts ─────────────────────────────────────────
+    const [itemTotal, itemSynced, vendorTotal, vendorSynced,
+           clientTotal, clientSynced, ledgerTotal, ledgerSynced] = await Promise.all([
       ItemMaster.countDocuments({ isActive: true }),
-      PurchaseOrder.countDocuments(),
+      ItemMaster.countDocuments({ tallyGuid: { $exists: true, $ne: null } }),
+      Vendor.countDocuments(),
+      Vendor.countDocuments({ tallyGuid: { $exists: true, $ne: null } }),
+      Client.countDocuments(),
+      Client.countDocuments({ tallyGuid: { $exists: true, $ne: null } }),
+      AccountsLedger.countDocuments(),
+      AccountsLedger.countDocuments({ tallyGuid: { $exists: true, $ne: null } }),
     ]);
-    const categories = ['Items', 'Ledgers', 'GST Rates', 'Units', 'Godowns'];
-    const result = await Promise.all(categories.map(async (cat) => {
-      const logType = cat === 'Items' ? 'Item Master' : cat === 'Ledgers' ? 'Ledger' : cat;
-      const lastLog = await TallySyncLog.findOne({ type: logType }).sort({ createdAt: -1 });
-      const total = cat === 'Items' ? itemCount : cat === 'Ledgers' ? poCount : 8;
-      const failed = lastLog?.status === 'Failed' ? 1 : 0;
+
+    // ── 2. Voucher counts per type from TallyVoucher ─────────────────────────
+    const voucherTypes = ['Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'];
+    const voucherCounts = await TallyVoucher.aggregate([
+      { $group: { _id: '$voucherType', total: { $sum: 1 }, lastDate: { $max: '$syncedAt' } } },
+    ]);
+    const vMap = {};
+    for (const v of voucherCounts) if (v._id) vMap[v._id] = { total: v.total, lastDate: v.lastDate };
+
+    // ── 3. Last sync log per entity key ──────────────────────────────────────
+    const logKeys = ['Item Master', 'Ledger', 'Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'];
+    const lastLogs = await Promise.all(logKeys.map(k =>
+      TallySyncLog.findOne({ type: k }).sort({ createdAt: -1 }).lean()
+    ));
+    const logMap = {};
+    logKeys.forEach((k, i) => { logMap[k] = lastLogs[i]; });
+
+    const fmtDate = d => d ? new Date(d).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Never';
+    const rowStatus = (total, synced, failed) =>
+      failed > 0 ? 'Partial' : synced > 0 ? 'Synced' : total > 0 ? 'Pending' : 'Not Imported';
+
+    // ── 4. Build master rows (always show if any record exists) ──────────────
+    const masterRows = [
+      { key: 'Items',   logKey: 'Item Master', icon: '📦', total: itemTotal,   synced: itemSynced,   lastDate: logMap['Item Master']?.createdAt },
+      { key: 'Ledgers', logKey: 'Ledger',      icon: '📒', total: ledgerTotal,  synced: ledgerSynced, lastDate: logMap['Ledger']?.createdAt },
+      { key: 'Vendors', logKey: 'Ledger',      icon: '🏭', total: vendorTotal,  synced: vendorSynced, lastDate: logMap['Ledger']?.createdAt },
+      { key: 'Clients', logKey: 'Ledger',      icon: '👥', total: clientTotal,  synced: clientSynced, lastDate: logMap['Ledger']?.createdAt },
+    ].filter(r => r.total > 0 || r.synced > 0).map(r => {
+      const log = logMap[r.logKey];
+      const failed = log?.status === 'Failed' ? 1 : 0;
       return {
-        category: cat,
-        total,
-        synced: total - failed,
-        pending: 0,
+        category: r.key,
+        icon: r.icon,
+        moduleType: 'master',
+        total: r.total,
+        synced: r.synced,
+        pending: Math.max(0, r.total - r.synced),
         failed,
-        lastSync: lastLog ? new Date(lastLog.createdAt).toLocaleString('en-IN') : 'Never',
-        status: failed > 0 ? 'Partial' : lastLog ? 'Synced' : 'Pending',
+        lastSync: fmtDate(r.lastDate),
+        status: rowStatus(r.total, r.synced, failed),
       };
-    }));
+    });
+
+    // ── 5. Build voucher rows (only show types that have been imported) ───────
+    const voucherIconMap = {
+      Purchase: '🛒', Sales: '💰', Payment: '💸',
+      Receipt: '🧾', Journal: '📋', Contra: '🔄',
+      'Debit Note': '📉', 'Credit Note': '📈',
+    };
+    const voucherRows = voucherTypes
+      .filter(vt => vMap[vt]?.total > 0)
+      .map(vt => {
+        const log = logMap[vt];
+        const failed = log?.status === 'Failed' ? 1 : 0;
+        const total = vMap[vt]?.total || 0;
+        return {
+          category: `${vt} Vouchers`,
+          icon: voucherIconMap[vt] || '📄',
+          moduleType: 'voucher',
+          voucherType: vt,
+          total,
+          synced: total,
+          pending: 0,
+          failed,
+          lastSync: fmtDate(vMap[vt]?.lastDate || log?.createdAt),
+          status: rowStatus(total, total, failed),
+        };
+      });
+
+    const result = [...masterRows, ...voucherRows];
     res.json({ success: true, data: result });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
@@ -196,10 +261,10 @@ export const getMasterDataStatus = async (req, res) => {
 export const getTransactionStatus = async (req, res) => {
   try {
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    const types = ['Purchase Vouchers', 'Sales Vouchers', 'Payment Vouchers', 'Receipt Vouchers', 'Journal Vouchers'];
+    const types = ['Purchase Vouchers', 'Sales Vouchers', 'Payment Vouchers', 'Receipt Vouchers', 'Journal Vouchers', 'Contra Vouchers'];
     const typeMap = {
       'Purchase Vouchers': 'Purchase', 'Sales Vouchers': 'Sales',
-      'Payment Vouchers': 'Payment', 'Receipt Vouchers': 'Receipt', 'Journal Vouchers': 'Journal',
+      'Payment Vouchers': 'Payment', 'Receipt Vouchers': 'Receipt', 'Journal Vouchers': 'Journal', 'Contra Vouchers': 'Contra',
     };
     const result = await Promise.all(types.map(async (t) => {
       const logType = typeMap[t];
@@ -262,14 +327,72 @@ export const retrySync = async (req, res) => {
 
 export const getVouchers = async (req, res) => {
   try {
-    const { type, partyName, limit = 100 } = req.query;
+    const { type, partyName, search, limit = 50, page = 1, dateFrom, dateTo } = req.query;
     const filter = {};
     if (type) filter.voucherType = type;
-    if (partyName) filter.partyName = new RegExp(partyName, 'i');
-    const vouchers = await TallyVoucher.find(filter)
-      .sort({ voucherDate: -1 })
-      .limit(parseInt(limit));
-    res.json({ success: true, data: vouchers });
+
+    // Date range filter
+    if (dateFrom || dateTo) {
+      filter.voucherDate = {};
+      if (dateFrom) filter.voucherDate.$gte = new Date(dateFrom);
+      if (dateTo) {
+        const end = new Date(dateTo);
+        end.setHours(23, 59, 59, 999);
+        filter.voucherDate.$lte = end;
+      }
+    }
+
+    // Support combined search across partyName, voucherNumber, narration
+    if (search) {
+      const re = new RegExp(search, 'i');
+      filter.$or = [{ partyName: re }, { voucherNumber: re }, { narration: re }];
+    } else if (partyName) {
+      filter.partyName = new RegExp(partyName, 'i');
+    }
+
+    const pageNum  = Math.max(1, parseInt(page));
+    const pageSize = Math.min(200, Math.max(1, parseInt(limit)));
+    const skip     = (pageNum - 1) * pageSize;
+
+    const [vouchers, total] = await Promise.all([
+      TallyVoucher.find(filter)
+        .sort({ voucherDate: -1 })
+        .skip(skip)
+        .limit(pageSize)
+        .lean(),
+      TallyVoucher.countDocuments(filter),
+    ]);
+
+    res.json({ success: true, data: vouchers, total, page: pageNum, pageSize });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+export const getVoucherById = async (req, res) => {
+  try {
+    const voucher = await TallyVoucher.findById(req.params.id).lean();
+    if (!voucher) return res.status(404).json({ success: false, message: 'Voucher not found' });
+    res.json({ success: true, data: voucher });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+// ── Reset voucher sync states so next import re-fetches all items/amounts ─────
+export const resetVoucherSyncStates = async (req, res) => {
+  try {
+    const TallySyncState = (await import('../models/TallySyncState.js')).default;
+    const VOUCHER_TYPES = ['Vouchers', 'Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'];
+    const result = await TallySyncState.updateMany(
+      { entityType: { $in: VOUCHER_TYPES } },
+      { $set: { lastSyncedDate: null, syncStatus: 'idle', lastCompletedChunkIndex: -1, chunks: [] } }
+    );
+    const [total, zeroAmt] = await Promise.all([
+      TallyVoucher.countDocuments({}),
+      TallyVoucher.countDocuments({ amount: { $lte: 0 } }),
+    ]);
+    res.json({
+      success: true,
+      message: `Sync states reset for ${result.modifiedCount} voucher types. Run a Full Sync to re-fetch all voucher details.`,
+      data: { totalVouchers: total, zeroAmountVouchers: zeroAmt, resetCount: result.modifiedCount },
+    });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 
@@ -345,104 +468,160 @@ export const importFromTallyStream = async (req, res) => {
   send({ event: 'start', message: `Import started (Tally → ERP) — type: ${type}`, syncId, direction: 'Tally → ERP' });
 
   const stats = { total: 0, created: 0, updated: 0, skipped: 0, failed: 0 };
-  const detailedLogs = [];
+    const modules = [];
+    const detailedLogs = [];
 
-  const log = (level, entity, msg, extra = {}) => {
-    const entry = { ts: new Date().toISOString(), level, entity, msg, ...extra };
-    detailedLogs.push(entry);
-    send({ event: 'log', level, entity, message: msg, ...extra });
-  };
-
-  try {
-    const cfg = await TallyConfig.findOne();
-    if (!cfg?.tallyLocalUrl) {
-      send({ event: 'error', message: 'Tally Local URL is not configured. Go to Configuration tab and set the Tally machine URL.' });
-      return res.end();
-    }
-
-    // Determine which entities to import
-    const entityMap = {
-      Full:     ['Items', 'Ledgers', 'Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra'],
-      master:   ['Items', 'Ledgers'],
-      transaction: ['Purchase', 'Sales', 'Payment', 'Receipt', 'Journal'],
-      Items:    ['Items'],
-      Ledgers:  ['Ledgers'],
-      Purchase: ['Purchase'],
-      Sales:    ['Sales'],
-      Payment:  ['Payment'],
-      Receipt:  ['Receipt'],
-      Journal:  ['Journal'],
-      Contra:   ['Contra'],
-      'Item Master': ['Items'],
-      'Ledger':      ['Ledgers'],
+    const log = (level, entity, msg, extra = {}) => {
+      const entry = { ts: new Date().toISOString(), level, entity, msg, ...extra };
+      detailedLogs.push(entry);
+      send({ event: 'log', level, entity, message: msg, ...extra });
     };
 
-    const entities = entityMap[type] || entityMap['Full'];
-    const total    = entities.length;
-
-    send({ event: 'phase', message: `Importing ${entities.join(', ')} from Tally`, total });
-
-    for (let i = 0; i < entities.length; i++) {
-      const entity = entities[i];
-      send({ event: 'phase_start', entity, index: i + 1, total, message: `Importing ${entity}...` });
-      log('info', entity, `Starting import of ${entity} from Tally`);
-
-      try {
-        const result = await pullEntityFromTally(entity, {
-          triggeredBy: user._id,
-          forceChunk: false,
-        });
-
-        const entityRecords = result.records || 0;
-        stats.total   += entityRecords;
-        // Approximate breakdown — pullEntityFromTally returns total records affected
-        // The bulkWrite internally handles upsert (created vs updated), so we split
-        // conservatively: assume new records are "created", rest "updated"
-        const prevCount = await getEntityCount(entity);
-        if (result.ok) {
-          stats.created += Math.min(entityRecords, Math.max(0, entityRecords - Math.floor(entityRecords * 0.7)));
-          stats.updated += entityRecords - Math.min(entityRecords, Math.max(0, entityRecords - Math.floor(entityRecords * 0.7)));
-        } else {
-          stats.failed += entityRecords;
-        }
-
-        if (result.ok) {
-          log('success', entity, `✅ ${entity}: ${entityRecords} records imported`, { records: entityRecords });
-          send({ event: 'phase_done', entity, records: entityRecords, ok: true,
-            message: `${entity} imported — ${entityRecords} records processed` });
-        } else {
-          log('error', entity, `❌ ${entity} import failed: ${result.error}`, { error: result.error });
-          stats.failed += 1;
-          send({ event: 'phase_done', entity, records: 0, ok: false, error: result.error,
-            message: `${entity} import failed: ${result.error}` });
-        }
-
-        if (result.failedChunks > 0) {
-          log('warn', entity, `⚠️ ${result.failedChunks} chunk(s) failed for ${entity} — some records may be missing`);
-        }
-      } catch (entityErr) {
-        log('error', entity, `❌ ${entity} threw an error: ${entityErr.message}`, { error: entityErr.message });
-        stats.failed += 1;
-        send({ event: 'phase_done', entity, records: 0, ok: false, error: entityErr.message });
+    try {
+      const cfg = await TallyConfig.findOne();
+      if (!cfg?.tallyLocalUrl) {
+        send({ event: 'error', message: 'Tally Local URL is not configured. Go to Configuration tab and set the Tally machine URL.' });
+        return res.end();
       }
 
-      // Small delay to avoid overwhelming Tally
-      await new Promise(r => setTimeout(r, 200));
-    }
+      // Determine which entities to import
+      const entityMap = {
+        Full:     ['Items', 'Ledgers', 'Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'],
+        master:   ['Items', 'Ledgers'],
+        transaction: ['Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'],
+        Items:    ['Items'],
+        Ledgers:  ['Ledgers'],
+        Purchase: ['Purchase'],
+        Sales:    ['Sales'],
+        Payment:  ['Payment'],
+        Receipt:  ['Receipt'],
+        Journal:  ['Journal'],
+        Contra:   ['Contra'],
+        'Debit Note':  ['Debit Note'],
+        'Credit Note': ['Credit Note'],
+        'Item Master': ['Items'],
+        'Ledger':      ['Ledgers'],
+      };
 
-    const duration = `${((Date.now() - start) / 1000).toFixed(1)}s`;
-    const allOk = stats.failed === 0;
-    const status = allOk ? 'Success' : (stats.total > 0 ? 'Partial' : 'Failed');
+      const entities = entityMap[type] || entityMap['Full'];
+      const total    = entities.length;
 
-    // Write a summary sync log
-    await TallySyncLog.create({
-      syncId, type: type === 'Full' ? 'Full' : type,
-      entity: '', direction: 'Tally → ERP',
-      status, duration,
-      error: stats.failed > 0 ? `${stats.failed} entity type(s) failed` : '',
-      records: stats.total,
-      triggeredBy: user._id,
-    }).catch(() => {});
+      // Clear the voucher XML cache at the start of every import run so we always
+      // fetch fresh data from Tally (the cache is only reused within a single run).
+      clearVoucherCache();
+
+      // Auto-reset sync state for all voucher entity types so incremental sync
+      // never skips re-fetching existing records with stale/zero amounts.
+      try {
+        const TallySyncState = (await import('../models/TallySyncState.js')).default;
+        const VOUCHER_TYPES = ['Vouchers', 'Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'];
+        const resetTypes = entities.some(e => VOUCHER_TYPES.includes(e)) ? VOUCHER_TYPES : entities;
+        await TallySyncState.updateMany(
+          { entityType: { $in: resetTypes } },
+          { $set: { lastSyncedDate: null, syncStatus: 'idle', lastCompletedChunkIndex: -1, chunks: [] } }
+        );
+        console.log(`[Import] Auto-reset sync state for: ${resetTypes.join(', ')}`);
+      } catch (e) {
+        console.warn(`[Import] sync state reset warning (non-fatal): ${e.message}`);
+      }
+
+      send({ event: 'phase', message: `Importing ${entities.join(', ')} from Tally`, total });
+
+      for (let i = 0; i < entities.length; i++) {
+        const entity = entities[i];
+        send({ event: 'phase_start', entity, index: i + 1, total, message: `Importing ${entity}...` });
+        log('info', entity, `Starting import of ${entity} from Tally`);
+
+        const moduleInfo = ENTITY_MODULE_MAP[entity];
+        const moduleTimestamp = new Date();
+
+        try {
+          const result = await pullEntityFromTally(entity, {
+            triggeredBy: user._id,
+            forceChunk: false,
+            forceRefresh: true,   // always re-fetch full history so amounts/items are never stale
+          });
+
+          const entityRecords = result.records || 0;
+          stats.total += entityRecords;
+          stats.created += result.created || 0;
+          stats.updated += result.updated || 0;
+          stats.skipped += result.skipped || 0;
+          stats.failed += result.failed || 0;
+
+          // Add to modules array
+          if (moduleInfo) {
+            modules.push({
+              name: moduleInfo.name,
+              count: entityRecords,
+              timestamp: moduleTimestamp,
+              route: moduleInfo.route,
+              created: result.created || 0,
+              updated: result.updated || 0,
+              skipped: result.skipped || 0,
+              failed: result.failed || 0,
+              totalFound: result.totalFound || 0
+            });
+          }
+
+          if (result.ok) {
+            log('success', entity, `✅ ${entity}: ${entityRecords} records imported`, { 
+              records: entityRecords, 
+              created: result.created, 
+              updated: result.updated, 
+              skipped: result.skipped, 
+              failed: result.failed 
+            });
+            send({ 
+              event: 'phase_done', 
+              entity, 
+              records: entityRecords, 
+              created: result.created, 
+              updated: result.updated, 
+              skipped: result.skipped, 
+              failed: result.failed,
+              ok: true,
+              message: `${entity} imported — ${entityRecords} records processed` 
+            });
+          } else {
+            log('error', entity, `❌ ${entity} import failed: ${result.error}`, { error: result.error });
+            send({ 
+              event: 'phase_done', 
+              entity, 
+              records: 0, 
+              ok: false, 
+              error: result.error,
+              message: `${entity} import failed: ${result.error}` 
+            });
+          }
+
+          if (result.failedChunks > 0) {
+            log('warn', entity, `⚠️ ${result.failedChunks} chunk(s) failed for ${entity} — some records may be missing`);
+          }
+        } catch (entityErr) {
+          log('error', entity, `❌ ${entity} threw an error: ${entityErr.message}`, { error: entityErr.message });
+          stats.failed += 1;
+          send({ event: 'phase_done', entity, records: 0, ok: false, error: entityErr.message });
+        }
+
+        // Small delay to avoid overwhelming Tally
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      const duration = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+      const allOk = stats.failed === 0;
+      const status = allOk ? 'Success' : (stats.total > 0 ? 'Partial' : 'Failed');
+
+      // Write a summary sync log with module details
+      await TallySyncLog.create({
+        syncId, type: type === 'Full' ? 'Full' : type,
+        entity: '', direction: 'Tally → ERP',
+        status, duration,
+        error: stats.failed > 0 ? `${stats.failed} entity type(s) failed` : '',
+        records: stats.total,
+        modules,
+        triggeredBy: user._id,
+      }).catch(() => {});
 
     await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date(), lastImportAt: new Date() }, { upsert: true });
 
@@ -465,6 +644,60 @@ export const importFromTallyStream = async (req, res) => {
   }
 
   res.end();
+};
+
+// Dynamic mapping between Tally entities and frontend routes/modules
+const ENTITY_MODULE_MAP = {
+  'Items': {
+    name: 'Item Master',
+    route: '/item-master',
+    logType: 'Item Master'
+  },
+  'Ledgers': {
+    name: 'Ledgers',
+    route: '/finance/tally-ledger',
+    logType: 'Ledger'
+  },
+  'Purchase': {
+    name: 'Purchase Vouchers',
+    route: '/finance/tally-ledger',
+    logType: 'Purchase'
+  },
+  'Sales': {
+    name: 'Sales Vouchers',
+    route: '/finance/tally-ledger',
+    logType: 'Sales'
+  },
+  'Payment': {
+    name: 'Payment Vouchers',
+    route: '/finance/tally-ledger',
+    logType: 'Payment'
+  },
+  'Receipt': {
+    name: 'Receipt Vouchers',
+    route: '/finance/tally-ledger',
+    logType: 'Receipt'
+  },
+  'Journal': {
+    name: 'Journal Vouchers',
+    route: '/finance/tally-ledger',
+    logType: 'Journal'
+  },
+  'Contra': {
+    name: 'Contra Vouchers',
+    route: '/finance/tally-ledger',
+    logType: 'Contra'
+  },
+  'Debit Note': {
+    name: 'Debit Note Vouchers',
+    route: '/finance/tally-ledger',
+    logType: 'Debit Note'
+  },
+  'Credit Note': {
+    name: 'Credit Note Vouchers',
+    route: '/finance/tally-ledger',
+    logType: 'Credit Note'
+  }
 };
 
 // Helper: get current DB count for an entity (for created/updated estimation)
@@ -632,9 +865,9 @@ export const importFromTally = async (req, res) => {
   try {
     const { type = 'Full' } = req.body;
     const entityMap = {
-      Full: ['Items', 'Ledgers', 'Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra'],
+      Full: ['Items', 'Ledgers', 'Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'],
       master: ['Items', 'Ledgers'],
-      transaction: ['Purchase', 'Sales', 'Payment', 'Receipt', 'Journal'],
+      transaction: ['Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'],
     };
     const entities = entityMap[type] || [type];
     const results = [];
@@ -855,6 +1088,211 @@ export const getExportCounts = async (req, res) => {
         journalVouchers: { label: 'Journal Vouchers',       count: journalCount },
         total: itemCount + warehouseCount + categoryCount + vendorCount + clientCount + corporateCount + ledgerCount + invoiceCount + poCount + creditNoteCount + debitNoteCount + paymentCount + receiptCount + journalCount,
       },
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+};
+
+// ─── FILE-BASED IMPORT ────────────────────────────────────────────────────────
+/**
+ * POST /api/tally/import-from-files
+ * Triggers import from XML files in C:\TallyExport
+ */
+export const importFromTallyFiles = async (req, res) => {
+  try {
+    const result = await importFromFiles();
+    res.json({
+      success: result.ok,
+      data: { records: result.records },
+      message: result.ok ? `Successfully imported ${result.records} records from files` : `Import failed: ${result.error}`
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+};
+
+/**
+ * GET /api/tally/import-from-files-stream?token=<jwt>
+ * SSE version of file import
+ */
+export const importFromTallyFilesStream = async (req, res) => {
+  const send = sseSetup(res);
+  const syncId = `FILE-IMPORT-STREAM-${Date.now()}`;
+  const start = Date.now();
+
+  const user = await authenticateSseRequest(req);
+  if (!user) {
+    send({ event: 'error', message: 'Unauthorized — invalid or missing token' });
+    return res.end();
+  }
+
+  send({ event: 'start', message: 'Starting import from Tally XML files…', syncId, direction: 'Tally → ERP' });
+
+  try {
+    const result = await importFromFiles();
+    const duration = `${((Date.now() - start)/1000).toFixed(1)}s`;
+
+    send({
+      event: 'summary',
+      direction: 'Tally → ERP',
+      message: result.ok ? `File import complete — ${result.records} records processed in ${duration}` : `File import failed — ${result.error}`,
+      stats: { ...result, duration },
+    });
+    send({ event: 'done', ...result, duration });
+  } catch (err) {
+    send({ event: 'error', message: `Import failed: ${err.message}`, error: err.message });
+  }
+
+  res.end();
+};
+
+// ─── SALES REGISTER: Import by Date Range (Tally → ERP) ──────────────────────
+/**
+ * POST /api/tally/import-sales-register
+ * Body: { fromDate: "2025-04-01", toDate: "2025-06-30" }
+ *
+ * Dedicated endpoint to forcibly pull Sales Register vouchers for a specific
+ * date range (e.g. April–June FY 2025-26).  Uses forceRefresh + explicit
+ * startDate / endDate so it always fetches regardless of lastSyncedDate.
+ *
+ * Saves vouchers to BOTH Invoice collection (for ERP invoice management)
+ * AND TallyVoucher collection (so Finance → Tally Ledger tab shows them).
+ */
+export const importSalesRegister = async (req, res) => {
+  try {
+    const { fromDate, toDate } = req.body;
+
+    if (!fromDate || !toDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'fromDate and toDate are required. Example: { "fromDate": "2025-04-01", "toDate": "2025-06-30" }',
+      });
+    }
+
+    const cfg = await TallyConfig.findOne();
+    if (!cfg?.tallyLocalUrl) {
+      return res.status(400).json({
+        success: false,
+        message: 'Tally Local URL is not configured. Go to Tally Settings first.',
+      });
+    }
+
+    console.log(`[SalesRegister] Importing Sales vouchers from ${fromDate} to ${toDate}`);
+
+    const result = await pullEntityFromTally('Sales', {
+      triggeredBy: req.user?._id,
+      startDate: new Date(fromDate),
+      endDate: new Date(toDate),
+      forceRefresh: true,    // ignore lastSyncedDate
+      forceChunk: true,      // use chunk mode so date range is respected
+    });
+
+    const message = result.ok
+      ? `Sales Register imported: ${result.records} vouchers (${result.created} new, ${result.updated} updated) for ${fromDate} → ${toDate}`
+      : `Sales Register import failed: ${result.error}`;
+
+    res.json({
+      success: result.ok,
+      data: result,
+      message,
+      dateRange: { fromDate, toDate },
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+};
+
+/**
+ * GET /api/tally/sales-invoices
+ * Query: ?fromDate=2025-04-01&toDate=2025-06-30&partyName=&page=1&limit=50
+ *
+ * Returns Sales Register invoices (imported from Tally) for a given date range.
+ * Searches both Invoice model (source: Tally) and TallyVoucher model (voucherType: Sales).
+ */
+export const getSalesInvoices = async (req, res) => {
+  try {
+    const { fromDate, toDate, partyName, search, page = 1, limit = 50 } = req.query;
+    const pageNum  = Math.max(1, parseInt(page));
+    const pageSize = Math.min(200, Math.max(1, parseInt(limit)));
+    const skip     = (pageNum - 1) * pageSize;
+
+    // ── Query TallyVoucher (Sales type) ──────────────────────────────────
+    const vFilter = { voucherType: 'Sales' };
+    if (fromDate || toDate) {
+      vFilter.voucherDate = {};
+      if (fromDate) vFilter.voucherDate.$gte = new Date(fromDate);
+      if (toDate) {
+        const end = new Date(toDate);
+        end.setHours(23, 59, 59, 999);
+        vFilter.voucherDate.$lte = end;
+      }
+    }
+    if (search) {
+      const re = new RegExp(search, 'i');
+      vFilter.$or = [{ partyName: re }, { voucherNumber: re }, { narration: re }];
+    } else if (partyName) {
+      vFilter.partyName = new RegExp(partyName, 'i');
+    }
+
+    const [vouchers, vTotal] = await Promise.all([
+      TallyVoucher.find(vFilter).sort({ voucherDate: -1 }).skip(skip).limit(pageSize).lean(),
+      TallyVoucher.countDocuments(vFilter),
+    ]);
+
+    // ── Normalise TallyVoucher into Sales Register rows ───────────────────
+    const rows = vouchers.map(v => {
+      const subtotal   = v.subtotal || v.inventoryEntries?.reduce((s, ie) => s + (ie.amount || 0), 0) || 0;
+      const taxTotal   = v.taxTotal || v.taxLines?.reduce((s, t) => s + Math.abs(t.amount), 0) || 0;
+      const grandTotal = v.amount   || subtotal + taxTotal;
+
+      const cgst = (v.taxLines || v.ledgerEntries || [])
+        .filter(t => t.ledgerName?.toLowerCase().includes('cgst'))
+        .reduce((s, t) => s + Math.abs(t.amount), 0);
+      const sgst = (v.taxLines || v.ledgerEntries || [])
+        .filter(t => t.ledgerName?.toLowerCase().includes('sgst'))
+        .reduce((s, t) => s + Math.abs(t.amount), 0);
+      const igst = (v.taxLines || v.ledgerEntries || [])
+        .filter(t => t.ledgerName?.toLowerCase().includes('igst'))
+        .reduce((s, t) => s + Math.abs(t.amount), 0);
+
+      return {
+        id:            v._id,
+        voucherNumber: v.voucherNumber,
+        date:          v.voucherDate,
+        partyName:     v.partyName,
+        partyGstin:    v.partyGstin || '',
+        placeOfSupply: v.placeOfSupply || '',
+        narration:     v.narration || '',
+        items: (v.inventoryEntries || []).map(ie => ({
+          name:   ie.stockItemName,
+          qty:    ie.qty,
+          rate:   ie.rate,
+          amount: ie.amount,
+        })),
+        subtotal,
+        cgst,
+        sgst,
+        igst,
+        taxTotal,
+        grandTotal,
+        source: 'Tally',
+      };
+    });
+
+    res.json({
+      success: true,
+      data: rows,
+      total: vTotal,
+      page: pageNum,
+      pageSize,
+      dateRange: { fromDate, toDate },
+      // legacy fields kept for backward compat
+      vouchers,
+      invoices: [],
+      voucherTotal: vTotal,
+      invoiceTotal: 0,
+      totalSalesRecords: vTotal,
     });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });

@@ -83,19 +83,17 @@ export const tallyWebhook = async (req, res) => {
         const unit    = (block.match(/<BASEUNITS>(.*?)<\/BASEUNITS>/i)?.[1]||'Nos').trim();
         const cost    = parseFloat(block.match(/<STANDARDCOST>(.*?)<\/STANDARDCOST>/i)?.[1])||0;
         const uMap    = {Nos:'units',Kg:'kg',Ltr:'liter',Mtr:'meter',Box:'box',Pcs:'piece'};
-        const sku     = name.replace(/[^A-Z0-9]/gi,'-').toUpperCase().slice(0,30);
-        const barcodeVal = guid
-          ? `TALLY-${guid.replace(/[^A-Z0-9]/gi,'').slice(0,20)}`
-          : `TALLY-${sku}-${Date.now()%100000}`;
-        const filter  = guid ? { tallyGuid: guid } : { name };
+        const cleanGuid = guid ? guid.replace(/[^A-Z0-9]/gi, '') : null;
+        const sku = cleanGuid ? `TALLY-${cleanGuid}` : name.replace(/[^A-Z0-9]/gi,'-').toUpperCase().slice(0,30);
+        const itemId = cleanGuid ? `TALLY-${cleanGuid}` : `TALLY-${sku}-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
         ops.push({ updateOne:{
-          filter,
+          filter: guid ? { tallyGuid: guid } : { name },
           update:{
-            $set:{ hsn, gst, unit:uMap[unit]||'units', costPrice:cost, unitPrice:cost,
+            $set:{ itemId, sku, hsn, gst, unit:uMap[unit]||'units', costPrice:cost, unitPrice:cost,
                    tallySynced:true, lastTallySync:new Date(), status:'Active', isActive:true,
                    ...(guid ? { tallyGuid:guid } : {}),
                    ...(alterId ? { tallyAlterId:alterId } : {}) },
-            $setOnInsert:{ itemId:`TALLY-${sku}`, sku, name, sellingPrice:cost, barcode:barcodeVal },
+            $setOnInsert:{ name, sellingPrice:cost, isActive: true },
           },
           upsert:true,
         }});

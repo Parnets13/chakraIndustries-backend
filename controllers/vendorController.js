@@ -24,20 +24,42 @@ export const createVendor = async (req, res) => {
 // GET /api/vendors
 export const getAllVendors = async (req, res) => {
   try {
-    const { search, category, status } = req.query;
+    const { search, category, status, page, limit } = req.query;
     const filter = {};
     if (category) filter.category = category;
     if (status) filter.status = status;
     if (search) {
       filter.$or = [
-        { companyName: { $regex: search, $options: 'i' } },
-        { vendorId: { $regex: search, $options: 'i' } },
-        { contactPerson: { $regex: search, $options: 'i' } },
-        { city: { $regex: search, $options: 'i' } },
+        { companyName:    { $regex: search, $options: 'i' } },
+        { vendorId:       { $regex: search, $options: 'i' } },
+        { contactPerson:  { $regex: search, $options: 'i' } },
+        { city:           { $regex: search, $options: 'i' } },
       ];
     }
-    const vendors = await Vendor.find(filter).sort({ createdAt: -1 });
-    res.json({ success: true, data: vendors });
+
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+    const skip = usePagination ? (pageNum - 1) * limitNum : 0;
+
+    const [vendors, totalCount] = await Promise.all([
+      Vendor.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(usePagination ? skip : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? Vendor.countDocuments(filter) : Promise.resolve(null),
+    ]);
+
+    const response = { success: true, data: vendors };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

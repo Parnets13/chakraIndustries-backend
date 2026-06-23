@@ -175,26 +175,22 @@ async function fetchStockItemsOneByOne(names) {
       }
     }
 
-    const sku      = name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30);
-    const barcode  = guid
-      ? `TALLY-${guid.replace(/[^A-Z0-9]/gi,'').slice(0,20)}`
-      : `TALLY-${sku}-${idx}`;
+    const cleanGuid = guid ? guid.replace(/[^A-Z0-9]/gi, '') : null;
+    const sku = cleanGuid ? `TALLY-${cleanGuid}` : name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30);
+    const itemId = cleanGuid ? `TALLY-${cleanGuid}` : `TALLY-${sku}-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
 
     ops.push({ updateOne: {
       filter: guid ? { tallyGuid: guid } : { name },
       update: {
         $set: {
+          itemId, sku,
           hsn, gst: gstRate, unit, costPrice: cost, unitPrice: cost,
           tallySynced: true, lastTallySync: new Date(),
           status: 'Active', isActive: true,
           ...(guid    ? { tallyGuid: guid }      : {}),
           ...(alterId ? { tallyAlterId: alterId } : {}),
         },
-        $setOnInsert: {
-          itemId:  `TALLY-${sku}-${idx}`,
-          sku:     `${sku}-${idx}`,
-          name, sellingPrice: cost, barcode,
-        },
+        $setOnInsert: { name, sellingPrice: cost },
       },
       upsert: true,
     }});

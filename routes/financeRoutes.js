@@ -1,4 +1,3 @@
-
 import express from 'express';
 import * as financeController from '../controllers/financeController.js';
 import { protect } from '../middleware/authMiddleware.js';
@@ -50,5 +49,12 @@ router.get('/vendor-debit-notes', protect, financeController.getVendorDebitNotes
 
 // Financial Reports
 router.get('/reports/:type', protect, financeController.getFinancialReports);
+
+// Tally Ledger
+router.get('/tally-ledger', protect, financeController.getTallyLedger);
+
+// Dynamic lookup lists (for modal dropdowns)
+router.get('/vendors-list', protect, financeController.getFinanceVendors);
+router.get('/dealers-list', protect, financeController.getFinanceDealers);
 
 export default router;

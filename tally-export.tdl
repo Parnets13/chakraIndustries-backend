@@ -1,0 +1,46 @@
+; Tally ERP Export TDL
+; Exports all inventory, ledgers, and vouchers to C:\TallyExport
+
+[Collection: DynamicInventory]
+  Type : StockItem
+  Fetch : *
+  
+[Collection: DynamicLedger]
+  Type : Ledger
+  Fetch : *
+  
+[Collection: DynamicVoucher]
+  Type : Voucher
+  Fetch : *
+
+[Report: TDLExportInventory]
+  Use : Export
+  Format : XML
+  Collection : DynamicInventory
+  Export : Yes
+  Export Filename : C:\TallyExport\items.xml
+  SVExportFormat : $$SysName:XML
+
+[Report: TDLExportLedger]
+  Use : Export
+  Format : XML
+  Collection : DynamicLedger
+  Export : Yes
+  Export Filename : C:\TallyExport\ledgers.xml
+  SVExportFormat : $$SysName:XML
+
+[Report: TDLExportVoucher]
+  Use : Export
+  Format : XML
+  Collection : DynamicVoucher
+  Export : Yes
+  Export Filename : C:\TallyExport\vouchers.xml
+  SVExportFormat : $$SysName:XML
+
+[Menu: Gateway of Tally]
+  Add : Item: Before:Quit:Export All to XML, Action:TDLExportAll
+  
+[Action: TDLExportAll]
+  Report : TDLExportInventory
+  Report : TDLExportLedger
+  Report : TDLExportVoucher

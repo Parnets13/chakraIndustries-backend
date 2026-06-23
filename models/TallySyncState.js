@@ -26,7 +26,7 @@ const tallySyncStateSchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true,
-    enum: ['Vouchers', 'Ledgers', 'Items', 'Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra'],
+    enum: ['Vouchers', 'Ledgers', 'Items', 'Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'],
   },
 
   // Last date fully synced (incremental sync starts from here)

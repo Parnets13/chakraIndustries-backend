@@ -69,55 +69,107 @@ async function post(url, xml, timeoutMs = 45000) {
   }
 }
 
-// ── STOCK ITEMS — one by one ──────────────────────────────────────────────────
+// ── STOCK ITEMS — collection fetch (all at once) ──────────────────────────────
+//
+// Replaces the old two-step approach (name-list report → per-item report) which
+// used REPORTNAME="List of Stock Items" — a report that does not exist in Tally
+// and caused: "Could not find Report 'List of Stock Items'!"
+//
+// Now uses a single Collection-based Export request with TYPE=StockItem so Tally
+// returns all items with full detail in one response.
+
+function buildStockItemCollectionXml(company) {
+  const companyTag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+  return `<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>AllStockItems</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        ${companyTag}
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="AllStockItems">
+            <TYPE>StockItem</TYPE>
+            <FETCH>*</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+}
 
 async function syncStockItems(url, cfg, onProgress) {
-  const company = cfg.companyName || process.env.TALLY_COMPANY || 'SRI CHAKRA INDUSTRIES';
+  const company = (cfg.companyName || process.env.TALLY_COMPANY || 'SRI CHAKRA INDUSTRIES').trim();
 
-  onProgress({ event: 'phase', entity: 'Items', message: 'Fetching stock item list from Tally...' });
+  onProgress({ event: 'phase', entity: 'Items', message: 'Fetching stock items from Tally (collection)...' });
 
-  // 1. Get name list
-  const listXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>List of Stock Items</REPORTNAME><STATICVARIABLES><SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-  const listResp = await post(url, listXml, 60000);
+  // Single collection request — returns all stock items with full detail
+  const collectionXml = buildStockItemCollectionXml(company);
+  let resp = await post(url, collectionXml, 90000);
 
-  let names = [];
-  const nameMatches = [...(listResp || '').matchAll(/<STOCKITEM[^>]+NAME="([^"]+)"/gi)];
-  const seen = new Set();
-  names = nameMatches.map(m => m[1]?.trim()).filter(n => n && !seen.has(n) && seen.add(n));
+  // Fallback: try alternate collection name if the first returned nothing
+  if (!resp || !resp.includes('<STOCKITEM')) {
+    LOG('Primary collection (AllStockItems) returned no items, trying StockItems...');
+    const fallbackXml = buildStockItemCollectionXml(company).replace(/AllStockItems/g, 'StockItems');
+    resp = await post(url, fallbackXml, 90000);
+  }
 
-  if (!names.length) {
+  if (!resp || !resp.includes('<STOCKITEM')) {
     onProgress({ event: 'phase_done', entity: 'Items', saved: 0, message: 'No stock items found in Tally.' });
     return 0;
   }
 
-  onProgress({ event: 'phase', entity: 'Items', total: names.length, message: `Found ${names.length} stock items — syncing one by one...` });
+  const matches = [...resp.matchAll(/<STOCKITEM([^>]*)>([\s\S]*?)<\/STOCKITEM>/gi)];
+  const total = matches.length;
 
+  if (!total) {
+    onProgress({ event: 'phase_done', entity: 'Items', saved: 0, message: 'No stock items parsed from Tally response.' });
+    return 0;
+  }
+
+  onProgress({ event: 'phase', entity: 'Items', total, message: `Found ${total} stock items — saving...` });
+
+  const UNIT_MAP = { Nos:'units', Kg:'kg', Ltr:'liter', Mtr:'meter', Box:'box', Pcs:'piece' };
   let saved = 0;
-  for (let i = 0; i < names.length; i++) {
-    const name = names[i];
 
-    // Fetch detail for this single item
-    const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Stock Item</REPORTNAME><STATICVARIABLES><SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><STOCKITEMNAME>${esc(name)}</STOCKITEMNAME></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
+  for (let i = 0; i < matches.length; i++) {
+    const attrs = matches[i][1];
+    const block = matches[i][2];
 
-    const resp = await post(url, xml, 30000);
-
-    let guid = null, alterId = null, hsn = '', gstRate = 0, unit = 'units', cost = 0;
-    if (resp?.includes('<STOCKITEM')) {
-      const m = resp.match(/<STOCKITEM[^>]*>([\s\S]*?)<\/STOCKITEM>/i);
-      if (m) {
-        const block = m[1];
-        guid    = gGuid(block);
-        alterId = gAlter(block);
-        hsn     = gVal(block, 'HSNCODE');
-        gstRate = parseFloat(gVal(block, 'GSTRATE')) || 0;
-        const rawUnit = gVal(block, 'BASEUNITS') || 'Nos';
-        unit    = { Nos:'units', Kg:'kg', Ltr:'liter', Mtr:'meter', Box:'box', Pcs:'piece' }[rawUnit] || 'units';
-        cost    = parseFloat(gVal(block, 'STANDARDCOST')) || 0;
-      }
+    // Extract name: prefer NAME attribute on the tag, then inner tags
+    let name = '';
+    const nameAttr = attrs.match(/NAME="([^"]*)"/i);
+    if (nameAttr) name = decodeXml(nameAttr[1].trim());
+    if (!name) {
+      const langNameMatch = block.match(/<LANGUAGENAME\.LIST>[\s\S]*?<NAME\.LIST[\s\S]*?<NAME>([\s\S]*?)<\/NAME>/i);
+      if (langNameMatch) name = decodeXml(langNameMatch[1].trim());
     }
+    if (!name) {
+      const innerName = block.match(/<NAME[^>]*>([\s\S]*?)<\/NAME>/i);
+      if (innerName) name = decodeXml(innerName[1].trim());
+    }
+    if (!name) continue;
 
-    const sku     = name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30);
-    const barcode = guid ? `TALLY-${guid.replace(/[^A-Z0-9]/gi,'').slice(0,20)}` : `TALLY-${sku}-${i}`;
+    const guid    = gGuid(block);
+    const alterId = gAlter(block);
+    const hsn     = gVal(block, 'HSNCODE');
+    const gstRate = parseFloat(gVal(block, 'GSTRATE')) || 0;
+    const rawUnit = gVal(block, 'BASEUNITS') || 'Nos';
+    const unit    = UNIT_MAP[rawUnit] || 'units';
+    const cost    = parseFloat(gVal(block, 'STANDARDCOST')) || 0;
+
+    // Use full GUID as identifier — no truncation
+    const cleanGuid = guid ? guid.replace(/[^A-Z0-9]/gi, '') : null;
+    const sku    = cleanGuid ? `TALLY-${cleanGuid}` : name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30);
+    const itemId = cleanGuid ? `TALLY-${cleanGuid}` : `TALLY-${sku}-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
 
     try {
       await ItemMaster.findOneAndUpdate(
@@ -131,8 +183,8 @@ async function syncStockItems(url, cfg, onProgress) {
             ...(alterId ? { tallyAlterId: alterId } : {}),
           },
           $setOnInsert: {
-            itemId: `TALLY-${sku}-${i}`, sku: `${sku}-${i}`,
-            name, sellingPrice: cost, barcode,
+            itemId, sku,
+            name, sellingPrice: cost,
           },
         },
         { upsert: true }
@@ -142,20 +194,17 @@ async function syncStockItems(url, cfg, onProgress) {
       LOG(`ItemMaster upsert error for "${name}":`, e.message);
     }
 
-    // Emit one-by-one progress
     onProgress({
       event  : 'record',
       entity : 'Items',
       name,
       index  : i + 1,
-      total  : names.length,
+      total,
       saved,
     });
-
-    await sleep(80); // small pause to avoid overwhelming Tally
   }
 
-  onProgress({ event: 'phase_done', entity: 'Items', saved, total: names.length });
+  onProgress({ event: 'phase_done', entity: 'Items', saved, total });
   return saved;
 }
 
@@ -201,8 +250,19 @@ async function syncLedgers(url, cfg, onProgress) {
     const parent  = decodeXml(gVal(block, 'PARENT'));
     const gstNum  = decodeXml(gVal(block, 'PARTYGSTIN'));
     const obBal   = parseFloat(gVal(block, 'OPENINGBALANCE')) || 0;
-    const email   = decodeXml(gVal(block, 'EMAIL'));
-    const phone   = decodeXml(gVal(block, 'LEDGERMOBILE'));
+    // Parse closing balance if available from Tally
+    const cbRaw   = gVal(block, 'CLOSINGBALANCE');
+    const cbBal   = cbRaw ? parseFloat(cbRaw) : null;
+    const email   = decodeXml(gVal(block, 'EMAIL') || gVal(block, 'LEDGEREMAIL') || gVal(block, 'MAILINGEMAIL'));
+    const phone   = decodeXml(
+      gVal(block, 'LEDGERMOBILE') ||
+      gVal(block, 'MOBILE')       ||
+      gVal(block, 'MOBILENO')     ||
+      gVal(block, 'TELEPHONE')    ||
+      gVal(block, 'PHONE')        ||
+      gVal(block, 'PHONENO')      ||
+      gVal(block, 'CONTACT')
+    );
     const contactPerson = decodeXml(gVal(block, 'MAILINGNAME'));
     const addrLines = block ? [...block.matchAll(/<ADDRESS>([\s\S]*?)<\/ADDRESS>/gi)].map(a => decodeXml(a[1].trim())).filter(Boolean) : [];
     const tallyAddress = addrLines.slice(0, 2).join(', ');
@@ -219,6 +279,8 @@ async function syncLedgers(url, cfg, onProgress) {
         {
           $set: {
             openingBalance: obBal, syncedWithTally: true, lastTallySync: new Date(),
+            // Set closing balance if available from Tally, otherwise will be calculated later from vouchers
+            ...(cbBal !== null ? { closingBalance: cbBal, closingBalanceType: cbBal >= 0 ? 'Dr' : 'Cr', closingBalanceCalculatedAt: new Date() } : {}),
             ledgerGroup: isCred ? 'Sundry Creditors' : isDebt ? 'Sundry Debtors' : (parent || 'General'),
             ...(email ? { email } : {}), ...(phone ? { phone } : {}),
             ...(gstNum ? { gstNumber: gstNum } : {}),
@@ -241,7 +303,8 @@ async function syncLedgers(url, cfg, onProgress) {
       let cleanPhone = rawPhone;
       if (cleanPhone.length === 12 && cleanPhone.startsWith('91')) cleanPhone = cleanPhone.slice(2);
       if (cleanPhone.length === 11 && cleanPhone.startsWith('0'))  cleanPhone = cleanPhone.slice(1);
-      const sp = cleanPhone.length === 10 ? cleanPhone : (rawPhone.slice(0, 15) || '0000000000');
+      // Only store a valid 10-digit number; fall back to empty string (never store placeholder)
+      const sp = cleanPhone.length === 10 ? cleanPhone : '';
       const se = email || `${name.replace(/\s+/g,'').toLowerCase().slice(0,30)}@tally.sync`;
 
       if (isCred) {
@@ -251,7 +314,7 @@ async function syncLedgers(url, cfg, onProgress) {
             {
               $set: {
                 tallySynced: true, lastTallySync: new Date(),
-                ...(sp !== '0000000000' ? { phone: sp } : {}), ...(email ? { email: se } : {}),
+                ...(sp ? { phone: sp } : {}), ...(email ? { email: se } : {}),
                 ...(contactPerson ? { contactPerson } : {}), ...(tallyAddress ? { address: tallyAddress } : {}),
                 ...(tallyCity  ? { city: tallyCity }   : {}), ...(tallyState ? { state: tallyState } : {}),
                 ...(gstNum ? { gstNumber: gstNum } : {}),
@@ -259,9 +322,11 @@ async function syncLedgers(url, cfg, onProgress) {
               },
               $setOnInsert: {
                 vendorId: `VND-TALLY-${i}`, companyName: name, category: 'General',
-                contactPerson: contactPerson || name, phone: sp, email: se,
-                address: tallyAddress || 'Imported from Tally', city: tallyCity || 'Unknown',
-                state: tallyState || 'Unknown', pincode: '000000', status: 'Active',
+                contactPerson: contactPerson || name, phone: sp || '',  email: se,
+                address: tallyAddress || 'Imported from Tally',
+                ...(tallyCity  ? { city: tallyCity }   : {}),
+                ...(tallyState ? { state: tallyState } : {}),
+                pincode: '000000', status: 'Active',
               },
             },
             { upsert: true }
@@ -275,7 +340,7 @@ async function syncLedgers(url, cfg, onProgress) {
             {
               $set: {
                 tallySynced: true, lastTallySync: new Date(),
-                ...(sp !== '0000000000' ? { phone: sp } : {}), ...(email ? { email: se } : {}),
+                ...(sp ? { phone: sp } : {}), ...(email ? { email: se } : {}),
                 ...(contactPerson ? { contact: contactPerson } : {}),
                 ...(tallyAddress ? { address: tallyAddress } : {}), ...(tallyCity ? { city: tallyCity } : {}),
                 ...(gstNum ? { gstNumber: gstNum } : {}),
@@ -283,7 +348,9 @@ async function syncLedgers(url, cfg, onProgress) {
               },
               $setOnInsert: {
                 clientId: `CLT-TALLY-${i}`, name, contact: contactPerson || name,
-                phone: sp, email: se, city: tallyCity || 'Unknown', category: 'Trading', status: 'Active',
+                phone: sp || '', email: se,
+                ...(tallyCity ? { city: tallyCity } : {}),
+                category: 'Trading', status: 'Active',
               },
             },
             { upsert: true }
@@ -356,41 +423,109 @@ async function syncVouchers(url, cfg, onProgress) {
       const vNo     = gVal(block, 'VOUCHERNUMBER');
       const party   = gVal(block, 'PARTYLEDGERNAME');
       const rawDate = gVal(block, 'DATE');
-      const amount  = Math.abs(parseFloat(gVal(block, 'AMOUNT')) || 0);
       const narrn   = gVal(block, 'NARRATION');
       const vDate   = rawDate.length === 8
         ? new Date(`${rawDate.slice(0,4)}-${rawDate.slice(4,6)}-${rawDate.slice(6,8)}`)
         : new Date();
 
       try {
-        if (vtype === 'Sales' || vtype === 'Purchase') {
-          if (!vNo) continue;
+        // Parse ledger entries
+        const le = [];
+        for (const lex of block.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/gi)) {
+          const lb = lex[1];
+          const ln = gVal(lb, 'LEDGERNAME');
+          if (ln) le.push({ ledgerName: ln, amount: parseFloat(gVal(lb, 'AMOUNT')) || 0, isDeemed: gVal(lb, 'ISDEEMEDPOSITIVE') === 'Yes' });
+        }
+
+        // Parse inventory entries — Tally Sales/Purchase use ALLINVENTORYENTRIES.LIST
+        const ie = [];
+        const invPattern = /<ALLINVENTORYENTRIES\.LIST>([\s\S]*?)<\/ALLINVENTORYENTRIES\.LIST>|<INVENTORYENTRIES\.LIST>([\s\S]*?)<\/INVENTORYENTRIES\.LIST>/gi;
+        for (const inv of block.matchAll(invPattern)) {
+          const ib = inv[1] || inv[2];
+          const sn = gVal(ib, 'STOCKITEMNAME');
+          if (!sn) continue;
+          // BILLEDQTY / ACTUALQTY — may be "1 Nos" → strip unit
+          const rawQty  = gVal(ib, 'BILLEDQTY') || gVal(ib, 'ACTUALQTY') || '0';
+          const rawRate = gVal(ib, 'RATE') || '0';
+          const qty  = parseFloat(rawQty.replace(/[^\d.-]/g, ''))  || 0;
+          const rate = parseFloat(rawRate.replace(/[^\d.-]/g, '')) || 0;
+          const amt  = Math.abs(parseFloat(gVal(ib, 'AMOUNT')) || 0);
+          ie.push({ stockItemName: sn, qty, rate, amount: amt });
+        }
+
+        // ── Amount calculation ────────────────────────────────────────────
+        // Priority 1: sum inventory items + tax ledgers (Sales/Purchase)
+        // Priority 2: max absolute ledger amount (Payment/Receipt/Journal)
+        // Priority 3: top-level AMOUNT fallback
+        let computedAmount = 0;
+        if (ie.length > 0) {
+          const itemTotal = ie.reduce((s, i) => s + i.amount, 0);
+          const taxTotal  = le.reduce((s, l) => {
+            const n = l.ledgerName.toLowerCase();
+            if (n.includes('cgst') || n.includes('sgst') || n.includes('igst') ||
+                n.includes('tax') || n.includes('gst') || n.includes('round')) {
+              return s + Math.abs(l.amount);
+            }
+            return s;
+          }, 0);
+          computedAmount = itemTotal + taxTotal;
+        } else if (le.length > 0) {
+          computedAmount = Math.max(...le.map(l => Math.abs(l.amount)));
+          if (!isFinite(computedAmount)) computedAmount = 0;
+        }
+        const finalAmount = computedAmount > 0 ? computedAmount : Math.abs(parseFloat(gVal(block, 'AMOUNT')) || 0);
+
+        const filter = guid ? { tallyGuid: guid } : (vNo ? { voucherNumber: vNo, voucherType: vtype } : null);
+        if (!filter) continue;
+
+        await TallyVoucher.findOneAndUpdate(
+          filter,
+          {
+            $set: {
+              voucherType: vtype,
+              voucherNumber: vNo || `TALLY-${Date.now()}`,
+              partyName: party,
+              partyLedgerName: party,
+              amount: finalAmount,
+              narration: narrn,
+              voucherDate: vDate,
+              ledgerEntries: le,
+              inventoryEntries: ie,
+              source: 'Tally',
+              syncedAt: new Date(),
+              ...(guid    ? { tallyGuid: guid }      : {}),
+              ...(alterId ? { tallyAlterId: alterId } : {}),
+            },
+          },
+          { upsert: true }
+        );
+
+        // Mirror Sales & Purchase into Invoice so they appear in the Invoices page
+        if ((vtype === 'Sales' || vtype === 'Purchase') && vNo) {
           await Invoice.findOneAndUpdate(
             guid ? { tallyGuid: guid } : { invoiceNo: vNo },
             {
-              $set: { ...(guid ? { tallyGuid: guid } : {}), ...(alterId ? { tallyAlterId: alterId } : {}) },
-              $setOnInsert: { invoiceNo: vNo, partyName: party, invoiceDate: vDate, grandTotal: amount, source: 'manual', status: 'Sent', invoiceType: 'single', items: [] },
+              $set: {
+                partyName: party,
+                grandTotal: finalAmount,
+                ...(guid    ? { tallyGuid: guid }      : {}),
+                ...(alterId ? { tallyAlterId: alterId } : {}),
+              },
+              $setOnInsert: {
+                invoiceNo: vNo,
+                partyName: party,
+                invoiceDate: vDate,
+                grandTotal: amount,
+                source: 'Tally',
+                status: 'Sent',
+                invoiceType: 'single',
+                items: [],
+              },
             },
             { upsert: true }
-          );
-        } else {
-          const le = [];
-          for (const lex of block.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/gi)) {
-            const lb = lex[1];
-            const ln = gVal(lb, 'LEDGERNAME');
-            if (ln) le.push({ ledgerName: ln, amount: parseFloat(gVal(lb, 'AMOUNT')) || 0, isDeemed: gVal(lb, 'ISDEEMEDPOSITIVE') === 'Yes' });
-          }
-          const filter = guid ? { tallyGuid: guid } : (vNo ? { voucherNumber: vNo, voucherType: vtype } : null);
-          if (!filter) continue;
-          await TallyVoucher.findOneAndUpdate(
-            filter,
-            {
-              $set: { amount, narration: narrn, voucherDate: vDate, ledgerEntries: le, source: 'Tally', syncedAt: new Date(), ...(guid ? { tallyGuid: guid } : {}), ...(alterId ? { tallyAlterId: alterId } : {}) },
-              $setOnInsert: { voucherType: vtype, voucherNumber: vNo || `TALLY-${Date.now()}`, partyName: party },
-            },
-            { upsert: true }
-          );
+          ).catch(e => LOG(`Invoice mirror error (${vtype} ${vNo}): ${e.message}`));
         }
+
         chunkSaved++;
         totalSaved++;
       } catch (e) { LOG(`Voucher upsert error (${vtype} ${vNo}):`, e.message); }
@@ -436,27 +571,38 @@ export async function runStreamingSync({ type = 'Full', cfg, triggeredBy, onProg
 
   const t = type.toLowerCase();
   let totalSaved = 0;
+  const modules = [];
+  const startedAt = Date.now();
 
   try {
     if (t === 'full' || t === 'items') {
-      totalSaved += await syncStockItems(url, cfg, onProgress);
+      const s = await syncStockItems(url, cfg, onProgress);
+      totalSaved += s;
+      modules.push({ name: 'Items', count: s, created: s, updated: 0, timestamp: new Date(), route: '/item-master' });
     }
     if (t === 'full' || t === 'ledgers') {
-      totalSaved += await syncLedgers(url, cfg, onProgress);
+      const s = await syncLedgers(url, cfg, onProgress);
+      totalSaved += s;
+      modules.push({ name: 'Ledgers', count: s, created: s, updated: 0, timestamp: new Date(), route: '/finance/tally-ledger' });
     }
     if (t === 'full' || t === 'vouchers') {
-      totalSaved += await syncVouchers(url, cfg, onProgress);
+      const s = await syncVouchers(url, cfg, onProgress);
+      totalSaved += s;
+      modules.push({ name: 'Vouchers', count: s, created: s, updated: 0, timestamp: new Date(), route: '/finance/tally-ledger' });
     }
 
-    // Log to DB
+    const duration = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+
+    // Log to DB — now with per-module breakdown
     await TallySyncLog.create({
-      syncId    : `STREAM-${Date.now()}`,
-      type      : type === 'Full' ? 'Full' : type,
-      direction : 'Tally → ERP',
-      status    : 'Success',
-      records   : totalSaved,
-      duration  : '(streaming)',
-      triggeredBy: triggeredBy || null,
+      syncId      : `STREAM-${Date.now()}`,
+      type        : type === 'Full' ? 'Full' : type,
+      direction   : 'Tally → ERP',
+      status      : 'Success',
+      records     : totalSaved,
+      duration,
+      modules,
+      triggeredBy : triggeredBy || null,
     }).catch(() => {});
 
     await TallyConfig.findOneAndUpdate({}, { $set: { lastSyncAt: new Date(), connectionStatus: 'Connected' } }, { upsert: true });
@@ -468,14 +614,15 @@ export async function runStreamingSync({ type = 'Full', cfg, triggeredBy, onProg
     onProgress({ event: 'error', message: err.message });
 
     await TallySyncLog.create({
-      syncId    : `STREAM-${Date.now()}`,
-      type      : 'Full',
-      direction : 'Tally → ERP',
-      status    : 'Failed',
-      error     : err.message,
-      records   : totalSaved,
-      duration  : '(streaming)',
-      triggeredBy: triggeredBy || null,
+      syncId      : `STREAM-${Date.now()}`,
+      type        : 'Full',
+      direction   : 'Tally → ERP',
+      status      : 'Failed',
+      error       : err.message,
+      records     : totalSaved,
+      duration    : `${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+      modules,
+      triggeredBy : triggeredBy || null,
     }).catch(() => {});
 
     throw err;

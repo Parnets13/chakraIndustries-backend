@@ -20,8 +20,10 @@ const clientSchema = new mongoose.Schema(
     },
     phone: {
       type: String,
-      required: [true, 'Phone is required'],
-      match: [/^\d{10}$/, 'Phone must be exactly 10 digits'],
+      trim: true,
+      default: '',
+      // Not required — Tally ledgers often have no phone; we store what we have
+      match: [/^(\d{10}|\d{0})?$/, 'Phone must be 10 digits or empty'],
     },
     email: {
       type: String,

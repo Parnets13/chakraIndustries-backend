@@ -20,18 +20,42 @@ const generatePOId = async () => {
 // Get all POs
 export const getAllPOs = async (req, res) => {
   try {
-    const { status, vendor } = req.query;
+    const { status, vendor, search, page, limit } = req.query;
     const filter = {};
     if (status) filter.status = status;
     if (vendor) filter.vendor = vendor;
+    if (search) {
+      filter.$or = [
+        { poId: { $regex: search, $options: 'i' } },
+      ];
+    }
 
-    const pos = await PurchaseOrder.find(filter)
-      .populate('vendor')
-      .populate('linkedRFQ', 'rfqId title')
-      .populate('sentHistory.sentBy', 'name email')
-      .sort({ createdAt: -1 });
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+    const skip = usePagination ? (pageNum - 1) * limitNum : 0;
 
-    res.json({ success: true, data: pos });
+    const [pos, totalCount] = await Promise.all([
+      PurchaseOrder.find(filter)
+        .populate('vendor')
+        .populate('linkedRFQ', 'rfqId title')
+        .populate('sentHistory.sentBy', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(usePagination ? skip : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? PurchaseOrder.countDocuments(filter) : Promise.resolve(null),
+    ]);
+
+    const response = { success: true, data: pos };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
