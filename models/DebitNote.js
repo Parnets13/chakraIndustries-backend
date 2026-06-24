@@ -10,12 +10,14 @@ const debitNoteItemSchema = new mongoose.Schema({
 
 const debitNoteSchema = new mongoose.Schema({
   dnId:           { type: String, unique: true, required: true },
+  vendorId:       { type: mongoose.Schema.Types.ObjectId, ref: 'Vendor', default: null },
   vendorName:     { type: String, required: true },
   vendorEmail:    { type: String, default: '' },
   vendorGST:      { type: String, default: '' },
   vendorAddress:  { type: String, default: '' },
   grnId:          { type: String, default: '' },
   poId:           { type: String, default: '' },
+  invoiceNumber:  { type: String, default: '' },
   mrId:           { type: String, default: '' },   // linked material return
   debitAmount:    { type: Number, default: 0 },
   gstAmount:      { type: Number, default: 0 },

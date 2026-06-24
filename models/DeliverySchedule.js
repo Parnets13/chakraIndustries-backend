@@ -10,7 +10,7 @@ const deliveryScheduleSchema = new mongoose.Schema(
     },
     quotationId: {
       type: String,
-      required: [true, 'Quotation ID is required']
+      index: true
     },
     orderId: {
       type: String,

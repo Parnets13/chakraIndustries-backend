@@ -1,4 +1,6 @@
 import BOM from '../models/BOM.js';
+import ItemMaster from '../models/ItemMaster.js';
+import InventoryItem from '../models/InventoryItem.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function generateBomId() {
@@ -29,10 +31,19 @@ export const getAllBOMs = async (req, res) => {
     if (type)     filter.type = type;
 
     const boms = await BOM.find(filter)
+      .populate('productItemMasterId', 'itemId sku name unit description')
       .populate('oemBrand', 'brandId name code color status')
+      .populate({
+        path: 'components.itemMasterId',
+        select: 'itemId sku name unit description'
+      })
       .populate({
         path: 'components.vendorId',
         select: 'vendorId companyName'
+      })
+      .populate({
+        path: 'components.preferredVendorId',
+        select: 'companyName name vendorId email contactPerson'
       })
       .populate({
         path: 'components.oemBrand',
@@ -63,10 +74,19 @@ export const getAllBOMs = async (req, res) => {
 export const getBOMById = async (req, res) => {
   try {
     const bom = await BOM.findById(req.params.id)
+      .populate('productItemMasterId', 'itemId sku name unit description')
       .populate('oemBrand', 'brandId name code color status')
+      .populate({
+        path: 'components.itemMasterId',
+        select: 'itemId sku name unit description'
+      })
       .populate({
         path: 'components.vendorId',
         select: 'vendorId companyName contactPerson email phone'
+      })
+      .populate({
+        path: 'components.preferredVendorId',
+        select: 'companyName name vendorId email contactPerson'
       })
       .populate({
         path: 'components.oemBrand',
@@ -108,10 +128,32 @@ export const getBOMVersions = async (req, res) => {
 // ── CREATE BOM ────────────────────────────────────────────────────────────────
 export const createBOM = async (req, res) => {
   try {
-    const { product } = req.body;
+    const { product, productItemMasterId } = req.body;
     if (!product?.trim()) return res.status(400).json({ success: false, message: 'Product name is required' });
+    let productCode = req.body.productCode || '';
+    let uom = req.body.uom || 'Set';
+    
+    if (productItemMasterId) {
+      const productItem = await ItemMaster.findById(productItemMasterId);
+      if (productItem) {
+        productCode = productItem.sku;
+        uom = productItem.unit;
+      }
+    }
+
     const bomId = await generateBomId();
-    const bom = await BOM.create({ bomId, ...req.body, status: 'Draft', approvalStatus: 'Draft' });
+    const bom = await BOM.create({ 
+      bomId, 
+      ...req.body, 
+      productCode, 
+      uom,
+      status: 'Draft', 
+      approvalStatus: 'Draft' 
+    });
+    
+    // Populate product item master
+    await bom.populate('productItemMasterId', 'itemId sku name unit description');
+    
     res.status(201).json({ success: true, message: 'BOM created', data: { ...bom.toObject(), componentCount: 0, materialCost: 0, totalCost: 0 } });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
@@ -226,14 +268,58 @@ export const addComponent = async (req, res) => {
   try {
     const bom = await BOM.findById(req.params.id);
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
-    const { itemName, qty } = req.body;
-    if (!itemName?.trim()) return res.status(400).json({ success: false, message: 'Item name is required' });
-    if (!qty || qty <= 0)  return res.status(400).json({ success: false, message: 'Quantity must be > 0' });
 
-    bom.components.push(req.body);
+    const { itemMasterId, qty, scrapFactor } = req.body;
+    if (!itemMasterId) return res.status(400).json({ success: false, message: 'Item ID is required' });
+    if (!qty || qty <= 0) return res.status(400).json({ success: false, message: 'Quantity must be > 0' });
+
+    // Try ItemMaster first, then fall back to InventoryItem
+    let itemName, itemCode, itemUnit, itemCost, resolvedMasterId;
+
+    const masterItem = await ItemMaster.findById(itemMasterId).catch(() => null);
+    if (masterItem) {
+      itemName         = masterItem.name;
+      itemCode         = masterItem.sku;
+      itemUnit         = masterItem.unit;
+      itemCost         = masterItem.costPrice || 0;
+      resolvedMasterId = masterItem._id;
+    } else {
+      // Try InventoryItem (items from /inventory/stock)
+      const invItem = await InventoryItem.findById(itemMasterId).catch(() => null);
+      if (!invItem) return res.status(404).json({ success: false, message: 'Item not found in Item Master or Inventory' });
+      itemName         = invItem.name || invItem.sku || 'Unknown';
+      itemCode         = invItem.sku  || invItem.itemCode || '';
+      itemUnit         = invItem.unit || 'Nos';
+      itemCost         = invItem.unitPrice || 0;
+      resolvedMasterId = invItem.itemMasterId || invItem._id; // prefer linked ItemMaster ID
+    }
+
+    // Check for duplicates by resolved ID
+    const alreadyExists = bom.components.find(
+      c => String(c.itemMasterId) === String(resolvedMasterId)
+    );
+    if (alreadyExists) return res.status(400).json({ success: false, message: `"${itemName}" is already in this BOM` });
+
+    bom.components.push({
+      ...req.body,
+      itemMasterId: resolvedMasterId,
+      itemName,
+      itemCode,
+      description: req.body.description || '',
+      unit:        req.body.unit || itemUnit,
+      qty,
+      scrapFactor: scrapFactor || 0,
+      unitCost:    req.body.unitCost != null ? req.body.unitCost : itemCost,
+    });
+
     await bom.save();
+    await bom.populate('components.itemMasterId', 'itemId sku name unit description');
+    await bom.populate('components.preferredVendorId', 'companyName vendorId email');
+
     res.status(201).json({ success: true, message: 'Component added', data: { ...bom.toObject(), ...calcCosts(bom) } });
-  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
 };
 
 export const updateComponent = async (req, res) => {

@@ -22,6 +22,9 @@ const invoiceSchema = new mongoose.Schema({
   invoiceNo:    { type: String, unique: true, required: true },
   invoiceDate:  { type: Date, default: Date.now },
   dueDate:      { type: Date },
+  // Link to dealer and sales order
+  dealerId:     { type: mongoose.Schema.Types.ObjectId, ref: 'Dealer' },
+  salesOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'SalesOrder' },
 
   // Billed To
   partyName:    { type: String, required: true },
@@ -108,6 +111,26 @@ const invoiceSchema = new mongoose.Schema({
   partyPostal:         { type: String, default: '' },
   partyCountry:        { type: String, default: '' },
   serialNo:            { type: Number, default: 0 },    // sequential upload serial
+  // ── Stock source tracking ────────────────────────────────────────────────────
+  // Distinguishes GRN-triggered invoices from manual stock entry invoices
+  invoiceSource: {
+    type: String,
+    enum: ['manual', 'excel_upload', 'grn_receipt', 'manual_stock_entry', 'sales_order'],
+    default: 'manual',
+  },
+  // Link to GRN when invoice is auto-generated from QC approval
+  grnId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'GRN',
+    default: null,
+  },
+  // Link to InventoryItem when invoice is auto-generated from manual stock addition
+  inventoryItemId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'InventoryItem',
+    default: null,
+  },
+
   // Tally sync tracking
   tallySync:           { type: Boolean, default: false },
   tallySyncAt:         { type: Date },

@@ -1,11 +1,23 @@
 import PurchaseRequisition from '../models/PurchaseRequisition.js';
+import { logActivity } from '../utils/activityLogger.js';
 
 const generatePRId = async () => {
-  const last = await PurchaseRequisition.findOne({}, {}, { sort: { createdAt: -1 } });
   const year = new Date().getFullYear();
-  if (!last) return `PR-${year}-001`;
-  const num = parseInt(last.prId.split('-')[2] || '0') + 1;
-  return `PR-${year}-${String(num).padStart(3, '0')}`;
+  
+  // Find the highest PR number for the current year
+  const lastPR = await PurchaseRequisition.findOne(
+    { prId: { $regex: `^PR-${year}-\\d{3}$` } },
+    {},
+    { sort: { prId: -1 } }
+  );
+
+  let nextNum = 1;
+  if (lastPR) {
+    const lastNum = parseInt(lastPR.prId.split('-')[2] || '0');
+    nextNum = lastNum + 1;
+  }
+
+  return `PR-${year}-${String(nextNum).padStart(3, '0')}`;
 };
 
 const calcTotal = (items) =>
@@ -14,9 +26,40 @@ const calcTotal = (items) =>
 // POST /api/purchase-requisitions
 export const createPurchaseRequisition = async (req, res) => {
   try {
-    const prId = await generatePRId();
-    const totalValue = calcTotal(req.body.items || []);
-    const pr = await PurchaseRequisition.create({ ...req.body, prId, totalValue });
+    let pr;
+    let attempts = 0;
+    const maxAttempts = 3;
+
+    while (attempts < maxAttempts) {
+      try {
+        const prId = await generatePRId();
+        const totalValue = calcTotal(req.body.items || []);
+        pr = await PurchaseRequisition.create({ ...req.body, prId, totalValue });
+        break; // Success, exit loop
+      } catch (err) {
+        // Check if it's a duplicate key error
+        if (err.code === 11000) {
+          attempts++;
+          if (attempts >= maxAttempts) {
+            throw new Error('Failed to generate unique PR ID after multiple attempts');
+          }
+          // Retry with a new ID
+          continue;
+        }
+        // If it's not a duplicate key error, rethrow
+        throw err;
+      }
+    }
+
+    if (req.user) {
+      await logActivity(req, req.user, 'CREATE_PR', {
+        module: 'procurement',
+        description: `Created PR ${pr.prId} for ${pr.department}`,
+        targetId: pr._id.toString(),
+        targetType: 'PurchaseRequisition'
+      });
+    }
+
     res.status(201).json({ success: true, data: pr });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -82,6 +125,14 @@ export const updatePRStatus = async (req, res) => {
       { new: true }
     );
     if (!pr) return res.status(404).json({ success: false, message: 'PR not found' });
+    if (req.user) {
+      await logActivity(req, req.user, 'UPDATE_PR_STATUS', {
+        module: 'procurement',
+        description: `PR ${pr.prId} status changed to ${pr.status}`,
+        targetId: pr._id.toString(),
+        targetType: 'PurchaseRequisition'
+      });
+    }
     res.json({ success: true, data: pr });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });

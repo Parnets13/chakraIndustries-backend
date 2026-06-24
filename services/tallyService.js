@@ -33,12 +33,34 @@ async function getConfig() {
 }
 
 function tallyUrl(cfg) {
-  // Use the production endpoint if serverUrl is the default or majesticmall
-  const host = (cfg.serverUrl || 'https://erp.majesticmall.net').replace(/\/$/, '');
   const port = cfg.port || '9000';
-  // If host already contains a port or uses https, don't append port
-  if (host.startsWith('https://') || host.includes(':' + port)) return host;
-  return `${host}:${port}`;
+
+  // ── Priority 1: tallyLocalUrl (local machine address set in Settings) ──────
+  const local = (cfg.tallyLocalUrl || '').trim();
+  if (local) {
+    if (local.match(/:\d+$/) || local.startsWith('https://')) {
+      console.log('[Tally] tallyUrl → local URL (with port/https):', local.replace(/\/$/, ''));
+      return local.replace(/\/$/, '');
+    }
+    const resolved = `${local.replace(/\/$/, '')}:${port}`;
+    console.log('[Tally] tallyUrl → local URL:', resolved);
+    return resolved;
+  }
+
+  // ── Priority 2: serverUrl (legacy / cloud tunnel) ───
+  const server = (cfg.serverUrl || '').trim();
+  if (server) {
+    const resolved = server.match(/:\d+$/) || server.startsWith('https://')
+      ? server.replace(/\/$/, '')
+      : `${server.replace(/\/$/, '')}:${port}`;
+    console.log('[Tally] tallyUrl → serverUrl:', resolved);
+    return resolved;
+  }
+
+  // ── Fallback: localhost ────────────────────────────────────────────────────
+  const fallback = `http://localhost:${port}`;
+  console.log('[Tally] tallyUrl → fallback localhost:', fallback);
+  return fallback;
 }
 
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
@@ -81,7 +103,7 @@ async function postToTally(cfg, xml, timeoutMs = 30000) {
 // Tally's HTTP server expects a POST with Content-Type: text/xml.
 // This is the smallest valid request — asks Tally to list its open companies.
 // Response will be an XML ENVELOPE containing COMPANY elements.
-const PING_XML = `<ENVELOPE>\n  <HEADER>\n    <TALLYREQUEST>Export Data</TALLYREQUEST>\n  </HEADER>\n  <BODY>\n    <EXPORTDATA>\n      <REQUESTDESC>\n        <REPORTNAME>List of Companies</REPORTNAME>\n        <STATICVARIABLES>\n          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>\n        </STATICVARIABLES>\n      </REQUESTDESC>\n    </EXPORTDATA>\n  </BODY>\n</ENVELOPE>`;
+const PING_XML = `<ENVELOPE>\n  <HEADER>\n    <TALLYREQUEST>Export Data</TALLYREQUEST>\n  </HEADER>\n  <BODY>\n    <EXPORTDATA>\n      <REQUESTDESC>\n        <REPORTNAME>List of Accounts</REPORTNAME>\n        <STATICVARIABLES>\n          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>\n        </STATICVARIABLES>\n      </REQUESTDESC>\n    </EXPORTDATA>\n  </BODY>\n</ENVELOPE>`;
 
 async function checkReachable(cfg) {
   const url = tallyUrl(cfg);
@@ -168,7 +190,8 @@ function tallyDate(d) {
 }
 
 function staticVars(cfg, extra = '') {
-  const company = (cfg.companyName || '').trim();
+  // Tally stores company names as UPPERCASE internally — always send uppercase
+  const company = (cfg.companyName || '').trim().toUpperCase();
   const tag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
   return `<STATICVARIABLES>${tag}${extra}</STATICVARIABLES>`;
 }
@@ -684,31 +707,93 @@ export async function pullItemsFromTally(cfg, triggeredBy) {
   const syncId = `SYNC-PULL-ITEMS-${Date.now()}`;
   LOG('=== pullItemsFromTally START ===');
   try {
-    const reportNames = ['List of Stock Items', 'Stock Summary'];
+    // Helper to build XML with company tag
+    const buildXml = (reportName) => {
+      const company = (cfg.companyName || '').trim();
+      const companyTag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+      return `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+<BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>${reportName}</REPORTNAME>
+<STATICVARIABLES>${companyTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
+    };
+    // Helper to build TDL XML
+    const buildTdlXml = () => {
+      const company = (cfg.companyName || '').trim();
+      const companyTag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+      return `<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>StockItemList</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        ${companyTag}
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <REPORT NAME="StockItemList">
+            <FORMS>StockItemForm</FORMS>
+          </REPORT>
+          <FORM NAME="StockItemForm">
+            <TOPPARTS>StockItemPart</TOPPARTS>
+          </FORM>
+          <PART NAME="StockItemPart">
+            <REPEAT>StockItemLine : StockItems</REPEAT>
+          </PART>
+          <COLLECTION NAME="StockItems">
+            <TYPE>StockItem</TYPE>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+    };
+    const reportNames = ['List of Accounts', 'All Masters', 'Stock Summary', 'Stock Items'];
     let resp = '';
     for (const rn of reportNames) {
-      const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
-<BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>${rn}</REPORTNAME>
-${exportVars('<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>')}</REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
+      const xml = buildXml(rn);
       resp = await postToTally(cfg, xml);
       if (resp && resp.includes('<STOCKITEM')) { LOG(`Got items via "${rn}"`); break; }
       resp = '';
+    }
+    // Try TDL if still no data
+    if (!resp || !resp.includes('<STOCKITEM')) {
+      LOG('Trying custom TDL collection for Stock Items...');
+      resp = await postToTally(cfg, buildTdlXml());
     }
     if (!resp || !resp.includes('<STOCKITEM')) {
       await writeLog({ syncId, type:'Item Master', direction:'Tally → ERP', status:'Success', records:0, triggeredBy });
       return { ok:true, records:0 };
     }
-    const matches = [...resp.matchAll(/<STOCKITEM[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)];
+    const matches = [...resp.matchAll(/<STOCKITEM([^>]*)>([\s\S]*?)<\/STOCKITEM>/gi)];
     const ops = [];
     for (const m of matches) {
-      const name = m[1]?.trim(); if (!name) continue;
-      const block   = m[2];
-      const guid    = extractGuid(block);
+      const attrs = m[1];
+      const block = m[2];
+      
+      // Extract name from various places
+      let name = '';
+      const nameAttrMatch = attrs.match(/NAME="([^"]*)"/i);
+      if (nameAttrMatch) name = nameAttrMatch[1].trim();
+      
+      if (!name) {
+        // Try LANGUAGENAME.LIST -> NAME.LIST -> NAME
+        const langNameMatch = block.match(/<LANGUAGENAME\.LIST>[\s\S]*?<NAME\.LIST[\s\S]*?<NAME>([\s\S]*?)<\/NAME>/i);
+        if (langNameMatch) name = langNameMatch[1].trim();
+      }
+      
+      if (!name) continue;
+      
+      const guid = extractGuid(block);
       const alterId = extractAlterId(block);
-      const hsn  = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1]||'').trim();
-      const gst  = parseFloat(block.match(/<GSTRATE>(.*?)<\/GSTRATE>/i)?.[1])||0;
-      const unit = (block.match(/<BASEUNITS>(.*?)<\/BASEUNITS>/i)?.[1]||'Nos').trim();
-      const cost = parseFloat(block.match(/<STANDARDCOST>(.*?)<\/STANDARDCOST>/i)?.[1])||0;
+      const hsn     = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1]||'').trim();
+      const gst     = parseFloat(block.match(/<GSTRATE>(.*?)<\/GSTRATE>/i)?.[1])||0;
+      const unit    = (block.match(/<BASEUNITS>(.*?)<\/BASEUNITS>/i)?.[1]||'Nos').trim();
+      const cost    = parseFloat(block.match(/<STANDARDCOST>(.*?)<\/STANDARDCOST>/i)?.[1])||0;
       const uMap = {Nos:'units',Kg:'kg',Ltr:'liter',Mtr:'meter',Box:'box',Pcs:'piece'};
       const sku  = name.replace(/[^A-Z0-9]/gi,'-').toUpperCase().slice(0,30);
       const filter = guid ? { tallyGuid: guid } : { name };
@@ -746,12 +831,18 @@ export async function pullLedgersFromTally(cfg, triggeredBy) {
   const syncId = `SYNC-PULL-LEDGER-${Date.now()}`;
   LOG('=== pullLedgersFromTally START ===');
   try {
+    // Helper to build XML with company tag
+    const buildXml = (reportName) => {
+      const company = (cfg.companyName || '').trim();
+      const companyTag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+      return `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+<BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>${reportName}</REPORTNAME>
+<STATICVARIABLES>${companyTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
+    };
     const reportNames = ['List of Accounts', 'Ledger Vouchers', 'Ledger'];
     let resp = '';
     for (const rn of reportNames) {
-      const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
-<BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>${rn}</REPORTNAME>
-${exportVars('<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>')}</REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
+      const xml = buildXml(rn);
       resp = await postToTally(cfg, xml);
       if (resp && resp.includes('<LEDGER') && !resp.includes('<SHORTPROMPT>')) { LOG(`Got ledgers via "${rn}"`); break; }
       resp = '';
@@ -760,13 +851,37 @@ ${exportVars('<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>')}</REQUESTDESC></E
       await writeLog({ syncId, type:'Ledger', direction:'Tally → ERP', status:'Success', records:0, triggeredBy });
       return { ok:true, records:0 };
     }
-    const matches = [...resp.matchAll(/<LEDGER[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/LEDGER>/gi)];
+    const matches = [...resp.matchAll(/<LEDGER([^>]*)>([\s\S]*?)<\/LEDGER>/gi)];
     const ledgerOps = [], vendorOps = [], clientOps = [];
 
     for (const m of matches) {
-      const name = m[1]?.trim(); if (!name) continue;
-      const block  = m[2]||'';
-      const guid   = extractGuid(block);
+      const attrs = m[1];
+      const block = m[2] || '';
+      
+      // Extract name from various places
+      let name = '';
+      const nameAttrMatch = attrs.match(/NAME="([^"]*)"/i);
+      if (nameAttrMatch) name = nameAttrMatch[1].trim();
+      
+      if (!name) {
+        // Try LANGUAGENAME.LIST -> NAME.LIST -> NAME
+        const langNameMatch = block.match(/<LANGUAGENAME\.LIST>[\s\S]*?<NAME\.LIST[\s\S]*?<NAME>([\s\S]*?)<\/NAME>/i);
+        if (langNameMatch) name = langNameMatch[1].trim();
+      }
+      if (!name) {
+        // Try LEDGSTNAME
+        const gstNameMatch = block.match(/<LEDGSTNAME>([\s\S]*?)<\/LEDGSTNAME>/i);
+        if (gstNameMatch) name = gstNameMatch[1].trim();
+      }
+      if (!name) {
+        // Try MAILINGNAME
+        const mailingNameMatch = block.match(/<MAILINGNAME>([\s\S]*?)<\/MAILINGNAME>/i);
+        if (mailingNameMatch) name = mailingNameMatch[1].trim();
+      }
+      
+      if (!name) continue;
+      
+      const guid = extractGuid(block);
       const alterId = extractAlterId(block);
       const parent = (block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1]||'').trim();
       if (!parent.toLowerCase().includes('sundry')) continue;
@@ -777,7 +892,9 @@ ${exportVars('<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>')}</REQUESTDESC></E
       const phone          = (block.match(/<LEDGERMOBILE>(.*?)<\/LEDGERMOBILE>/i)?.[1]||'').trim();
       const isCreditor     = parent.toLowerCase().includes('creditor');
       const ledgerGroup    = isCreditor ? 'Sundry Creditors' : 'Sundry Debtors';
-      const ledgerCode     = `TALLY-${name.replace(/[^A-Z0-9]/gi,'-').toUpperCase().slice(0,20)}-${Date.now()%10000}`;
+      const ledgerCode     = guid 
+        ? `TALLY-${guid.replace(/[^A-Z0-9]/gi, '').slice(0, 20)}` 
+        : `TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30)}-${Math.random().toString(36).substring(2, 8)}`;
 
       // Upsert AccountsLedger (primary record)
       const ledgerFilter = guid ? { tallyGuid: guid } : { ledgerName: name };
@@ -796,36 +913,60 @@ ${exportVars('<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>')}</REQUESTDESC></E
       // Also upsert Vendor or Client model for full ERP integration
       if (isCreditor) {
         const vFilter = guid ? { tallyGuid: guid } : { companyName: name };
+        const safeEmail = email || `${name.replace(/\s+/g,'').toLowerCase()}@tally.sync`;
         vendorOps.push({ updateOne:{
           filter: vFilter,
           update:{
-            $set:{ email:email||undefined, phone:phone||undefined, gstNumber:gstNumber||undefined,
-                   tallySynced:true, lastTallySync:new Date(),
-                   ...(guid ? { tallyGuid:guid } : {}),
-                   ...(alterId ? { tallyAlterId:alterId } : {}) },
+            $set:{ 
+              email: safeEmail, 
+              phone: phone || '0000000000', 
+              gstNumber: gstNumber || 'N/A',
+              address: 'Imported from Tally',
+              city: 'Unknown',
+              state: 'Unknown',
+              pincode: '000000',
+              contactPerson: name,
+              tallySynced:true, lastTallySync:new Date(),
+              ...(guid ? { tallyGuid:guid } : {}),
+              ...(alterId ? { tallyAlterId:alterId } : {}) 
+            },
             $setOnInsert:{
-              vendorId:`VND-TALLY-${Date.now()%100000}`, companyName:name,
-              category:'General', contactPerson:name,
-              phone:phone||'0000000000', email:email||`${name.replace(/\s+/g,'').toLowerCase()}@tally.sync`,
-              address:'Imported from Tally', city:'Unknown', state:'Unknown', pincode:'000000', status:'Active',
+              vendorId: guid 
+                ? `VND-TALLY-${guid.replace(/[^A-Z0-9]/gi, '').slice(0, 20)}` 
+                : `VND-TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30)}-${Math.random().toString(36).substring(2, 8)}`,
+              companyName: name,
+              category:'General',
+              status:'Active',
             },
           },
           upsert:true,
         }});
       } else {
         const cFilter = guid ? { tallyGuid: guid } : { name };
+        const safeEmail = email || `${name.replace(/\s+/g,'').toLowerCase()}@tally.sync`;
         clientOps.push({ updateOne:{
           filter: cFilter,
           update:{
-            $set:{ email:email||undefined, phone:phone||undefined, gstNumber:gstNumber||undefined,
-                   tallySynced:true, lastTallySync:new Date(),
-                   ...(guid ? { tallyGuid:guid } : {}),
-                   ...(alterId ? { tallyAlterId:alterId } : {}) },
+            $set:{ 
+              email: safeEmail, 
+              phone: phone || '0000000000', 
+              gstNumber: gstNumber || 'N/A',
+              address: 'Imported from Tally',
+              city: 'Unknown',
+              state: 'Unknown',
+              pincode: '000000',
+              contact: name,
+              tallySynced:true, lastTallySync:new Date(),
+              ...(guid ? { tallyGuid:guid } : {}),
+              ...(alterId ? { tallyAlterId:alterId } : {}) 
+            },
             $setOnInsert:{
-              clientId:`CLT-TALLY-${Date.now()%100000}`, name,
-              contact:name, phone:phone||'0000000000',
-              email:email||`${name.replace(/\s+/g,'').toLowerCase()}@tally.sync`,
-              city:'Unknown', category:'Trading', status:'Active',
+              clientId: guid 
+                ? `CLT-TALLY-${guid.replace(/[^A-Z0-9]/gi, '').slice(0, 20)}` 
+                : `CLT-TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30)}-${Math.random().toString(36).substring(2, 8)}`,
+              name,
+              category:'Trading',
+              status:'Active',
             },
           },
           upsert:true,

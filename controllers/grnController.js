@@ -2,6 +2,7 @@ import GRN from '../models/GRN.js';
 import QualityCheck from '../models/QualityCheck.js';
 import PurchaseOrder from '../models/PurchaseOrder.js';
 import { createBatchFromGRN, createInventoryFromGRN } from '../services/grnInventoryService.js';
+import { logActivity } from '../utils/activityLogger.js';
 
 // Generate QC ID
 const generateQCId = async () => {
@@ -42,6 +43,14 @@ export const createGRN = async (req, res) => {
     const grnId = await generateGRNId();
     const grn = new GRN({ ...req.body, grnId, qcStatus: 'Pending', approvalStatus: 'Not Required' });
     const saved = await grn.save();
+    if (req.user) {
+      await logActivity(req, req.user, 'CREATE_GRN', {
+        module: 'procurement',
+        description: `Created GRN ${saved.grnId}`,
+        targetId: saved._id.toString(),
+        targetType: 'GRN'
+      });
+    }
 
     // Auto-create batch from GRN
     try {

@@ -11,6 +11,10 @@ const pickingListSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  salesOrderId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SalesOrder'
+  },
   items: [{
     inventory: {
       type: mongoose.Schema.Types.ObjectId,

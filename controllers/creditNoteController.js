@@ -14,9 +14,13 @@ const calcDaysOpen = (createdAt) =>
 
 export const getAll = async (req, res) => {
   try {
-    const { status } = req.query;
-    const filter = status ? { status } : {};
-    const list = await CreditNote.find(filter).sort({ createdAt: -1 });
+    const { status, vendorId } = req.query;
+    const filter = {};
+    if (status) filter.status = status;
+    if (vendorId) filter.vendorId = vendorId;
+    const list = await CreditNote.find(filter)
+      .populate('vendorId')
+      .sort({ createdAt: -1 });
     const enriched = list.map(cn => ({
       ...cn.toObject(),
       daysOpen: calcDaysOpen(cn.createdAt),
@@ -44,6 +48,7 @@ export const create = async (req, res) => {
   try {
     const cnId = await genCNId();
     const cn = await CreditNote.create({ ...req.body, cnId });
+    await cn.populate('vendorId');
     res.status(201).json({ success: true, data: cn });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
@@ -54,7 +59,7 @@ export const updateStatus = async (req, res) => {
       req.params.id,
       { status: req.body.status },
       { new: true }
-    );
+    ).populate('vendorId');
     if (!cn) return res.status(404).json({ success: false, message: 'Not found' });
     res.json({ success: true, data: cn });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
@@ -66,7 +71,7 @@ export const sendReminder = async (req, res) => {
       req.params.id,
       { reminderSentAt: new Date() },
       { new: true }
-    );
+    ).populate('vendorId');
     if (!cn) return res.status(404).json({ success: false, message: 'Not found' });
     res.json({ success: true, message: `Reminder logged for ${cn.cnId}`, data: cn });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }

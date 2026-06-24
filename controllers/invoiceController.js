@@ -1,4 +1,7 @@
 import Invoice from '../models/Invoice.js';
+import SalesOrder from '../models/SalesOrder.js';
+import Dealer from '../models/Dealer.js';
+import AccountsReceivable from '../models/AccountsReceivable.js';
 import { sendInvoiceEmail } from '../utils/emailService.js';
 
 // ── ID generator ──────────────────────────────────────────────────────────────
@@ -58,10 +61,11 @@ const computeTotals = (items = []) => {
 // ── GET /api/invoices ─────────────────────────────────────────────────────────
 export const getAll = async (req, res) => {
   try {
-    const { status, search, page = 1, limit = 0, invoiceType } = req.query;
+    const { status, search, page = 1, limit = 0, invoiceType, invoiceSource } = req.query;
     const filter = {};
     if (status) filter.status = status;
     if (invoiceType) filter.invoiceType = invoiceType;
+    if (invoiceSource) filter.invoiceSource = invoiceSource;
     if (search) filter.$or = [
       { invoiceNo:  { $regex: search, $options: 'i' } },
       { partyName:  { $regex: search, $options: 'i' } },
@@ -132,6 +136,15 @@ export const create = async (req, res) => {
     const totals = computeTotals(items);
     const invoiceType = items.length > 1 ? 'multi' : 'single';
     const inv = await Invoice.create({ invoiceNo, ...rest, ...totals, source: 'manual', invoiceType });
+    await AccountsReceivable.create({
+      dealer: inv.dealerId,
+      salesOrder: inv.salesOrderId,
+      invoice: inv._id,
+      invoiceNumber: inv.invoiceNo,
+      invoiceDate: inv.invoiceDate,
+      dueDate: inv.dueDate,
+      invoiceAmount: inv.grandTotal
+    });
     res.status(201).json({ success: true, data: inv });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
@@ -309,4 +322,105 @@ export const getByInvoiceNo = async (req, res) => {
     if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
     res.json({ success: true, data: inv });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── POST /api/invoices/from-order/:orderId ────────────────────────────────────
+export const createFromSalesOrder = async (req, res) => {
+  try {
+    const order = await SalesOrder.findById(req.params.orderId);
+    if (!order) return res.status(404).json({ success: false, message: 'Sales order not found' });
+    
+    // Check if invoice already exists for this order
+    const existingInvoice = await Invoice.findOne({ salesOrderId: order._id });
+    if (existingInvoice) return res.status(400).json({ success: false, message: 'Invoice already exists for this order' });
+    
+    // Get dealer details if available
+    let dealer = null;
+    if (order.dealerId) {
+      dealer = await Dealer.findById(order.dealerId);
+    }
+    
+    const invoiceNo = await genInvoiceNo();
+    
+    // Build invoice items from order lineItems or items
+    const items = [];
+    if (order.lineItems && order.lineItems.length > 0) {
+      order.lineItems.forEach(item => {
+        const taxRate = item.gstPercent || 0;
+        items.push({
+          description: item.name || 'Item',
+          hsn: '',
+          qty: item.quantity || 0,
+          unit: 'Nos',
+          rate: item.unitPrice || 0,
+          discount: 0,
+          taxRate,
+          cgst: (item.gstAmount || 0) / 2,
+          sgst: (item.gstAmount || 0) / 2,
+          igst: 0
+        });
+      });
+    } else if (order.items && order.items.length > 0) {
+      order.items.forEach(item => {
+        const taxRate = item.gstPercent || 0;
+        items.push({
+          description: item.itemName || 'Item',
+          hsn: '',
+          qty: item.quantity || 0,
+          unit: 'Nos',
+          rate: item.unitPrice || 0,
+          discount: 0,
+          taxRate,
+          cgst: (item.gstAmount || 0) / 2,
+          sgst: (item.gstAmount || 0) / 2,
+          igst: 0
+        });
+      });
+    }
+    
+    const totals = computeTotals(items);
+    
+    // Create invoice
+    const invoice = await Invoice.create({
+      invoiceNo,
+      invoiceDate: new Date(),
+      dealerId: order.dealerId || null,
+      salesOrderId: order._id,
+      partyName: dealer?.businessName || dealer?.name || order.customer || 'Customer',
+      partyAddress: dealer?.address || '',
+      partyGST: dealer?.gstin || '',
+      partyEmail: dealer?.email || '',
+      partyPhone: dealer?.mobile || '',
+      billToName: dealer?.businessName || dealer?.name || order.customer || 'Customer',
+      billToAddress: dealer?.address || '',
+      billToGST: dealer?.gstin || '',
+      shipToName: dealer?.businessName || dealer?.name || order.customer || 'Customer',
+      shipToAddress: order.deliveryAddress || '',
+      purchaseOrderRef: order.orderId,
+      items: totals.items,
+      subtotal: totals.subtotal,
+      totalDiscount: totals.totalDiscount,
+      totalTax: totals.totalTax,
+      grandTotal: totals.grandTotal,
+      status: 'Draft',
+      paymentStatus: 'Pending',
+      source: 'manual',
+      invoiceType: items.length > 1 ? 'multi' : 'single'
+    });
+    
+    await AccountsReceivable.create({
+      dealer: invoice.dealerId,
+      salesOrder: invoice.salesOrderId,
+      invoice: invoice._id,
+      invoiceNumber: invoice.invoiceNo,
+      invoiceDate: invoice.invoiceDate,
+      dueDate: invoice.dueDate,
+      invoiceAmount: invoice.grandTotal
+    });
+    
+    res.status(201).json({ success: true, data: invoice });
+  } catch (err) {
+    console.error('createFromSalesOrder error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
 };

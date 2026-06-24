@@ -4,6 +4,7 @@ import OEMFinishedGoods from '../models/OEMFinishedGoods.js';
 import OEMInvoice from '../models/OEMInvoice.js';
 import QualityCheck from '../models/QualityCheck.js';
 import BOM from '../models/BOM.js';
+import InventoryItem from '../models/InventoryItem.js';
 
 // Auto-create Work Order when materials are reserved
 export const autoCreateWorkOrder = async (oemOrderId) => {
@@ -25,37 +26,84 @@ export const autoCreateWorkOrder = async (oemOrderId) => {
     }
 
     // Generate Work Order ID
-    const year = new Date().getFullYear();
-    const count = await WorkOrder.countDocuments();
-    const woId = `WO-${year}-${String(count + 1).padStart(5, '0')}`;
+    const lastWO = await WorkOrder.findOne().sort({ createdAt: -1 }).select('woId');
+    let woId;
+    if (lastWO?.woId) {
+      const match = lastWO.woId.match(/WO-(\d+)/);
+      if (match) {
+        const num = parseInt(match[1]) + 1;
+        woId = `WO-${String(num).padStart(4, '0')}`;
+      }
+    }
+    if (!woId) {
+      woId = 'WO-0001';
+    }
 
-    // Extract materials from BOM
-    const requiredMaterials = bom.materials.map(mat => ({
-      itemId: mat.materialId,
-      itemName: mat.materialName,
-      sku: mat.sku,
-      requiredQty: mat.quantity * oemOrder.quantity,
-      unit: mat.unit,
-      availableQty: mat.availableStock || 0,
-      shortfall: Math.max(0, (mat.quantity * oemOrder.quantity) - (mat.availableStock || 0)),
-      status: (mat.availableStock || 0) >= (mat.quantity * oemOrder.quantity) ? 'Available' : 'Partial'
+    // Extract materials from BOM components
+    const requiredMaterials = await Promise.all(bom.components.map(async (comp) => {
+      const requiredQty = comp.qty * (1 + (comp.scrapFactor || 0) / 100) * oemOrder.quantity;
+      
+      // Find available stock for this component
+      const invItems = await InventoryItem.find({
+        $or: [
+          { sku: comp.itemCode || '' },
+          { name: new RegExp(comp.itemName, 'i') }
+        ]
+      });
+      const availableQty = invItems.reduce((sum, item) => sum + (item.qty || 0), 0);
+      
+      return {
+        itemId: comp.itemMasterId,
+        itemName: comp.itemName,
+        sku: comp.itemCode,
+        requiredQty: Math.round(requiredQty * 1000) / 1000,
+        unit: comp.unit,
+        availableQty,
+        shortfall: Math.max(0, requiredQty - availableQty),
+        status: availableQty >= requiredQty ? 'Available' : 'Partial'
+      };
     }));
 
     const startDate = new Date();
     const endDate = new Date(startDate.getTime() + 7 * 24 * 60 * 60 * 1000);
 
+    // Create material consumption plan from BOM
+    const materialConsumption = bom.components.map(comp => ({
+      itemMasterId: comp.itemMasterId,
+      itemName: comp.itemName,
+      itemCode: comp.itemCode,
+      plannedQty: Math.round(comp.qty * (1 + (comp.scrapFactor || 0) / 100) * oemOrder.quantity * 1000) / 1000,
+      consumedQty: 0,
+      unit: comp.unit,
+      vendorId: comp.vendorId,
+      oemBrand: comp.oemBrand,
+      unitCost: comp.unitCost || 0
+    }));
+
+    // Calculate estimated cost
+    let plannedCost = 0;
+    for (const comp of bom.components) {
+      const qty = comp.qty * (1 + (comp.scrapFactor || 0) / 100) * oemOrder.quantity;
+      plannedCost += qty * (comp.unitCost || 0);
+    }
+    plannedCost = plannedCost * (1 + (bom.overheadPct || 0) / 100) + (bom.labourCost || 0) * oemOrder.quantity;
+
     const workOrder = new WorkOrder({
       woId,
+      productItemMasterId: bom.productItemMasterId,
       product: bom.product,
       qty: oemOrder.quantity,
-      bom: oemOrder.bomId,
+      bomId: oemOrder.bomId,
+      oemBrand: oemOrder.oemBrand,
+      oemProduct: null,
+      salesOrderId: null,
       startDate,
       endDate,
       priority: 'Normal',
-      status: 'Scheduled',
-      approvalStatus: 'Pending',
-      requiredMaterials,
-      inventoryStatus: 'Pending',
+      status: 'Pending',
+      materialConsumption,
+      inventoryDeducted: false,
+      plannedCost,
       remarks: `Auto-generated from OEM Order: ${oemOrder.oemOrderId}`
     });
 
@@ -65,6 +113,8 @@ export const autoCreateWorkOrder = async (oemOrderId) => {
     oemOrder.workOrderId = workOrder._id;
     oemOrder.status = 'BOM-Loaded';
     oemOrder.productionStatus = 'Pending';
+    oemOrder.requiredMaterials = requiredMaterials;
+    oemOrder.estimatedCost = plannedCost;
     await oemOrder.save();
 
     console.log(`✅ Work Order created: ${woId} for OEM Order: ${oemOrder.oemOrderId}`);

@@ -15,8 +15,10 @@ const alternateSchema = new mongoose.Schema({
 // ── Component line ────────────────────────────────────────────────────────────
 const componentSchema = new mongoose.Schema({
   // Identity
+  itemMasterId: { type: mongoose.Schema.Types.ObjectId, ref: 'ItemMaster', required: true },
   itemName:    { type: String, required: true, trim: true },
   itemCode:    { type: String, trim: true, default: '' },
+  description: { type: String, default: '' },
   inventoryItemId: { type: mongoose.Schema.Types.ObjectId, ref: 'InventoryItem', default: null },
 
   // Quantity
@@ -34,6 +36,11 @@ const componentSchema = new mongoose.Schema({
   // OEM / vendor linkage
   vendorId:    { type: mongoose.Schema.Types.ObjectId, ref: 'Vendor', default: null },
   oemBrand:    { type: mongoose.Schema.Types.ObjectId, ref: 'OEMBrand', default: null },
+
+  // Preferred vendor (display name stored alongside ID for quick read)
+  preferredVendorId:   { type: mongoose.Schema.Types.ObjectId, ref: 'Vendor', default: null },
+  preferredVendorName: { type: String, default: '' },
+  rfqStatus:   { type: String, enum: ['Not Sent', 'Sent', 'Quotation Received'], default: 'Not Sent' },
 
   // Alternate materials
   alternates:  [alternateSchema],
@@ -66,6 +73,7 @@ const approvalStepSchema = new mongoose.Schema({
 // ── BOM ───────────────────────────────────────────────────────────────────────
 const bomSchema = new mongoose.Schema({
   bomId:       { type: String, required: true, unique: true, index: true },
+  productItemMasterId: { type: mongoose.Schema.Types.ObjectId, ref: 'ItemMaster', default: null },
   product:     { type: String, required: true, trim: true },
   productCode: { type: String, trim: true, default: '' },
   version:     { type: String, default: 'v1.0' },

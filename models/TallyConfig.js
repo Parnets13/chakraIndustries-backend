@@ -31,6 +31,8 @@ const tallyConfigSchema = new mongoose.Schema({
   },
   connectionStatus: { type: String, enum: ['Connected','Disconnected','Unknown'], default: 'Unknown' },
   lastSyncAt:       { type: Date },
+  lastImportAt:     { type: Date },
+  lastExportAt:     { type: Date },
   updatedBy:        { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 

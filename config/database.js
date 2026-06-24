@@ -23,8 +23,8 @@ const connectDB = async () => {
     console.log('URI:', mongoUri.substring(0, 50) + '...');
 
     await mongoose.connect(mongoUri, {
-      serverSelectionTimeoutMS: 30000, // increased timeout
-      socketTimeoutMS: 45000,
+      serverSelectionTimeoutMS: 30000,  // 30 seconds
+      socketTimeoutMS: 60000,
       connectTimeoutMS: 30000,
       heartbeatFrequencyMS: 10000,
       retryWrites: true,

@@ -2,6 +2,7 @@ import express from 'express';
 import SalesOrder from '../../models/SalesOrder.js';
 import InventoryItem from '../../models/InventoryItem.js';
 import DocketTracking from '../../models/DocketTracking.js';
+import { genOrderId } from '../../utils/orderIdGenerator.js';
 
 const router = express.Router();
 
@@ -145,102 +146,155 @@ router.get('/:id', async (req, res) => {
 // @desc    Create new order from cart
 // @access  Private
 router.post('/create', async (req, res) => {
-  try {
-    const { items, deliveryAddress, notes } = req.body;
+  const maxRetries = 3;
+  let attempts = 0;
 
-    if (!items || items.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Order must contain at least one item'
-      });
-    }
+  // Get idempotency key from headers
+  const idempotencyKey = req.headers['x-idempotency-key'];
 
-    // Calculate total amount and validate stock
-    let subTotal = 0;
-    let totalGst = 0;
-    let totalQuantity = 0;
-    const orderItems = [];
+  while (attempts < maxRetries) {
+    try {
+      console.log('=== (routes/dealer/orderRoutes) create order START ===');
+      console.log('req.body:', JSON.stringify(req.body));
+      console.log('idempotencyKey:', idempotencyKey);
+      console.log(`Attempt ${attempts + 1} of ${maxRetries}`);
 
-    for (const item of items) {
-      const inventoryItem = await InventoryItem.findById(item.productId);
-      
-      if (!inventoryItem) {
-        return res.status(404).json({
-          success: false,
-          message: `Product ${item.productId} not found`
-        });
-      }
+      const { items, deliveryAddress, notes } = req.body;
 
-      if (inventoryItem.currentQuantity < item.quantity) {
+      if (!items || items.length === 0) {
         return res.status(400).json({
           success: false,
-          message: `Insufficient stock for ${inventoryItem.itemName}`
+          message: 'Order must contain at least one item'
         });
       }
 
-      const itemPrice = inventoryItem.unitPrice || 0;
-      const itemGstPercent = inventoryItem.gst || 0;
-      const itemSubTotal = itemPrice * item.quantity;
-      const itemGstAmount = (itemSubTotal * itemGstPercent) / 100;
-      const itemTotal = itemSubTotal + itemGstAmount;
+      // Check for existing order with this idempotency key
+      if (idempotencyKey) {
+        const existingOrder = await SalesOrder.findOne({
+          $or: [
+            { customerId: req.user?._id, 'metadata.idempotencyKey': idempotencyKey },
+            { customer: req.user?.name || 'Dealer', 'metadata.idempotencyKey': idempotencyKey }
+          ]
+        });
 
-      subTotal += itemSubTotal;
-      totalGst += itemGstAmount;
-      totalQuantity += item.quantity;
+        if (existingOrder) {
+          console.log('Returning existing order for idempotency key:', idempotencyKey);
+          return res.status(200).json({
+            success: true,
+            message: 'Order already placed (idempotent)',
+            data: existingOrder
+          });
+        }
+      }
 
-      orderItems.push({
-        itemId: inventoryItem._id,
-        itemName: inventoryItem.itemName,
-        quantity: item.quantity,
-        unitPrice: itemPrice,
-        gstPercent: itemGstPercent,
-        gstAmount: itemGstAmount,
-        totalPrice: itemTotal
+      // Calculate total amount and validate stock
+      let subTotal = 0;
+      let totalGst = 0;
+      let totalQuantity = 0;
+      const orderItems = [];
+
+      for (const item of items) {
+        const inventoryItem = await InventoryItem.findById(item.productId);
+        
+        if (!inventoryItem) {
+          return res.status(404).json({
+            success: false,
+            message: `Product ${item.productId} not found`
+          });
+        }
+
+        if (inventoryItem.currentQuantity < item.quantity) {
+          return res.status(400).json({
+            success: false,
+            message: `Insufficient stock for ${inventoryItem.itemName}`
+          });
+        }
+
+        const itemPrice = inventoryItem.unitPrice || 0;
+        const itemGstPercent = inventoryItem.gst || 0;
+        const itemSubTotal = itemPrice * item.quantity;
+        const itemGstAmount = (itemSubTotal * itemGstPercent) / 100;
+        const itemTotal = itemSubTotal + itemGstAmount;
+
+        subTotal += itemSubTotal;
+        totalGst += itemGstAmount;
+        totalQuantity += item.quantity;
+
+        orderItems.push({
+          itemId: inventoryItem._id,
+          itemName: inventoryItem.itemName,
+          quantity: item.quantity,
+          unitPrice: itemPrice,
+          gstPercent: itemGstPercent,
+          gstAmount: itemGstAmount,
+          totalPrice: itemTotal
+        });
+      }
+
+      // Generate order number using atomic counter
+      const orderId = await genOrderId();
+      console.log('Generated order ID:', orderId);
+
+      // Create sales order
+      const order = new SalesOrder({
+        orderId,
+        customer: req.user?.name || 'Dealer', 
+        customerId: req.user?._id,
+        items: orderItems,
+        itemCount: orderItems.length,
+        totalQuantity: totalQuantity,
+        subTotal: subTotal,
+        totalGst: totalGst,
+        value: subTotal + totalGst,
+        deliveryAddress,
+        notes,
+        status: 'Pending',
+        expectedDeliveryDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+        metadata: {
+          idempotencyKey: idempotencyKey || undefined
+        }
       });
+
+      await order.save();
+
+      // Update inventory
+      for (const item of items) {
+        await InventoryItem.findByIdAndUpdate(
+          item.productId,
+          { $inc: { currentQuantity: -item.quantity } }
+        );
+      }
+
+      console.log('Order created successfully:', order.orderId, order._id);
+
+      res.status(201).json({
+        success: true,
+        message: 'Order created successfully',
+        data: order
+      });
+      return;
+    } catch (error) {
+      console.error('Create order error:', error);
+      // Duplicate orderId (very rare race) — retry
+      if (error.code === 11000 && error.keyPattern?.orderId) {
+        attempts++;
+        if (attempts >= maxRetries) {
+          console.error('Max retries reached for order ID collision');
+          return res.status(409).json({
+            success: false,
+            message: 'Order ID collision — please try again'
+          });
+        }
+        // Wait a short time before retrying
+        await new Promise(resolve => setTimeout(resolve, 100 * attempts));
+      } else {
+        res.status(500).json({
+          success: false,
+          message: 'Failed to create order'
+        });
+        return;
+      }
     }
-
-    // Generate order number (orderId) with 5 padding digits as per requirement
-    const count = await SalesOrder.countDocuments();
-    const orderId = `ORD-2026-${String(count + 1).padStart(5, '0')}`;
-
-    // Create sales order
-    const order = new SalesOrder({
-      orderId,
-      customer: req.user?.name || 'Dealer', 
-      customerId: req.user?._id,
-      items: orderItems,
-      itemCount: orderItems.length,
-      totalQuantity: totalQuantity,
-      subTotal: subTotal,
-      totalGst: totalGst,
-      value: subTotal + totalGst,
-      deliveryAddress,
-      notes,
-      status: 'Pending',
-      expectedDeliveryDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
-    });
-
-    await order.save();
-
-    // Update inventory
-    for (const item of items) {
-      await InventoryItem.findByIdAndUpdate(
-        item.productId,
-        { $inc: { currentQuantity: -item.quantity } }
-      );
-    }
-
-    res.status(201).json({
-      success: true,
-      message: 'Order created successfully',
-      data: order
-    });
-  } catch (error) {
-    console.error('Create order error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to create order'
-    });
   }
 });
 

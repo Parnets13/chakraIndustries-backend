@@ -17,19 +17,19 @@ router.get('/', async (req, res) => {
     
     if (status && status !== 'All Orders') {
       if (status === 'In Transit') {
-        query.currentStatus = 'In Transit';
+        query.transportStatus = 'in_transit';
       } else if (status === 'Delivered') {
-        query.currentStatus = 'Delivered';
+        query.transportStatus = 'delivered';
       } else if (status === 'Pending') {
-        query.currentStatus = { $in: ['Pending', 'Processing', 'Packing'] };
+        query.transportStatus = { $in: ['pickup_pending', 'picked_up'] };
       }
     }
 
     if (search) {
       query.$or = [
-        { docketNumber: { $regex: search, $options: 'i' } },
-        { invoiceNumber: { $regex: search, $options: 'i' } },
-        { courierName: { $regex: search, $options: 'i' } }
+        { docketId: { $regex: search, $options: 'i' } },
+        { invoiceNo: { $regex: search, $options: 'i' } },
+        { courierPartner: { $regex: search, $options: 'i' } }
       ];
     }
 
@@ -46,7 +46,7 @@ router.get('/', async (req, res) => {
       dispatches.map(async (dispatch) => {
         if (dispatch.salesOrderId) {
           const salesOrder = await SalesOrder.findById(dispatch.salesOrderId)
-            .select('orderNumber totalAmount items')
+            .select('orderId value lineItems')
             .lean();
           
           return {
@@ -93,15 +93,15 @@ router.get('/:id/track', async (req, res) => {
 
     // Calculate progress percentage
     let progress = 0;
-    if (dispatch.currentStatus === 'Pending' || dispatch.currentStatus === 'Processing') {
+    if (dispatch.transportStatus === 'pickup_pending' || dispatch.transportStatus === 'picked_up') {
       progress = 25;
-    } else if (dispatch.currentStatus === 'Packing') {
-      progress = 40;
-    } else if (dispatch.currentStatus === 'In Transit') {
+    } else if (dispatch.transportStatus === 'in_transit') {
+      progress = 50;
+    } else if (dispatch.transportStatus === 'reached_hub') {
       progress = 75;
-    } else if (dispatch.currentStatus === 'Out for Delivery') {
+    } else if (dispatch.transportStatus === 'out_for_delivery') {
       progress = 90;
-    } else if (dispatch.currentStatus === 'Delivered') {
+    } else if (dispatch.transportStatus === 'delivered') {
       progress = 100;
     }
 
@@ -110,9 +110,8 @@ router.get('/:id/track', async (req, res) => {
       data: {
         ...dispatch,
         progress,
-        trackingUrl: dispatch.trackingUrl || null,
-        lastUpdate: dispatch.timeline && dispatch.timeline.length > 0 
-          ? dispatch.timeline[dispatch.timeline.length - 1]
+        lastUpdate: dispatch.trackingHistory && dispatch.trackingHistory.length > 0 
+          ? dispatch.trackingHistory[dispatch.trackingHistory.length - 1]
           : null
       }
     });

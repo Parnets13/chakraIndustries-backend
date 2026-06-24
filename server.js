@@ -1,10 +1,12 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+dotenv.config(); // ← MUST be first before any other import reads process.env
 import rateLimit from 'express-rate-limit';
 import connectDB from './config/database.js';
 import authRoutes from './routes/authRoutes.js';
 import dealerRoutes from './routes/dealerRoutes.js';
+import erpDealerOrdersRoutes from './routes/erpDealerOrders.js';
 import userRoutes from './routes/userRoutes.js';
 import permissionRoutes from './routes/permissionRoutes.js';
 import activityLogRoutes from './routes/activityLogRoutes.js';
@@ -72,6 +74,7 @@ import docketTrackingRoutes from './routes/docketTrackingRoutes.js';
 import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
 import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
 import brsRoutes from './routes/brsRoutes.js';
+import financeRoutes from './routes/financeRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -145,12 +148,8 @@ import './models/WarehouseGateEntry.js';
 import './models/WarehouseVerification.js';
 import './models/WorkOrder.js';
 
-dotenv.config();
-
+// Server configuration
 const app = express();
-
-// Connect to MongoDB
-connectDB();
 
 // Rate limiting middleware — relaxed for local dev, tighter for production
 const limiter = rateLimit({
@@ -176,7 +175,7 @@ app.use(cors({
     // Allow requests with no origin (mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
     const allowed = [
-      'https://chakraindustries-backend.onrender.com',
+      'http://localhost:5001/api/api',
       'https://erp.majesticmall.net',
       'https://majesticmall.net',
       'http://localhost:3000',
@@ -212,6 +211,7 @@ app.use('/api/tally/webhook', rawXmlParser);
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/dealer', dealerRoutes);
+app.use('/api/erp/dealer-orders', erpDealerOrdersRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/permissions', permissionRoutes);
 app.use('/api/activity-logs', activityLogRoutes);
@@ -277,6 +277,7 @@ app.use('/api/docket-tracking', docketTrackingRoutes);
 app.use('/api/loss-tracking', lossTrackingRoutes);
 app.use('/api/po-generator', poGeneratorRoutes);
 app.use('/api/brs', brsRoutes);
+app.use('/api/finance', financeRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars
@@ -297,12 +298,15 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5001;
 
+// Start server immediately, connect to MongoDB in background
+connectDB(); 
+
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✓ Server running on port ${PORT}`);
   startTallyScheduler();
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use. Stop the other process and restart.`);
+    console.error(`✗ Port ${PORT} is already in use. Stop the other process and restart.`);
     process.exit(1);
   } else {
     throw err;

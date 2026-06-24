@@ -1,6 +1,7 @@
 import Approval from '../models/Approval.js';
 import GRN from '../models/GRN.js';
 import PurchaseOrder from '../models/PurchaseOrder.js';
+import { logActivity } from '../utils/activityLogger.js';
 
 // GET all approvals
 export const getAllApprovals = async (req, res) => {
@@ -51,6 +52,14 @@ export const approveApproval = async (req, res) => {
     if (approval.poId) {
       await PurchaseOrder.findByIdAndUpdate(approval.poId._id || approval.poId, { status: 'Received' });
     }
+    if (req.user) {
+      await logActivity(req, req.user, 'APPROVE_APPROVAL', {
+        module: 'procurement',
+        description: `Approved ${approval.docType} ${approval.docRef}`,
+        targetId: approval._id.toString(),
+        targetType: 'Approval'
+      });
+    }
 
     res.json({ success: true, data: approval });
   } catch (err) {
@@ -72,6 +81,14 @@ export const rejectApproval = async (req, res) => {
 
     if (approval.grnId) {
       await GRN.findByIdAndUpdate(approval.grnId._id || approval.grnId, { approvalStatus: 'Rejected' });
+    }
+    if (req.user) {
+      await logActivity(req, req.user, 'REJECT_APPROVAL', {
+        module: 'procurement',
+        description: `Rejected ${approval.docType} ${approval.docRef}`,
+        targetId: approval._id.toString(),
+        targetType: 'Approval'
+      });
     }
 
     res.json({ success: true, data: approval });

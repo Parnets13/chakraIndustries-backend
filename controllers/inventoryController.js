@@ -6,6 +6,7 @@ import GRN from '../models/GRN.js';
 import Warehouse from '../models/Warehouse.js';
 import StockMovement from '../models/StockMovement.js';
 import Location from '../models/Location.js';
+import Invoice from '../models/Invoice.js';
 
 // ── ID generator ──────────────────────────────────────────────────────────────
 const genId = async (Model, field, prefix) => {
@@ -16,6 +17,17 @@ const genId = async (Model, field, prefix) => {
   return `${prefix}-${String(num + 1).padStart(3, '0')}`;
 };
 
+// ── Manual Stock Entry Invoice number: MSEI-YYYY-NNNN ────────────────────────
+const genManualStockInvoiceNo = async () => {
+  const year = new Date().getFullYear();
+  const prefix = `MSEI-${year}-`;
+  const last = await Invoice.findOne({ invoiceNo: new RegExp(`^${prefix}`) }).sort({ createdAt: -1 });
+  if (!last) return `${prefix}0001`;
+  const parts = last.invoiceNo.split('-');
+  const num = parseInt(parts[parts.length - 1]) || 0;
+  return `${prefix}${String(num + 1).padStart(4, '0')}`;
+};
+
 // ══════════════════════════════════════════════════════════════════════════════
 // INVENTORY ITEMS
 // ══════════════════════════════════════════════════════════════════════════════
@@ -23,7 +35,7 @@ const genId = async (Model, field, prefix) => {
 // GET /api/inventory
 export const getAllInventory = async (req, res) => {
   try {
-    const { warehouse, status, search } = req.query;
+    const { warehouse, status, search, page, limit } = req.query;
     const filter = {};
     if (warehouse) filter.warehouse = warehouse;
     if (status)    filter.status    = status;
@@ -31,12 +43,24 @@ export const getAllInventory = async (req, res) => {
       { sku:  { $regex: search, $options: 'i' } },
       { name: { $regex: search, $options: 'i' } },
     ];
-    const items = await InventoryItem.find(filter)
-      .populate('category', 'name')
-      .populate('grnId',    'grnId')
-      .populate('poId',     'poId')
-      .populate('vendorId', 'companyName')
-      .sort({ updatedAt: -1 });
+
+    // Pagination support (optional — omit page/limit to return all for backwards compat)
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+    const skip = usePagination ? (pageNum - 1) * limitNum : 0;
+
+    const [items, totalCount] = await Promise.all([
+      InventoryItem.find(filter)
+        .populate('category', 'name')
+        .populate('grnId',    'grnId')
+        .populate('poId',     'poId')
+        .populate('vendorId', 'companyName')
+        .sort({ updatedAt: -1 })
+        .skip(usePagination ? skip : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? InventoryItem.countDocuments(filter) : Promise.resolve(null),
+    ]);
     
     console.log('Raw items from DB:', items.length, 'items');
     if (items.length > 0) {
@@ -70,7 +94,16 @@ export const getAllInventory = async (req, res) => {
       console.log('First processed item:', itemsWithName[0]);
     }
     
-    res.json({ success: true, data: itemsWithName });
+    const response = { success: true, data: itemsWithName };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page:  pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (err) {
     console.error('Error in getAllInventory:', err);
     res.status(500).json({ success: false, message: err.message });
@@ -142,6 +175,7 @@ export const createInventoryItem = async (req, res) => {
     const status = q === 0 ? 'Dead' : q < m ? 'Critical' : 'Active';
 
     const item = await InventoryItem.create({ 
+      itemMasterId: req.body.itemMasterId || undefined,
       sku, 
       name: finalName, 
       qty: q, 
@@ -151,6 +185,58 @@ export const createInventoryItem = async (req, res) => {
       category: category || null, 
       status 
     });
+
+    // ── Auto-generate Manual Stock Entry Invoice when qty > 0 ─────────────────
+    if (q > 0) {
+      try {
+        const unitPrice = Number(req.body.unitPrice || req.body.costPrice || 0);
+        const gstRate   = Number(req.body.gst || 18);
+        const taxableValue = +(q * unitPrice).toFixed(2);
+        const gstAmt    = +(taxableValue * gstRate / 100).toFixed(2);
+        const cgstVal   = +(gstAmt / 2).toFixed(2);
+        const sgstVal   = +(gstAmt / 2).toFixed(2);
+        const grandTotal = +(taxableValue + gstAmt).toFixed(2);
+        const invoiceNo  = await genManualStockInvoiceNo();
+
+        await Invoice.create({
+          invoiceNo,
+          invoiceDate: new Date(),
+          partyName:   'Manual Stock Entry',
+          companyName: 'Sri Chakra Industries',
+          items: [{
+            description: finalName,
+            hsn:         req.body.hsn || '',
+            qty:         q,
+            unit:        unit || 'Nos',
+            rate:        unitPrice,
+            discount:    0,
+            taxRate:     gstRate,
+            basic:       taxableValue,
+            amount:      taxableValue,
+            taxAmount:   gstAmt,
+            total:       grandTotal,
+            cgst:        cgstVal,
+            sgst:        sgstVal,
+            igst:        0,
+          }],
+          subtotal:      taxableValue,
+          totalDiscount: 0,
+          totalTax:      gstAmt,
+          grandTotal,
+          status:        'Draft',
+          source:        'manual',
+          invoiceSource: 'manual_stock_entry',
+          inventoryItemId: item._id,
+          notes: `Auto-generated for manual stock entry of ${finalName} (SKU: ${sku}) — ${q} ${unit || 'Nos'} added to warehouse ${warehouse || 'WH-01'}`,
+        });
+
+        console.log(`[INVENTORY] ✅ Manual Stock Entry Invoice ${invoiceNo} created for SKU ${sku}`);
+      } catch (invoiceErr) {
+        // Don't fail stock creation if invoice generation fails
+        console.error(`[INVENTORY] ⚠ Manual Stock Invoice creation failed (non-fatal): ${invoiceErr.message}`);
+      }
+    }
+
     res.status(201).json({ success: true, data: item });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -242,7 +328,10 @@ export const deleteInventoryItem = async (req, res) => {
 // GET /api/inventory/warehouses
 export const getWarehouses = async (req, res) => {
   try {
-    const warehouses = await Warehouse.find({ status: 'Active' }).sort({ createdAt: 1 });
+    // Accept ?all=true to return every warehouse (used by move-stock dropdown)
+    const showAll = req.query.all === 'true';
+    const filter = showAll ? {} : { status: 'Active' };
+    const warehouses = await Warehouse.find(filter).sort({ createdAt: 1 });
     // Compute used (total qty of items in each warehouse)
     const items = await InventoryItem.find();
     const result = warehouses.map(wh => {
@@ -370,10 +459,31 @@ export const deleteWarehouse = async (req, res) => {
 // GET /api/inventory/movements
 export const getMovements = async (req, res) => {
   try {
-    const { type } = req.query;
+    const { type, page, limit } = req.query;
     const filter = type ? { type } : {};
-    const list = await StockMovement.find(filter).sort({ createdAt: -1 });
-    res.json({ success: true, data: list });
+
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+
+    const [list, totalCount] = await Promise.all([
+      StockMovement.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(usePagination ? (pageNum - 1) * limitNum : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? StockMovement.countDocuments(filter) : Promise.resolve(null),
+    ]);
+
+    const response = { success: true, data: list };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page:  pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -527,7 +637,17 @@ export const getStockByWarehouse = async (req, res) => {
     const { warehouseId } = req.params;
     const stock = await InventoryItem.find({ warehouse: warehouseId })
       .populate('category', 'name');
-    res.json({ success: true, data: stock });
+    const stockWithBreakdown = stock.map(item => ({
+      ...item.toObject(),
+      itemName: item.name,
+      available: item.status === 'Active' ? item.qty : 0,
+      reserved: 0,
+      damaged: 0,
+      expired: 0,
+      transit: 0,
+      total: item.qty,
+    }));
+    res.json({ success: true, data: stockWithBreakdown });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error fetching warehouse stock', error: error.message });
   }
@@ -590,13 +710,41 @@ export const getAllStock = async (req, res) => {
       .sort({ sku: 1 });
     const stockWithBreakdown = stock.map(item => ({
       ...item.toObject(),
+      itemName: item.name,
       available: item.status === 'Active' ? item.qty : 0,
-      reserved: 0, damaged: 0, expired: 0, transit: 0,
+      reserved: 0,
+      damaged: 0,
+      expired: 0,
+      transit: 0,
       total: item.qty,
     }));
     res.json({ success: true, data: stockWithBreakdown });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error fetching stock', error: error.message });
+  }
+};
+
+// ── Dropdown for BOM / Work Order selectors ───────────────────────────────────
+export const getInventoryDropdown = async (req, res) => {
+  try {
+    const items = await InventoryItem.find({})
+      .select('_id name sku unit unitPrice qty itemMasterId')
+      .sort({ name: 1 });
+
+    // Normalise: use name || sku as the display name so nothing is blank
+    const data = items.map(item => ({
+      _id:         item._id,
+      name:        item.name || item.sku || 'Unknown',
+      sku:         item.sku  || item.itemCode || '',
+      unit:        item.unit || 'Nos',
+      costPrice:   item.unitPrice || 0,
+      qty:         item.qty || 0,
+      itemMasterId: item.itemMasterId || null,
+    }));
+
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 

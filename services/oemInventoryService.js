@@ -1,5 +1,5 @@
 import OEMOrder from '../models/OEMOrder.js';
-import Inventory from '../models/Inventory.js';
+import InventoryItem from '../models/InventoryItem.js';
 import StockMovement from '../models/StockMovement.js';
 import PurchaseRequisition from '../models/PurchaseRequisition.js';
 import WorkOrder from '../models/WorkOrder.js';
@@ -22,20 +22,24 @@ export const validateOEMInventory = async (oemOrderId) => {
       shortfalls: []
     };
 
-    for (const material of bom.materials) {
-      const inventory = await Inventory.findOne({
-        itemId: material.materialId
+    for (const component of bom.components) {
+      const requiredQty = component.qty * (1 + (component.scrapFactor || 0) / 100) * oemOrder.quantity;
+      
+      // Find inventory items
+      const invItems = await InventoryItem.find({
+        $or: [
+          { sku: component.itemCode || '' },
+          { name: new RegExp(component.itemName, 'i') }
+        ]
       });
-
-      const requiredQty = material.quantity * oemOrder.quantity;
-      const availableQty = inventory?.quantity || 0;
+      const availableQty = invItems.reduce((sum, item) => sum + (item.qty || 0), 0);
       const isAvailable = availableQty >= requiredQty;
 
       validationResult.materials.push({
-        materialId: material.materialId,
-        materialName: material.materialName,
-        sku: material.sku,
-        requiredQty,
+        materialId: component.itemMasterId,
+        materialName: component.itemName,
+        sku: component.itemCode,
+        requiredQty: Math.round(requiredQty * 1000) / 1000,
         availableQty,
         isAvailable,
         shortfall: Math.max(0, requiredQty - availableQty)
@@ -44,8 +48,8 @@ export const validateOEMInventory = async (oemOrderId) => {
       if (!isAvailable) {
         validationResult.allAvailable = false;
         validationResult.shortfalls.push({
-          materialId: material.materialId,
-          materialName: material.materialName,
+          materialId: component.itemMasterId,
+          materialName: component.itemName,
           shortfallQty: requiredQty - availableQty
         });
       }
@@ -80,46 +84,63 @@ export const reserveOEMMaterials = async (oemOrderId) => {
     const reservedInventory = [];
     const failedReservations = [];
 
-    for (const material of bom.materials) {
-      const requiredQty = material.quantity * oemOrder.quantity;
-      const inventory = await Inventory.findOne({
-        itemId: material.materialId
-      });
+    for (const component of bom.components) {
+      const requiredQty = component.qty * (1 + (component.scrapFactor || 0) / 100) * oemOrder.quantity;
+      
+      // Find inventory items
+      const invItems = await InventoryItem.find({
+        $or: [
+          { sku: component.itemCode || '' },
+          { name: new RegExp(component.itemName, 'i') }
+        ]
+      }).sort({ qty: -1 });
+      
+      let remainingQty = requiredQty;
+      const reservedForComponent = [];
 
-      if (!inventory || inventory.quantity < requiredQty) {
-        failedReservations.push({
-          materialId: material.materialId,
-          materialName: material.materialName,
-          required: requiredQty,
-          available: inventory?.quantity || 0
-        });
-        continue;
+      for (const invItem of invItems) {
+        if (remainingQty <= 0) break;
+        
+        const toReserve = Math.min(invItem.qty, remainingQty);
+        if (toReserve > 0) {
+          invItem.qty -= toReserve;
+          invItem.reservedQuantity = (invItem.reservedQuantity || 0) + toReserve;
+          await invItem.save();
+          
+          reservedForComponent.push({
+            itemId: component.itemMasterId,
+            inventoryId: invItem._id,
+            qty: toReserve,
+            reservedAt: new Date()
+          });
+          
+          // Create stock movement
+          await StockMovement.create({
+            movementId: await generateMovementId(),
+            type: 'Reserved',
+            sku: invItem.sku || component.itemCode,
+            name: component.itemName,
+            qty: -toReserve,
+            from: invItem.warehouse,
+            to: 'Reserved',
+            ref: oemOrder.oemOrderId,
+            remarks: `Reserved for OEM Order: ${oemOrder.oemOrderId}`
+          });
+          
+          remainingQty -= toReserve;
+        }
       }
 
-      // Deduct from inventory
-      inventory.quantity -= requiredQty;
-      inventory.reserved = (inventory.reserved || 0) + requiredQty;
-      await inventory.save();
-
-      // Record reservation
-      reservedInventory.push({
-        itemId: material.materialId,
-        inventoryId: inventory._id,
-        qty: requiredQty,
-        reservedAt: new Date()
-      });
-
-      // Create stock movement
-      await StockMovement.create({
-        itemId: material.materialId,
-        movementType: 'Reserved',
-        quantity: requiredQty,
-        fromLocation: inventory.location,
-        toLocation: 'Reserved',
-        reference: oemOrder.oemOrderId,
-        referenceType: 'OEMOrder',
-        remarks: `Reserved for OEM Order: ${oemOrder.oemOrderId}`
-      });
+      if (remainingQty > 0) {
+        failedReservations.push({
+          materialId: component.itemMasterId,
+          materialName: component.itemName,
+          required: requiredQty,
+          available: requiredQty - remainingQty
+        });
+      } else {
+        reservedInventory.push(...reservedForComponent);
+      }
     }
 
     if (failedReservations.length > 0) {
@@ -152,6 +173,19 @@ export const reserveOEMMaterials = async (oemOrderId) => {
 };
 
 /**
+ * Generate movement ID
+ */
+async function generateMovementId() {
+  const last = await StockMovement.findOne().sort({ createdAt: -1 }).select('movementId');
+  let num = 1;
+  if (last?.movementId) {
+    const match = last.movementId.match(/MV-(\d+)/);
+    if (match) num = parseInt(match[1]) + 1;
+  }
+  return `MV-${String(num).padStart(3, '0')}`;
+}
+
+/**
  * Consume materials during production
  * Deduct from reserved inventory
  */
@@ -171,13 +205,12 @@ export const consumeOEMMaterials = async (workOrderId) => {
     const consumedInventory = [];
 
     for (const reserved of oemOrder.reservedInventory) {
-      const inventory = await Inventory.findById(reserved.inventoryId);
-      if (!inventory) continue;
+      const invItem = await InventoryItem.findById(reserved.inventoryId);
+      if (!invItem) continue;
 
       // Update inventory
-      inventory.reserved = Math.max(0, (inventory.reserved || 0) - reserved.qty);
-      inventory.consumed = (inventory.consumed || 0) + reserved.qty;
-      await inventory.save();
+      invItem.reservedQuantity = Math.max(0, (invItem.reservedQuantity || 0) - reserved.qty);
+      await invItem.save();
 
       // Record consumption
       consumedInventory.push({
@@ -189,13 +222,14 @@ export const consumeOEMMaterials = async (workOrderId) => {
 
       // Create stock movement
       await StockMovement.create({
-        itemId: reserved.itemId,
-        movementType: 'Consumed',
-        quantity: reserved.qty,
-        fromLocation: 'Reserved',
-        toLocation: 'Production',
-        reference: workOrder.woId,
-        referenceType: 'WorkOrder',
+        movementId: await generateMovementId(),
+        type: 'Consumed',
+        sku: invItem.sku,
+        name: invItem.name,
+        qty: -reserved.qty,
+        from: 'Reserved',
+        to: 'Production',
+        ref: workOrder.woId,
         remarks: `Consumed for Work Order: ${workOrder.woId}`
       });
     }
@@ -241,18 +275,20 @@ export const autoGeneratePRForShortfall = async (oemOrderId) => {
     }
 
     // Generate PR ID
-    const year = new Date().getFullYear();
-    const count = await PurchaseRequisition.countDocuments();
-    const prId = `PR-${year}-${String(count + 1).padStart(5, '0')}`;
+    const lastPR = await PurchaseRequisition.findOne().sort({ createdAt: -1 }).select('prId');
+    let prId;
+    if (lastPR?.prId) {
+      const match = lastPR.prId.match(/PR-(\d+)/);
+      if (match) prId = `PR-${String(parseInt(match[1]) + 1).padStart(4, '0')}`;
+    }
+    if (!prId) prId = 'PR-0001';
 
     // Create PR items
     const prItems = shortfalls.map(shortfall => ({
-      itemId: shortfall.materialId,
-      itemName: shortfall.materialName,
-      quantity: shortfall.shortfallQty,
-      unit: 'Pcs',
-      estimatedCost: 0,
-      remarks: `Auto-generated for OEM Order: ${oemOrder.oemOrderId}`
+      name: shortfall.materialName,
+      qty: Math.ceil(shortfall.shortfallQty),
+      unit: 'Nos',
+      estimatedPrice: 0
     }));
 
     // Create PR
@@ -260,11 +296,8 @@ export const autoGeneratePRForShortfall = async (oemOrderId) => {
       prId,
       items: prItems,
       status: 'Pending',
-      approvalStatus: 'Pending',
       priority: 'High',
-      requiredDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000), // 3 days
-      remarks: `Auto-generated for OEM Order: ${oemOrder.oemOrderId}`,
-      linkedOEMOrder: oemOrder._id
+      remarks: `Auto-generated for OEM Order: ${oemOrder.oemOrderId}`
     });
 
     // Link PR to OEM order
@@ -294,23 +327,24 @@ export const releaseReservedMaterials = async (oemOrderId) => {
     }
 
     for (const reserved of oemOrder.reservedInventory) {
-      const inventory = await Inventory.findById(reserved.inventoryId);
-      if (!inventory) continue;
+      const invItem = await InventoryItem.findById(reserved.inventoryId);
+      if (!invItem) continue;
 
       // Release inventory
-      inventory.quantity += reserved.qty;
-      inventory.reserved = Math.max(0, (inventory.reserved || 0) - reserved.qty);
-      await inventory.save();
+      invItem.qty += reserved.qty;
+      invItem.reservedQuantity = Math.max(0, (invItem.reservedQuantity || 0) - reserved.qty);
+      await invItem.save();
 
       // Create stock movement
       await StockMovement.create({
-        itemId: reserved.itemId,
-        movementType: 'Released',
-        quantity: reserved.qty,
-        fromLocation: 'Reserved',
-        toLocation: inventory.location,
-        reference: oemOrder.oemOrderId,
-        referenceType: 'OEMOrder',
+        movementId: await generateMovementId(),
+        type: 'Released',
+        sku: invItem.sku,
+        name: invItem.name,
+        qty: reserved.qty,
+        from: 'Reserved',
+        to: invItem.warehouse,
+        ref: oemOrder.oemOrderId,
         remarks: `Released due to OEM Order cancellation: ${oemOrder.oemOrderId}`
       });
     }
@@ -348,23 +382,30 @@ export const getOEMInventoryStatus = async (oemOrderId) => {
     const bom = oemOrder.bomId;
     const materials = [];
 
-    for (const material of bom.materials) {
-      const inventory = await Inventory.findOne({
-        itemId: material.materialId
+    for (const component of bom.components) {
+      const requiredQty = component.qty * (1 + (component.scrapFactor || 0) / 100) * oemOrder.quantity;
+      
+      // Find inventory items
+      const invItems = await InventoryItem.find({
+        $or: [
+          { sku: component.itemCode || '' },
+          { name: new RegExp(component.itemName, 'i') }
+        ]
       });
-
-      const requiredQty = material.quantity * oemOrder.quantity;
-      const availableQty = inventory?.quantity || 0;
-      const reservedQty = inventory?.reserved || 0;
+      const availableQty = invItems.reduce((sum, item) => sum + (item.qty || 0), 0);
+      const reservedQty = invItems.reduce((sum, item) => sum + (item.reservedQuantity || 0), 0);
 
       materials.push({
-        materialId: material.materialId,
-        materialName: material.materialName,
-        sku: material.sku,
-        requiredQty,
+        materialId: component.itemMasterId,
+        materialName: component.itemName,
+        sku: component.itemCode,
+        requiredQty: Math.round(requiredQty * 1000) / 1000,
         availableQty,
         reservedQty,
-        consumedQty: oemOrder.consumedInventory.find(c => c.itemId.toString() === material.materialId.toString())?.qty || 0,
+        consumedQty: oemOrder.consumedInventory.find(c => 
+          c.itemId && component.itemMasterId && 
+          c.itemId.toString() === component.itemMasterId.toString()
+        )?.qty || 0,
         status: availableQty >= requiredQty ? 'Available' : 'Partial'
       });
     }

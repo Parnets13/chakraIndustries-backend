@@ -21,6 +21,9 @@ import {
   getCostVarianceAnalysis,
   getOEMCostBreakdown
 } from '../services/oemCostingService.js';
+import {
+  autoCreateWorkOrder
+} from '../services/oemWorkflowService.js';
 
 /**
  * Validate inventory and auto-generate PR if needed
@@ -74,10 +77,19 @@ export const reserveAndProceed = async (req, res) => {
       return res.status(400).json(reservation);
     }
 
+    // Auto create work order
+    const workOrderResult = await autoCreateWorkOrder(id);
+    if (!workOrderResult.success) {
+      return res.status(400).json(workOrderResult);
+    }
+
     res.json({
       success: true,
-      message: 'Materials reserved successfully',
-      data: reservation.data
+      message: 'Materials reserved and work order created successfully',
+      data: {
+        reservation: reservation.data,
+        workOrder: workOrderResult.data
+      }
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

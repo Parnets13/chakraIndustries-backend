@@ -32,7 +32,7 @@ const bulkQuotationSchema = new mongoose.Schema(
     },
     validity: {
       type: Date,
-      required: [true, 'Validity date is required']
+      default: null
     },
     status: {
       type: String,

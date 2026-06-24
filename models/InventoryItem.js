@@ -3,6 +3,8 @@ import mongoose from 'mongoose';
 const inventoryItemSchema = new mongoose.Schema({
   itemCode:   { type: String, unique: true, sparse: true },
   itemName:   { type: String, default: '' },
+  // Link to an item master record when manual stock is created from the master
+  itemMasterId: { type: mongoose.Schema.Types.ObjectId, ref: 'ItemMaster', default: null },
   // Legacy-compatible aliases stored directly in the document
   sku:        { type: String, unique: true, sparse: true },
   name:       { type: String, default: '' },

@@ -39,10 +39,16 @@ const generateClientId = async () => {
 const syncDealerToClient = async (dealer) => {
   const city = dealer.city || 'Not Provided';
   const contact = dealer.contactPerson || dealer.name;
+  // Ensure phone is strictly 10 digits for Client model validation
+  const phone = normalizeMobile(dealer.mobile);
+  if (phone.length !== 10) {
+    throw new Error(`Invalid mobile number for client sync: ${phone}`);
+  }
+
   const clientPayload = {
     name: dealer.businessName || dealer.name,
     contact,
-    phone: dealer.mobile,
+    phone,
     email: dealer.email || '',
     city,
     state: dealer.state || '',
@@ -58,7 +64,7 @@ const syncDealerToClient = async (dealer) => {
 
   let client = dealer.erpClientId ? await Client.findById(dealer.erpClientId) : null;
   if (!client) {
-    client = await Client.findOne({ phone: dealer.mobile });
+    client = await Client.findOne({ phone });
   }
 
   if (client) {
@@ -158,26 +164,53 @@ export const verifyDealerOtp = async (req, res) => {
     const mobile = normalizeMobile(req.body.mobile);
     const otp = String(req.body.otp || '').trim();
 
-    const dealer = await Dealer.findOne({ mobile }).select('+otp +otpExpiry');
-    if (!dealer || !dealer.isActive) {
-      return res.status(404).json({ success: false, message: 'Dealer not registered or inactive' });
+    if (!mobile || mobile.length !== 10) {
+      return res.status(400).json({ success: false, message: 'Valid mobile number is required' });
     }
-    
-    // Check master OTP (for testing/debugging)
-    const isMasterOtp = otp === '123456';
-    if (!isMasterOtp && (!dealer.otp || dealer.otp !== otp || !dealer.otpExpiry || dealer.otpExpiry < new Date())) {
-      return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
+    if (!otp) {
+      return res.status(400).json({ success: false, message: 'OTP is required' });
     }
 
+    const dealer = await Dealer.findOne({ mobile }).select('+otp +otpExpiry');
+    if (!dealer) {
+      return res.status(404).json({ success: false, message: 'Dealer not found. Please register first.' });
+    }
+    if (!dealer.isActive) {
+      return res.status(403).json({ success: false, message: 'Your dealer account is inactive. Contact support.' });
+    }
+
+    // Master OTP always works (testing / support access)
+    const isMasterOtp = otp === '123456';
+
+    if (!isMasterOtp) {
+      if (!dealer.otp) {
+        return res.status(401).json({ success: false, message: 'OTP not requested. Please request a new OTP first.' });
+      }
+      if (dealer.otp !== otp) {
+        return res.status(401).json({ success: false, message: 'Incorrect OTP. Please check and try again.' });
+      }
+      if (!dealer.otpExpiry || dealer.otpExpiry < new Date()) {
+        return res.status(401).json({ success: false, message: 'OTP has expired. Please request a new one.' });
+      }
+    }
+
+    // Clear OTP fields
     dealer.otp = undefined;
     dealer.otpExpiry = undefined;
     await dealer.save();
-    await syncDealerToClient(dealer);
+
+    // Sync to ERP client — non-blocking, don't fail login if this errors
+    try {
+      await syncDealerToClient(dealer);
+    } catch (syncErr) {
+      console.error('syncDealerToClient error (non-fatal):', syncErr.message);
+    }
 
     const token = generateToken(dealer._id);
-    res.json({ success: true, token, dealer: publicDealer(dealer) });
+    return res.json({ success: true, token, dealer: publicDealer(dealer) });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message || 'Failed to verify OTP' });
+    console.error('verifyDealerOtp error:', error);
+    return res.status(500).json({ success: false, message: 'Login failed. Please try again.' });
   }
 };
 
@@ -223,20 +256,28 @@ export const getDealerDashboard = async (req, res) => {
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
   try {
-    // Get dealer's orders from ERP (clientId links dealer to ERP client)
-    const filter = dealer.erpClientId ? { customer: dealer.erpClientId } : {};
-    
+    // Match orders belonging to this dealer: by erpClientId, name, or dealerId
+    const dealerCustomer = dealer.businessName || dealer.name;
+    const baseOr = [];
+    if (dealer.erpClientId) baseOr.push({ customerId: dealer.erpClientId });
+    if (dealerCustomer)     baseOr.push({ customer: dealerCustomer });
+    if (dealer._id)         baseOr.push({ dealerId: dealer._id });
+    const filter = baseOr.length ? { $or: baseOr } : {};
+
     const allOrders = await SalesOrder.find(filter).sort({ createdAt: -1 });
     const monthOrders = await SalesOrder.find({
       ...filter,
       createdAt: { $gte: startOfMonth }
     });
 
-    // Calculate stats
+    // Calculate stats using new statuses
     const totalOrders = allOrders.length;
-    const pendingOrders = allOrders.filter(o => ['Pending', 'Processing', 'Approved'].includes(o.status)).length;
+    const pendingApprovalOrders = allOrders.filter(o => o.status === 'Pending Approval').length;
     const approvedOrders = allOrders.filter(o => o.status === 'Approved').length;
-    const dispatchedOrders = allOrders.filter(o => ['Shipped', 'In Transit'].includes(o.status)).length;
+    const pickingOrders = allOrders.filter(o => ['Picking Started', 'Picking Completed'].includes(o.status)).length;
+    const sortingOrders = allOrders.filter(o => ['Sorting Started', 'Sorting Completed'].includes(o.status)).length;
+    const packingOrders = allOrders.filter(o => ['Packing Started', 'Packing Completed'].includes(o.status)).length;
+    const dispatchedOrders = allOrders.filter(o => ['Dispatched'].includes(o.status)).length;
     const deliveredOrders = allOrders.filter(o => o.status === 'Delivered').length;
     
     const monthlyPurchaseAmount = monthOrders.reduce((sum, o) => sum + (Number(o.value) || 0), 0);
@@ -250,7 +291,7 @@ export const getDealerDashboard = async (req, res) => {
       orderId: o.orderId || o._id,
       date: o.createdAt,
       amount: o.value || 0,
-      status: o.status || 'Pending'
+      status: o.status || 'Order Placed'
     }));
 
     res.json({
@@ -264,8 +305,11 @@ export const getDealerDashboard = async (req, res) => {
         stats: {
           totalOrders,
           monthOrders: monthOrders.length,
-          pendingOrders,
+          pendingApprovalOrders,
           approvedOrders,
+          pickingOrders,
+          sortingOrders,
+          packingOrders,
           dispatchedOrders,
           deliveredOrders,
           monthlyPurchaseAmount,
@@ -276,26 +320,10 @@ export const getDealerDashboard = async (req, res) => {
     });
   } catch (error) {
     console.error('Dashboard Error:', error);
-    res.json({
-      success: true,
-      data: {
-        dealer: {
-          ...publicDealer(dealer),
-          usedCredit,
-          availableCredit: Math.max(creditLimit - usedCredit, 0),
-        },
-        stats: {
-          totalOrders: 0,
-          monthOrders: 0,
-          pendingOrders: 0,
-          approvedOrders: 0,
-          dispatchedOrders: 0,
-          deliveredOrders: 0,
-          monthlyPurchaseAmount: 0,
-          pendingInvoices: 0,
-        },
-        recentOrders: [],
-      },
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch dashboard data',
+      error: error.message
     });
   }
 };

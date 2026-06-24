@@ -223,10 +223,10 @@ export const getAgeingStockData = async (req, res) => {
           const daysSinceReference = Math.floor((new Date() - new Date(referenceDate)) / (1000 * 60 * 60 * 24));
 
           // Determine bucket based on days
-          let bucket = '0–30';
+          let bucket = '0-30';
           if (daysSinceReference > 90) bucket = '90+';
-          else if (daysSinceReference > 60) bucket = '61–90';
-          else if (daysSinceReference > 30) bucket = '31–60';
+          else if (daysSinceReference > 60) bucket = '61-90';
+          else if (daysSinceReference > 30) bucket = '31-60';
 
           // Determine action based on age and remaining stock
           let action = 'No Action';

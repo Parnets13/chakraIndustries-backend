@@ -54,6 +54,7 @@ export const getAllWorkOrders = async (req, res) => {
         path: 'bomId',
         select: 'bomId product version components overheadPct labourCost status'
       })
+      .populate('productItemMasterId', 'itemId sku name unit description')
       .populate('oemBrand', 'brandId name code color status')
       .sort({ createdAt: -1 });
     
@@ -76,6 +77,7 @@ export const getAllWorkOrders = async (req, res) => {
 export const getWorkOrderById = async (req, res) => {
   try {
     const wo = await WorkOrder.findById(req.params.id)
+      .populate('productItemMasterId', 'itemId sku name unit description')
       .populate({
         path: 'bomId',
         select: 'bomId product version components overheadPct labourCost status',
@@ -121,7 +123,7 @@ export const getWorkOrderById = async (req, res) => {
 export const createWorkOrder = async (req, res) => {
   try {
     const {
-      product, bomId, qty, woId, shift, startDate, endDate, priority, remarks,
+      productItemMasterId, product, bomId, qty, woId, shift, startDate, endDate, priority, remarks,
       oemBrand, oemProduct, salesOrderId, productionLine, machine, assignedTeam, supervisor
     } = req.body;
     
@@ -159,6 +161,7 @@ export const createWorkOrder = async (req, res) => {
 
     const wo = await WorkOrder.create({
       woId: finalWoId,
+      productItemMasterId: productItemMasterId || null,
       product: product.trim(),
       bomId: bomId || null,
       oemBrand: oemBrand || null,
@@ -211,6 +214,7 @@ export const releaseWorkOrder = async (req, res) => {
 
     // Build material consumption plan from BOM components
     wo.materialConsumption = bom.components.map(c => ({
+      itemMasterId: c.itemMasterId,
       itemName:    c.itemName,
       itemCode:    c.itemCode,
       plannedQty:  Math.round(c.qty * (1 + (c.scrapFactor || 0) / 100) * wo.qty * 1000) / 1000,
@@ -386,18 +390,19 @@ export const deductInventory = async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
-// ── QC RESULT ─────────────────────────────────────────────────────────────────
+// ── QC result ─────────────────────────────────────────────────────────────────
 // PATCH /api/workorders/:id/qc
 export const recordQC = async (req, res) => {
   try {
-    const { passedQty, rejectedQty, defectType, inspectedBy, remarks } = req.body;
+    const { passedQty, reworkQty, rejectedQty, defectType, inspectedBy, remarks } = req.body;
     const wo = await WorkOrder.findById(req.params.id);
     if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
 
-    wo.qcResult = { passedQty: passedQty || 0, rejectedQty: rejectedQty || 0, defectType, inspectedBy, inspectedAt: new Date(), remarks };
+    wo.qcResult = { passedQty: passedQty || 0, reworkQty: reworkQty || 0, rejectedQty: rejectedQty || 0, defectType, inspectedBy, inspectedAt: new Date(), remarks };
     wo.produced  = passedQty || 0;
     wo.rejected  = rejectedQty || 0;
-    wo.status    = (passedQty || 0) >= wo.qty ? 'Completed' : 'QC Pending';
+    // If there's rework, keep status as QC Pending; otherwise mark as Completed if passed qty meets WO qty
+    wo.status    = (reworkQty || 0) > 0 ? 'QC Pending' : ((passedQty || 0) >= wo.qty ? 'Completed' : 'QC Pending');
     if (wo.status === 'Completed') wo.actualEnd = new Date();
 
     if (!wo.finishedGoodsPosted && (passedQty || 0) > 0) {
@@ -462,17 +467,18 @@ export const recordQC = async (req, res) => {
 
 // ── RECORD MATERIAL WASTAGE ───────────────────────────────────────────────────
 // PATCH /api/workorders/:id/wastage
-// body: { consumptionIndex, wastedQty, wastageReason }
+// body: { consumptionId, wastedQty, wastageReason }
 export const recordWastage = async (req, res) => {
   try {
-    const { consumptionIndex, wastedQty, wastageReason } = req.body;
+    const { consumptionId, wastedQty, wastageReason } = req.body;
     const wo = await WorkOrder.findById(req.params.id);
     if (!wo) return res.status(404).json({ success: false, message: 'Work order not found' });
-    if (!wo.materialConsumption[consumptionIndex]) {
+
+    const line = wo.materialConsumption.id(consumptionId);
+    if (!line) {
       return res.status(400).json({ success: false, message: 'Invalid consumption line' });
     }
 
-    const line = wo.materialConsumption[consumptionIndex];
     line.wastedQty = parseFloat(wastedQty) || 0;
     line.wastageReason = wastageReason || '';
 
