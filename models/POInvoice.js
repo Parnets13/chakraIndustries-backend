@@ -34,6 +34,10 @@ const poInvoiceItemSchema = new mongoose.Schema({
 
 const poInvoiceSchema = new mongoose.Schema({
   invoiceNo:    { type: String, unique: true, required: true },
+  // ── Company-wise segregation ──────────────────────────────────────────────
+  companyId:    { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
+  companyName:  { type: String, default: '' },   // denormalised for fast reads
+  // ─────────────────────────────────────────────────────────────────────────
   poId:         { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseOrder', default: null },
   poRef:        { type: String, default: '' },
   vendorName:   { type: String, default: '' },
@@ -71,6 +75,7 @@ const poInvoiceSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 poInvoiceSchema.index({ poId: 1 }, { sparse: true });
+poInvoiceSchema.index({ companyId: 1 }, { sparse: true });
 poInvoiceSchema.index({ invoiceNo: 1 });
 poInvoiceSchema.index({ status: 1 });
 poInvoiceSchema.index({ deliveryStatus: 1 });

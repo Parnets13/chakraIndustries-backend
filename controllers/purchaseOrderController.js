@@ -1,7 +1,7 @@
 import PurchaseOrder from '../models/PurchaseOrder.js';
 import XLSX from 'xlsx';
 import { logActivity } from '../utils/activityLogger.js';
-import nodemailer from 'nodemailer';
+import { sendEmail } from '../utils/emailService.js';
 
 // Generate PO ID
 const generatePOId = async () => {
@@ -20,18 +20,42 @@ const generatePOId = async () => {
 // Get all POs
 export const getAllPOs = async (req, res) => {
   try {
-    const { status, vendor } = req.query;
+    const { status, vendor, search, page, limit } = req.query;
     const filter = {};
     if (status) filter.status = status;
     if (vendor) filter.vendor = vendor;
+    if (search) {
+      filter.$or = [
+        { poId: { $regex: search, $options: 'i' } },
+      ];
+    }
 
-    const pos = await PurchaseOrder.find(filter)
-      .populate('vendor')
-      .populate('linkedRFQ', 'rfqId title')
-      .populate('sentHistory.sentBy', 'name email')
-      .sort({ createdAt: -1 });
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+    const skip = usePagination ? (pageNum - 1) * limitNum : 0;
 
-    res.json({ success: true, data: pos });
+    const [pos, totalCount] = await Promise.all([
+      PurchaseOrder.find(filter)
+        .populate('vendor')
+        .populate('linkedRFQ', 'rfqId title')
+        .populate('sentHistory.sentBy', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(usePagination ? skip : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? PurchaseOrder.countDocuments(filter) : Promise.resolve(null),
+    ]);
+
+    const response = { success: true, data: pos };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -336,21 +360,6 @@ export const sendPOEmail = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No email recipient provided' });
     }
 
-    const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
-    if (!SMTP_USER || !SMTP_PASS) {
-      return res.status(500).json({ success: false, message: 'Email service not configured' });
-    }
-
-    const transporter = nodemailer.createTransport({
-      host: SMTP_HOST || 'smtp.gmail.com',
-      port: parseInt(SMTP_PORT || '587'),
-      secure: parseInt(SMTP_PORT || '587') === 465,
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-    });
-
-    const fromName = process.env.SMTP_FROM_NAME || 'Sri Chakra Industries';
-    const fromEmail = SMTP_USER;
-
     const fmtDate = (d) => {
       try { return new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); }
       catch { return d || ''; }
@@ -483,8 +492,7 @@ export const sendPOEmail = async (req, res) => {
 </body>
 </html>`;
 
-    await transporter.sendMail({
-      from: `"${fromName}" <${fromEmail}>`,
+    await sendEmail({
       to: recipientEmail,
       subject: `Purchase Order ${po.poId} from Sri Chakra Industries`,
       html: htmlBody,

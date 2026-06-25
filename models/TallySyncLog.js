@@ -9,6 +9,17 @@ const tallySyncLogSchema = new mongoose.Schema({
   duration:  { type: String, default: '' },
   error:     { type: String, default: '' },
   records:   { type: Number, default: 0 },
+  modules:   [{ 
+    name: String, 
+    count: Number, 
+    timestamp: Date, 
+    route: String,
+    created: { type: Number, default: 0 },
+    updated: { type: Number, default: 0 },
+    skipped: { type: Number, default: 0 },
+    failed: { type: Number, default: 0 },
+    totalFound: { type: Number, default: 0 }
+  }],
   triggeredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 

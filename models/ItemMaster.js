@@ -96,9 +96,9 @@ const itemMasterSchema = new mongoose.Schema({
   },
   barcode: {
     type: String,
-    default: '',
+    default: undefined,
     trim: true,
-    // sparse unique: allows multiple empty strings but enforces uniqueness for non-empty values
+    // sparse unique: allows multiple null values but enforces uniqueness for non-null values
     index: { unique: true, sparse: true },
   },
   
@@ -116,8 +116,8 @@ const itemMasterSchema = new mongoose.Schema({
   tallyGuid: {
     type: String,
     trim: true,
-    sparse: true,
-    index: true
+    unique: true,
+    sparse: true
   },
   tallyAlterId: {
     type: String,
@@ -133,6 +133,23 @@ const itemMasterSchema = new mongoose.Schema({
   tallyStockName: {
     type: String,
     trim: true
+  },
+  // Tally stock balance fields
+  openingStock: {
+    type: Number,
+    default: 0
+  },
+  openingValue: {
+    type: Number,
+    default: 0
+  },
+  closingBalance: {
+    type: String,
+    default: '0'
+  },
+  closingValue: {
+    type: String,
+    default: '0'
   }
 }, {
   timestamps: true

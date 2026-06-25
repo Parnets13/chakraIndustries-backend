@@ -7,6 +7,9 @@ const tallyConfigSchema = new mongoose.Schema({
   tallyLocalUrl:{ type: String, default: '' },
   port:         { type: String, default: '9000' },
   companyName:  { type: String, default: '' },
+  // Financial year start date (e.g. 2026-04-01 for Apr 2026 – Mar 2027).
+  // Used as the lower bound when fetching vouchers from Tally for the first time.
+  financialYearStart: { type: Date, default: null },
   authType:     { type: String, enum: ['None','Basic Auth','API Key'], default: 'None' },
   apiKey:       { type: String, default: '' },
   // Enhanced settings for bi-directional sync

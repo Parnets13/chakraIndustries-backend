@@ -21,6 +21,7 @@ const consumptionSchema = new mongoose.Schema({
   unitCost:        { type: Number, default: 0 },
   consumedAt:      { type: Date },
   consumedBy:      { type: String, default: '' },
+  wastedAt:        { type: Date, default: null },  // ✅ When wastage was last recorded
 }, { _id: true });
 
 // ── WIP stage ─────────────────────────────────────────────────────────────────

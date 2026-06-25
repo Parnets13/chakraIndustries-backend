@@ -1,29 +1,100 @@
 
 import axios from 'axios';
-import TallyConfig    from '../models/TallyConfig.js';
+import http from 'http';
+import { XMLParser } from 'fast-xml-parser';
+import TallyConfig from '../models/TallyConfig.js';
 import TallySyncState from '../models/TallySyncState.js';
-import TallySyncLog   from '../models/TallySyncLog.js';
-import ItemMaster     from '../models/ItemMaster.js';
+import TallySyncLog from '../models/TallySyncLog.js';
+import ItemMaster from '../models/ItemMaster.js';
 import AccountsLedger from '../models/AccountsLedger.js';
-import Vendor         from '../models/Vendor.js';
-import Client         from '../models/Client.js';
-import Invoice        from '../models/Invoice.js';
-import TallyVoucher   from '../models/TallyVoucher.js';
+import Vendor from '../models/Vendor.js';
+import Client from '../models/Client.js';
+import Invoice from '../models/Invoice.js';
+import TallyVoucher from '../models/TallyVoucher.js';
 
-// ─── CONSTANTS ────────────────────────────────────────────────────────────────
-const CHUNK_DAYS        = 15;   // days per date-range chunk
-const MAX_CHUNK_RETRIES = 3;    // retry each chunk up to 3 times
-const FULL_FETCH_TIMEOUT= 60000;// 60s for full-fetch attempt
-const CHUNK_TIMEOUT     = 45000;// 45s per chunk
-const MIN_RESPONSE_BYTES= 200;  // smaller → treat as empty/error
-// If response is < this ratio of the first attempt → assume truncation
-const TRUNCATION_RATIO  = 0.85;
+// === CONSTANTS ===
+const CHUNK_DAYS = 30;  // Fetch 30 days per chunk (Tally honours short date ranges reliably)
+const MAX_CHUNK_RETRIES = 3;
+const MIN_RESPONSE_BYTES = 200;
 
-const LOG = (...a) => console.log('[TallyFetch]', ...a);
-const ERR = (...a) => console.error('[TallyFetch ERROR]', ...a);
+// === ENTITY-SPECIFIC DYNAMIC TIMEOUTS (ms) ===
+const ENTITY_TIMEOUTS = {
+  Ledgers:     60000,
+  Items:      120000,
+  Purchase:   300000,  // 5 min — Collection returns all vouchers (~14MB)
+  Sales:      300000,
+  Payment:    300000,
+  Receipt:    300000,
+  Journal:    300000,
+  Contra:     300000,
+};
+const HEALTH_CHECK_TIMEOUT = 10000;
 
-// ─── CONFIG HELPERS ───────────────────────────────────────────────────────────
+// === GLOBAL STATE ===
+let _tallyRequestLock = false;
+let _requestQueue = [];
+let _syncInProgress = false;
+let _healthCheckInProgress = false;
 
+// === XML PARSER ===
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  parseTagValue: true,
+  parseAttributeValue: true,
+  allowBooleanAttributes: true,
+  ignoreDeclaration: true,
+  trimValues: true,
+  arrayMode: (tagName, jPath, isLeafNode, isAttribute) => {
+    // Always treat these as arrays regardless of count in the XML
+    return ['LEDGER', 'STOCKITEM', 'VOUCHER',
+      'TALLYMESSAGE',
+      'ALLLEDGERENTRIES.LIST', 'LEDGERENTRIES.LIST',
+      'ALLINVENTORYENTRIES.LIST', 'INVENTORYENTRIES.LIST',
+      'BILLALLOCATIONS.LIST', 'BATCHALLOCATIONS.LIST',
+      'ACCOUNTINGALLOCATIONS.LIST', 'GSTADVADJDETAILS.LIST',
+      'ADDRESS', 'BASICBUYERADDRESS', 'DISPATCHFROMADDRESS',
+    ].includes(tagName);
+  }
+});
+
+// === LOGGING HELPERS ===
+const LOG = (msg) => console.log(`[Tally] ${msg}`);
+const ERR = (msg, err) => console.error(`[Tally ERROR] ${msg}`, err ? err.message || err : '');
+
+// === HTTP AGENT FOR KEEP-ALIVE ===
+const httpAgent = new http.Agent({ keepAlive: true });
+
+// === AXIOS INSTANCE ===
+const axiosInstance = axios.create({
+  headers: {
+    'Content-Type': 'text/xml',
+    'Accept': '*/*',
+  },
+  httpAgent,
+  maxRedirects: 5,
+  validateStatus: () => true,
+});
+
+// === LOCK/QUEUE ===
+async function acquireLock() {
+  LOG('Lock Acquired');
+  while (_tallyRequestLock) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  _tallyRequestLock = true;
+}
+
+function releaseLock() {
+  LOG('Lock Released');
+  _tallyRequestLock = false;
+  if (_requestQueue.length > 0) {
+    const next = _requestQueue.shift();
+    next();
+  }
+}
+
+// === CONFIG HELPERS ===
 async function getCfg() {
   let cfg = await TallyConfig.findOne();
   if (!cfg) cfg = await TallyConfig.create({});
@@ -31,30 +102,20 @@ async function getCfg() {
 }
 
 function tallyBaseUrl(cfg) {
-  const port  = cfg.port || '9000';
-
-  // Priority 1: tallyLocalUrl (local machine address set in Settings
+  const port = cfg.port || '9000';
   const local = (cfg.tallyLocalUrl || '').trim();
   if (local) {
-    console.log('[TallyFetch] Using tallyLocalUrl:', local);
     if (local.startsWith('https://')) return local.replace(/\/$/, '');
     if (local.match(/:\d+$/)) return local.replace(/\/$/, '');
     return `${local.replace(/\/$/, '')}:${port}`;
   }
-
-  // Priority 2: serverUrl (legacy / cloud tunnel)
   const server = (cfg.serverUrl || '').trim();
   if (server) {
-    console.log('[TallyFetch] Using serverUrl:', server);
     if (server.startsWith('https://')) return server.replace(/\/$/, '');
     if (server.match(/:\d+$/)) return server.replace(/\/$/, '');
     return `${server.replace(/\/$/, '')}:${port}`;
   }
-
-  // Fallback to localhost
-  const fallback = `http://localhost:${port}`;
-  console.log('[TallyFetch] Using fallback localhost:', fallback);
-  return fallback;
+  return `http://localhost:${port}`;
 }
 
 function buildHeaders(cfg) {
@@ -66,48 +127,7 @@ function buildHeaders(cfg) {
   return h;
 }
 
-// ─── HTTP POST ────────────────────────────────────────────────────────────────
-
-async function postXml(cfg, xml, timeoutMs = CHUNK_TIMEOUT) {
-  const url = tallyBaseUrl(cfg);
-  LOG(`POST ${url}  bytes=${xml.length}  timeout=${timeoutMs}ms`);
-  const resp = await axios({
-    method: 'POST', url,
-    data: xml,
-    headers: buildHeaders(cfg),
-    timeout: timeoutMs,
-    responseType: 'text',
-    validateStatus: () => true,
-    maxRedirects: 5,
-  });
-  const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
-  LOG(`  → HTTP ${resp.status}  bytes=${body.length}  preview: ${body.slice(0, 150)}`);
-  return body;
-}
-
-// Retry wrapper — up to `attempts` tries with exponential back-off
-async function postXmlWithRetry(cfg, xml, timeoutMs, attempts = MAX_CHUNK_RETRIES) {
-  let lastErr;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const body = await postXml(cfg, xml, timeoutMs);
-      if (body && body.length >= MIN_RESPONSE_BYTES) return body;
-      lastErr = new Error(`Response too short (${body.length} bytes)`);
-    } catch (err) {
-      lastErr = err;
-      ERR(`Attempt ${i + 1}/${attempts} failed: ${err.message}`);
-    }
-    if (i < attempts - 1) {
-      const delay = 2000 * Math.pow(2, i); // 2s, 4s, 8s
-      LOG(`  Retrying in ${delay}ms...`);
-      await new Promise(r => setTimeout(r, delay));
-    }
-  }
-  throw lastErr;
-}
-
-// ─── XML HELPERS ──────────────────────────────────────────────────────────────
-
+// === XML HELPERS ===
 function esc(s) {
   if (s == null) return '';
   return String(s)
@@ -118,7 +138,6 @@ function esc(s) {
     .replace(/'/g, '&apos;');
 }
 
-// Convert Date → Tally date string YYYYMMDD
 function td(d) {
   const dt = d instanceof Date ? d : new Date(d);
   if (isNaN(dt)) return null;
@@ -128,45 +147,44 @@ function td(d) {
   return `${y}${m}${dd}`;
 }
 
-function extractGuid(block) {
-  const m = block.match(/<GUID>(.*?)<\/GUID>/i);
-  return m ? m[1].trim() : null;
-}
-function extractAlterId(block) {
-  const m = block.match(/<ALTERID[^>]*>(.*?)<\/ALTERID>/i);
-  return m ? m[1].trim() : null;
+function decodeXmlEntities(s) {
+  if (!s) return '';
+  return String(s)
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
 }
 
-// ─── RESPONSE COMPLETENESS CHECK ─────────────────────────────────────────────
-// Detect truncated XML by looking for unclosed root tags or anomalies.
+// === XML VALIDATION ===
+function validateXml(xml) {
+  if (!xml || typeof xml !== 'string') return false;
+  const trimmed = xml.trim();
+  if (!trimmed.startsWith('<ENVELOPE>')) return false;
+  if (!trimmed.endsWith('</ENVELOPE>')) return false;
+  return true;
+}
 
+// === RESPONSE VALIDATION ===
 function isResponseComplete(xml) {
   if (!xml || xml.length < MIN_RESPONSE_BYTES) return false;
   const trimmed = xml.trimEnd();
-  // Tally XML should end with </ENVELOPE> or </TALLYMESSAGE>
   if (trimmed.endsWith('</ENVELOPE>') || trimmed.endsWith('</TALLYMESSAGE>')) return true;
-  // Sometimes Tally returns error envelopes — still valid
   if (trimmed.endsWith('</LINEERROR>') || trimmed.endsWith('</ERRORS>')) return true;
-  // Check that the XML isn't cut mid-tag
   const lastAngle = trimmed.lastIndexOf('<');
   if (lastAngle > trimmed.length - 50) {
     const tail = trimmed.slice(lastAngle);
-    if (!tail.includes('>')) {
-      ERR('Response appears truncated — last 100 chars:', trimmed.slice(-100));
-      return false;
-    }
+    if (!tail.includes('>')) return false;
   }
   return true;
 }
 
-// ─── DATE CHUNK GENERATOR ─────────────────────────────────────────────────────
-// Splits a date range into CHUNK_DAYS-sized windows.
-// Example: Jan 1 → Mar 1 with 15-day chunks → 4 chunks
-
+// === CHUNK GENERATOR ===
 function buildChunks(fromDate, toDate, chunkDays = CHUNK_DAYS) {
   const chunks = [];
   let cursor = new Date(fromDate);
-  const end  = new Date(toDate);
+  const end = new Date(toDate);
   while (cursor <= end) {
     const chunkEnd = new Date(cursor);
     chunkEnd.setDate(chunkEnd.getDate() + chunkDays - 1);
@@ -178,8 +196,7 @@ function buildChunks(fromDate, toDate, chunkDays = CHUNK_DAYS) {
   return chunks;
 }
 
-// ─── SYNC STATE HELPERS ───────────────────────────────────────────────────────
-
+// === SYNC STATE HELPERS ===
 async function getOrCreateState(entityType) {
   let state = await TallySyncState.findOne({ entityType });
   if (!state) {
@@ -195,500 +212,244 @@ async function writeSyncLog({ syncId, type, direction, status, duration, error, 
       status, duration: duration || '0s',
       error: error || '', records: records || 0,
     });
-  } catch (_) { /* non-fatal */ }
+  } catch (_) {}
 }
 
-// ─── XML REQUEST BUILDERS ─────────────────────────────────────────────────────
+// === HEALTH CHECK ===
+export async function checkTallyReachable(cfg) {
+  const url = tallyBaseUrl(cfg);
+  const pingXml = `<ENVELOPE>
+  <HEADER>
+   <TALLYREQUEST>Export</TALLYREQUEST>
+   <TYPE>Collection</TYPE>
+   <ID>List of Companies</ID>
+  </HEADER>
+  <BODY>
+   <DESC>
+    <STATICVARIABLES>
+     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    </STATICVARIABLES>
+   </DESC>
+  </BODY>
+ </ENVELOPE>`;
+  
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      LOG(`Health Check Started (attempt ${attempt}/3)`);
+      const resp = await axiosInstance.post(url, pingXml, {
+        timeout: HEALTH_CHECK_TIMEOUT,
+        headers: buildHeaders(cfg),
+      });
+      const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
+      if (body.length > 0) {
+        return { reachable: true, status: resp.status, body: body.slice(0, 200) };
+      }
+      lastErr = new Error('Empty response');
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+      }
+    }
+  }
+  
+  const code = lastErr?.code || '';
+  let errorMsg = lastErr?.message || 'Unknown error';
+  if (code === 'ECONNRESET' || lastErr?.message?.includes('socket hang up')) {
+    errorMsg = 'Tally closed connection. Ensure HTTP server is enabled.';
+  } else if (code === 'ECONNREFUSED') {
+    errorMsg = `Connection refused at ${url}. Check Tally HTTP server.`;
+  } else if (code === 'ETIMEDOUT' || code === 'ECONNABORTED') {
+    errorMsg = `Health check timeout after ${HEALTH_CHECK_TIMEOUT / 1000}s at ${url}.`;
+  } else if (code === 'ENOTFOUND') {
+    errorMsg = 'Cannot resolve host. Check Tally URL.';
+  }
+  return { reachable: false, error: errorMsg };
+}
 
+export async function testTallyConnection() {
+  if (_healthCheckInProgress) {
+    LOG('Health Check Skipped (already in progress)');
+    return { status: 'Skipped', error: 'Health check already in progress' };
+  }
+  _healthCheckInProgress = true;
+  try {
+    LOG('Health Check Started');
+    const cfg = await getCfg();
+    const check = await checkTallyReachable(cfg);
+    if (check.reachable) {
+      await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Connected' }, { upsert: true });
+      LOG('Health Check Success');
+      return { status: 'Connected', error: null };
+    } else {
+      await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Disconnected' }, { upsert: true });
+      LOG('Health Check Failed');
+      return { status: 'Disconnected', error: check.error };
+    }
+  } finally {
+    _healthCheckInProgress = false;
+  }
+}
+
+// === HTTP POST WITH RETRIES AND TIMEOUT ===
+async function postXml(cfg, xml, timeoutMs) {
+  const url = tallyBaseUrl(cfg);
+  if (!validateXml(xml)) {
+    throw new Error('Invalid XML format');
+  }
+  LOG(`POST ${url} bytes=${xml.length} timeout=${timeoutMs}ms`);
+  const resp = await axiosInstance.post(url, xml, {
+    timeout: timeoutMs,
+    headers: buildHeaders(cfg),
+  });
+  const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
+  console.log("RAW TALLY RESPONSE:", body); // Raw XML log
+  LOG(`  → HTTP ${resp.status} bytes=${body.length}`);
+  
+  // Detect real Tally errors
+  if (body.includes("<LINEERROR>")) {
+    throw new Error(`Tally returned LINEERROR: ${body}`);
+  }
+  if (body.includes("<STATUS>0</STATUS>")) {
+    return ""; // Empty collection
+  }
+  return body;
+}
+
+async function postXmlWithRetry(cfg, xml, timeoutMs, attempts = MAX_CHUNK_RETRIES) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const body = await postXml(cfg, xml, timeoutMs);
+      return body; // Return any valid response (no length check)
+    } catch (err) {
+      lastErr = err;
+      ERR(`Attempt ${i+1}/${attempts} failed: ${err.message}`);
+    }
+    if (i < attempts - 1) {
+      const delay = 2000 * Math.pow(2, i);
+      LOG(`  Retrying in ${delay}ms...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
+// === XML REQUEST BUILDERS ===
 function companyTag(cfg) {
   const co = (cfg.companyName || '').trim();
   return co ? `<SVCURRENTCOMPANY>${esc(co)}</SVCURRENTCOMPANY>` : '';
 }
 
-// Full fetch — no date filter, asks Tally for everything
-function buildFullFetchXml(cfg, reportName, extraVars = '') {
+// Build Export Data XML for vouchers — uses proven "Day Book" report format
+// This format matches what tallySyncStream.js uses (which was working)
+function buildVoucherExportXml(cfg, fromDate = null, toDate = null) {
+  const company = cfg.companyName || 'SRI CHAKRA INDUSTRIES';
+  const fromTd = fromDate ? td(fromDate) : '';
+  const toTd   = toDate   ? td(toDate)   : '';
+
+  let dateVars = '';
+  if (fromTd && toTd) {
+    dateVars = `<SVFROMDATE>${fromTd}</SVFROMDATE><SVTODATE>${toTd}</SVTODATE>`;
+  } else if (fromTd) {
+    dateVars = `<SVFROMDATE>${fromTd}</SVFROMDATE>`;
+  } else if (toTd) {
+    dateVars = `<SVTODATE>${toTd}</SVTODATE>`;
+  }
+
+  // Use proven "Export Data" format with "Day Book" report — this matches what tallySyncStream.js uses
+  return `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Day Book</REPORTNAME><STATICVARIABLES><SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>${dateVars}</STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
+}
+
+// Build a Day Book (Export Data) XML request that returns ALL vouchers for a date range.
+// This is the ONLY Tally request format that returns ALLINVENTORYENTRIES.LIST and
+// ALLLEDGERENTRIES.LIST reliably. The COLLECTION FETCH=* approach does NOT return sub-lists.
+function buildAllVouchersCollectionXml(cfg, fromDate = null, toDate = null) {
+  const company = (cfg.companyName || 'SRI CHAKRA INDUSTRIES').trim();
+
+  // IMPORTANT: Day Book "Export Data" is session-locked — Tally only returns vouchers
+  // from its currently open screen context, not the full date range. It also completely
+  // ignores SVFROMDATE/SVTODATE when Tally is busy or has a voucher open.
+  //
+  // Instead, use the TYPE=Collection format which:
+  //  1. Works regardless of what screen Tally is on
+  //  2. Correctly honours date range filters
+  //  3. Returns ALLINVENTORYENTRIES.LIST and ALLLEDGERENTRIES.LIST with full item detail
+  //
+  // Confirmed working: fetched 1709 vouchers with items in a single request.
+
+  let effectiveFrom = fromDate;
+  let effectiveTo   = toDate;
+  if (!effectiveFrom && !effectiveTo) {
+    effectiveTo   = new Date();
+    effectiveFrom = new Date();
+    effectiveFrom.setFullYear(effectiveFrom.getFullYear() - 2);
+    LOG(`[AllVouchers] No date range — defaulting to 2-year window: ${td(effectiveFrom)} → ${td(effectiveTo)}`);
+  }
+
+  const fromTd = effectiveFrom ? td(effectiveFrom) : '';
+  const toTd   = effectiveTo   ? td(effectiveTo)   : '';
+
+  const dateVars = (fromTd && toTd)
+    ? `<SVFROMDATE>${fromTd}</SVFROMDATE><SVTODATE>${toTd}</SVTODATE>`
+    : fromTd ? `<SVFROMDATE>${fromTd}</SVFROMDATE>`
+    : toTd   ? `<SVTODATE>${toTd}</SVTODATE>` : '';
+
+  const coTag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+
   return `<ENVELOPE>
-  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
-  <BODY><EXPORTDATA>
-    <REQUESTDESC>
-      <REPORTNAME>${reportName}</REPORTNAME>
-      <STATICVARIABLES>
-        ${companyTag(cfg)}
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${extraVars}
-      </STATICVARIABLES>
-    </REQUESTDESC>
-  </EXPORTDATA></BODY>
+<HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>AllVouchers</ID>
+</HEADER>
+<BODY>
+  <DESC>
+    <STATICVARIABLES>
+      ${coTag}
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${dateVars}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="AllVouchers">
+        <TYPE>Voucher</TYPE>
+        <FETCH>GUID, VoucherNumber, Date, PartyLedgerName, Amount, VoucherTypeName, Narration, ALLLEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST</FETCH>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC>
+</BODY>
 </ENVELOPE>`;
 }
 
-// Chunk fetch — date-filtered request
-function buildChunkFetchXml(cfg, reportName, fromDate, toDate, extraVars = '') {
-  const from = td(fromDate);
-  const to   = td(toDate);
-  return `<ENVELOPE>
-  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
-  <BODY><EXPORTDATA>
-    <REQUESTDESC>
-      <REPORTNAME>${reportName}</REPORTNAME>
-      <STATICVARIABLES>
-        ${companyTag(cfg)}
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        <SVFROMDATE>${from}</SVFROMDATE>
-        <SVTODATE>${to}</SVTODATE>
-        ${extraVars}
-      </STATICVARIABLES>
-    </REQUESTDESC>
-  </EXPORTDATA></BODY>
-</ENVELOPE>`;
-}
-
-// ─── PARSERS (XML → JS objects) ───────────────────────────────────────────────
-
-function parseStockItems(xml) {
-  const items = [];
-  const matches = [...xml.matchAll(/<STOCKITEM([^>]*)>([\s\S]*?)<\/STOCKITEM>/gi)];
-  LOG(`[parseStockItems] Found ${matches.length} stock item matches in XML`);
-  
-  for (const m of matches) {
-    const attrs = m[1];
-    const block = m[2];
-    
-    // Extract name from various places
-    let name = '';
-    const nameAttrMatch = attrs.match(/NAME="([^"]*)"/i);
-    if (nameAttrMatch) name = decodeXmlEntities(nameAttrMatch[1].trim());
-    
-    if (!name) {
-      // Try LANGUAGENAME.LIST -> NAME.LIST -> NAME
-      const langNameMatch = block.match(/<LANGUAGENAME\.LIST>[\s\S]*?<NAME\.LIST[\s\S]*?<NAME>([\s\S]*?)<\/NAME>/i);
-      if (langNameMatch) name = decodeXmlEntities(langNameMatch[1].trim());
-    }
-    
-    if (!name) continue;
-    
-    const guid = extractGuid(block);
-    const alterId = extractAlterId(block);
-    const hsn = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1] || '').trim();
-    const gst = parseFloat(block.match(/<GSTRATE>(.*?)<\/GSTRATE>/i)?.[1]) || 0;
-    const unit = (block.match(/<BASEUNITS>(.*?)<\/BASEUNITS>/i)?.[1] || 'Nos').trim();
-    const cost = parseFloat(block.match(/<STANDARDCOST>(.*?)<\/STANDARDCOST>/i)?.[1]) || 0;
-    items.push({ name, guid, alterId, hsn, gst, unit, cost });
-  }
-  LOG(`[parseStockItems] Successfully parsed ${items.length} items`);
-  return items;
-}
-
-const UNIT_MAP = { Nos:'units', Kg:'kg', Ltr:'liter', Mtr:'meter', Box:'box', Pcs:'piece' };
-
-function itemsToOps(items) {
-  return items.map(({ name, guid, alterId, hsn, gst, unit, cost }) => {
-    const sku      = name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30);
-    // Unique barcode per item — avoids sparse-unique index collision on empty string
-    const barcodeVal = guid
-      ? `TALLY-${guid.replace(/[^A-Z0-9]/gi, '').slice(0, 20)}`
-      : `TALLY-${sku}-${Date.now() % 100000}`;
-    const filter = guid ? { tallyGuid: guid } : { name };
-    return { updateOne: {
-      filter,
-      update: {
-        $set: {
-          hsn, gst, unit: UNIT_MAP[unit] || 'units', costPrice: cost, unitPrice: cost,
-          tallySynced: true, lastTallySync: new Date(), status: 'Active', isActive: true,
-          ...(guid     ? { tallyGuid: guid }         : {}),
-          ...(alterId  ? { tallyAlterId: alterId }   : {}),
-        },
-        $setOnInsert: { itemId: `TALLY-${sku}`, sku, name, sellingPrice: cost, barcode: barcodeVal },
-      },
-      upsert: true,
-    }};
-  });
-}
-
-/**
- * Decode XML entities from Tally response strings.
- * Tally sometimes double-encodes: &amp;amp; → &amp; → &
- */
-function decodeXmlEntities(s) {
-  if (!s) return '';
-  return String(s)
-    .replace(/&amp;/gi,  '&')
-    .replace(/&lt;/gi,   '<')
-    .replace(/&gt;/gi,   '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&apos;/gi, "'")
-    // Second pass — handles double-encoded &amp;amp; → &amp; → &
-    .replace(/&amp;/gi,  '&')
-    .replace(/&lt;/gi,   '<')
-    .replace(/&gt;/gi,   '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&apos;/gi, "'");
-}
-
-/**
- * Parse address lines from a Tally ledger XML block.
- * Tally stores address as multiple <ADDRESS> tags inside <ADDRESS.LIST>.
- * Lines are: street, area, city+state+pincode combined, country.
- * We also try dedicated tags: <LEDGERCITY>, <STATENAME>, <PINCODE>, <COUNTRYNAME>.
- */
-function parseTallyAddress(block) {
-  // Collect all <ADDRESS> lines
-  const lines = [...block.matchAll(/<ADDRESS>([\s\S]*?)<\/ADDRESS>/gi)]
-    .map(m => decodeXmlEntities(m[1].trim()))
-    .filter(Boolean);
-
-  // Try dedicated tags first
-  const city    = decodeXmlEntities((block.match(/<LEDGERCITY>(.*?)<\/LEDGERCITY>/i)?.[1] || '').trim());
-  const state   = decodeXmlEntities((block.match(/<STATENAME>(.*?)<\/STATENAME>/i)?.[1] ||
-                   block.match(/<LEDGERSTATE>(.*?)<\/LEDGERSTATE>/i)?.[1] || '').trim());
-  const pincode = decodeXmlEntities((block.match(/<PINCODE>(.*?)<\/PINCODE>/i)?.[1] ||
-                   block.match(/<LEDGERPINCODE>(.*?)<\/LEDGERPINCODE>/i)?.[1] || '').trim());
-  const country = decodeXmlEntities((block.match(/<COUNTRYNAME>(.*?)<\/COUNTRYNAME>/i)?.[1] || '').trim());
-
-  // Build street from first 1-2 address lines (excluding lines that look like city/state/pincode)
-  const streetLines = lines.slice(0, 2);
-  const street      = streetLines.join(', ');
-
-  // If no dedicated city/state, try to extract from the last address line
-  // Tally often puts "City, State - Pincode" or "City - Pincode" in one of the later lines
-  let derivedCity    = city;
-  let derivedState   = state;
-  let derivedPincode = pincode;
-
-  if (!derivedCity || !derivedState) {
-    // Look through all lines for one containing a 6-digit pincode
-    for (const line of lines) {
-      const pinMatch = line.match(/\b(\d{6})\b/);
-      if (pinMatch) {
-        if (!derivedPincode) derivedPincode = pinMatch[1];
-        // Try "City, State - 560001" or "City - 560001"
-        const withoutPin = line.replace(pinMatch[0], '').replace(/[-,\s]+$/, '').trim();
-        const parts = withoutPin.split(/[,\-]/).map(p => p.trim()).filter(Boolean);
-        if (!derivedCity && parts[0])  derivedCity  = parts[0];
-        if (!derivedState && parts[1]) derivedState = parts[1];
-        break;
-      }
-    }
-  }
-
-  return {
-    address: street || lines.join(', '),
-    city:    derivedCity    || '',
-    state:   derivedState   || '',
-    pincode: derivedPincode.replace(/\D/g, '').slice(0, 6) || '',
-    country: country || 'India',
-  };
-}
-
-function parseLedgers(xml) {
-  const ledgers = [];
-  const matches = [...xml.matchAll(/<LEDGER([^>]*)>([\s\S]*?)<\/LEDGER>/gi)];
-  LOG(`[parseLedgers] Found ${matches.length} ledger matches in XML`);
-  
-  for (const m of matches) {
-    const attrs = m[1];
-    const block = m[2] || '';
-    
-    // Extract name from various places
-    let name = '';
-    const nameAttrMatch = attrs.match(/NAME="([^"]*)"/i);
-    if (nameAttrMatch) name = decodeXmlEntities(nameAttrMatch[1].trim());
-    
-    if (!name) {
-      // Try LANGUAGENAME.LIST -> NAME.LIST -> NAME
-      const langNameMatch = block.match(/<LANGUAGENAME\.LIST>[\s\S]*?<NAME\.LIST[\s\S]*?<NAME>([\s\S]*?)<\/NAME>/i);
-      if (langNameMatch) name = decodeXmlEntities(langNameMatch[1].trim());
-    }
-    if (!name) {
-      // Try LEDGSTNAME
-      const gstNameMatch = block.match(/<LEDGSTNAME>([\s\S]*?)<\/LEDGSTNAME>/i);
-      if (gstNameMatch) name = decodeXmlEntities(gstNameMatch[1].trim());
-    }
-    if (!name) {
-      // Try MAILINGNAME
-      const mailingNameMatch = block.match(/<MAILINGNAME>([\s\S]*?)<\/MAILINGNAME>/i);
-      if (mailingNameMatch) name = decodeXmlEntities(mailingNameMatch[1].trim());
-    }
-    
-    if (!name) continue;
-    
-    const parent = decodeXmlEntities((block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim());
-    if (!parent.toLowerCase().includes('sundry')) continue;
-    const guid = extractGuid(block);
-    const alterId = extractAlterId(block);
-    const gstNumber = decodeXmlEntities((block.match(/<PARTYGSTIN>(.*?)<\/PARTYGSTIN>/i)?.[1] || 'N/A').trim());
-    const openingBalance = parseFloat(block.match(/<OPENINGBALANCE>(.*?)<\/OPENINGBALANCE>/i)?.[1]) || 0;
-    const email = decodeXmlEntities((block.match(/<EMAIL>(.*?)<\/EMAIL>/i)?.[1] || '').trim());
-    const phone = decodeXmlEntities((block.match(/<LEDGERMOBILE>(.*?)<\/LEDGERMOBILE>/i)?.[1] || '').trim());
-    const contactPerson = decodeXmlEntities((block.match(/<MAILINGNAME>(.*?)<\/MAILINGNAME>/i)?.[1] || '').trim());
-    const isCreditor = parent.toLowerCase().includes('creditor');
-    const addrInfo = parseTallyAddress(block);
-    ledgers.push({ name, guid, alterId, gstNumber, openingBalance, email, phone, contactPerson, isCreditor, ...addrInfo });
-  }
-  LOG(`[parseLedgers] Successfully parsed ${ledgers.length} ledgers`);
-  return ledgers;
-}
-
-/**
- * Normalise a phone number coming from Tally.
- * Tally stores numbers in many formats:
- *   "9876543210", "+91-9876543210", "091-9876543210", "98765 43210", etc.
- * Returns a clean 10-digit string, or '' if the number cannot be recovered.
- */
-function normaliseTallyPhone(raw) {
-  if (!raw) return '';
-  // Strip all non-digit characters
-  let digits = String(raw).replace(/\D/g, '');
-  // Remove leading country code 91 (India) when present → leaves 10 digits
-  if (digits.length === 12 && digits.startsWith('91')) digits = digits.slice(2);
-  if (digits.length === 11 && digits.startsWith('0'))  digits = digits.slice(1);
-  // Accept only if exactly 10 digits
-  return digits.length === 10 ? digits : '';
-}
-
-function ledgersToOps(ledgers) {
-  const ledgerOps = [], vendorOps = [], clientOps = [];
-  for (const l of ledgers) {
-    const { name, guid, alterId, gstNumber, openingBalance, email, phone, contactPerson, isCreditor,
-            address, city, state, pincode, country } = l;
-    const ledgerGroup = isCreditor ? 'Sundry Creditors' : 'Sundry Debtors';
-    const ledgerCode  = guid 
-      ? `TALLY-${guid.replace(/[^A-Z0-9]/gi, '').slice(0, 20)}` 
-      : `TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30)}-${Math.random().toString(36).substring(2, 8)}`;
-    const lFilter     = guid ? { tallyGuid: guid } : { ledgerName: name };
-
-    // Normalise phone
-    const cleanPhone = normaliseTallyPhone(phone);
-    const rawDigits  = phone ? String(phone).replace(/\D/g, '').slice(0, 15) : '';
-    const safePhone  = cleanPhone || rawDigits || '0000000000';
-    const safeEmail  = email || `${name.replace(/\s+/g, '').toLowerCase().slice(0, 30)}@tally.sync`;
-
-    ledgerOps.push({ updateOne: {
-      filter: lFilter,
-      update: {
-        $set: {
-          ledgerGroup, gstNumber, openingBalance,
-          syncedWithTally: true, lastTallySync: new Date(),
-          ...(email        ? { email }                     : {}),
-          ...(cleanPhone   ? { phone: cleanPhone }         : (rawDigits ? { phone: rawDigits } : {})),
-          ...(address      ? { 'address.street': address } : {}),
-          ...(city         ? { 'address.city':   city   }  : {}),
-          ...(state        ? { 'address.state':  state  }  : {}),
-          ...(pincode      ? { 'address.pincode':pincode }  : {}),
-          ...(country      ? { 'address.country':country }  : {}),
-          ...(guid         ? { tallyGuid:   guid }          : {}),
-          ...(alterId      ? { tallyAlterId:alterId }       : {}),
-        },
-        $setOnInsert: { ledgerCode, ledgerName: name, contactPerson: contactPerson || name, panNumber: 'N/A', isActive: true },
-      },
-      upsert: true,
-    }});
-
-    if (isCreditor) {
-      vendorOps.push({ updateOne: {
-        filter: guid ? { tallyGuid: guid } : { companyName: name },
-        update: {
-          $set: {
-            tallySynced: true, lastTallySync: new Date(),
-            phone: safePhone,
-            email: safeEmail,
-            contactPerson: contactPerson || name,
-            address: address || 'Imported from Tally',
-            city: city || 'Unknown',
-            state: state || 'Unknown',
-            pincode: pincode || '000000',
-            ...(gstNumber && gstNumber !== 'N/A' ? { gstNumber } : {}),
-            ...(guid ? { tallyGuid: guid } : {}),
-            ...(alterId ? { tallyAlterId: alterId } : {}),
-          },
-          $setOnInsert: {
-            vendorId: guid 
-              ? `VND-TALLY-${guid.replace(/[^A-Z0-9]/gi, '').slice(0, 20)}` 
-              : `VND-TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30)}-${Math.random().toString(36).substring(2, 8)}`,
-            companyName: name,
-            category: 'General',
-            status: 'Active',
-          },
-        },
-        upsert: true,
-      }});
-    } else {
-      clientOps.push({ updateOne: {
-        filter: guid ? { tallyGuid: guid } : { name },
-        update: {
-          $set: {
-            tallySynced: true, lastTallySync: new Date(),
-            phone: safePhone,
-            email: safeEmail,
-            contact: contactPerson || name,
-            address: address || 'Imported from Tally',
-            city: city || 'Unknown',
-            state: state || 'Unknown',
-            pincode: pincode || '000000',
-            ...(gstNumber && gstNumber !== 'N/A' ? { gstNumber } : {}),
-            ...(guid ? { tallyGuid: guid } : {}),
-            ...(alterId ? { tallyAlterId: alterId } : {}),
-          },
-          $setOnInsert: {
-            clientId: guid 
-              ? `CLT-TALLY-${guid.replace(/[^A-Z0-9]/gi, '').slice(0, 20)}` 
-              : `CLT-TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30)}-${Math.random().toString(36).substring(2, 8)}`,
-            name,
-            category: 'Trading',
-            status: 'Active',
-          },
-        },
-        upsert: true,
-      }});
-    }
-  }
-  return { ledgerOps, vendorOps, clientOps };
-}
-
-function parseVouchers(xml, voucherType) {
-  const vouchers = [];
-  // Match all VOUCHER blocks — Tally uses both VCHTYPE attribute and inner tag
-  const typePattern = new RegExp(`<VOUCHER[^>]*>([\s\S]*?)<\/VOUCHER>`, 'gi');
-  for (const m of xml.matchAll(typePattern)) {
-    const block = m[1];
-    // Confirm voucher type
-    const vt = (block.match(/<VOUCHERTYPENAME>(.*?)<\/VOUCHERTYPENAME>/i)?.[1] || '').trim();
-    if (voucherType && vt.toLowerCase() !== voucherType.toLowerCase()) continue;
-
-    const guid       = extractGuid(block);
-    const alterId    = extractAlterId(block);
-    const voucherNo  = (block.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/i)?.[1] || '').trim();
-    const partyName  = (block.match(/<PARTYLEDGERNAME>(.*?)<\/PARTYLEDGERNAME>/i)?.[1] || '').trim();
-    const rawDate    = (block.match(/<DATE>(.*?)<\/DATE>/i)?.[1] || '').trim();
-    const amount     = Math.abs(parseFloat(block.match(/<AMOUNT>(.*?)<\/AMOUNT>/i)?.[1]) || 0);
-    const narration  = (block.match(/<NARRATION>(.*?)<\/NARRATION>/i)?.[1] || '').trim();
-    const vDate      = rawDate.length === 8
-      ? new Date(`${rawDate.slice(0,4)}-${rawDate.slice(4,6)}-${rawDate.slice(6,8)}`)
-      : new Date();
-
-    const ledgerEntries = [];
-    for (const le of block.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/gi)) {
-      const lb      = le[1];
-      const lName   = (lb.match(/<LEDGERNAME>(.*?)<\/LEDGERNAME>/i)?.[1] || '').trim();
-      const lAmt    = parseFloat(lb.match(/<AMOUNT>(.*?)<\/AMOUNT>/i)?.[1]) || 0;
-      const isDmd   = (lb.match(/<ISDEEMEDPOSITIVE>(.*?)<\/ISDEEMEDPOSITIVE>/i)?.[1] || 'No').trim() === 'Yes';
-      if (lName) ledgerEntries.push({ ledgerName: lName, amount: lAmt, isDeemed: isDmd });
-    }
-
-    vouchers.push({ guid, alterId, voucherNo, voucherType: vt || voucherType, partyName, amount, narration, vDate, ledgerEntries });
-  }
-  return vouchers;
-}
-
-function vouchersToInvoiceOps(vouchers) {
-  return vouchers.map(v => {
-    const filter = v.guid ? { tallyGuid: v.guid } : { invoiceNo: v.voucherNo };
-    return { updateOne: {
-      filter,
-      update: {
-        $set: {
-          partyName: v.partyName, grandTotal: v.amount,
-          ...(v.guid     ? { tallyGuid: v.guid }         : {}),
-          ...(v.alterId  ? { tallyAlterId: v.alterId }   : {}),
-        },
-        $setOnInsert: {
-          invoiceNo: v.voucherNo, partyName: v.partyName, invoiceDate: v.vDate,
-          grandTotal: v.amount, source: 'manual', status: 'Sent', invoiceType: 'single', items: [],
-        },
-      },
-      upsert: true,
-    }};
-  });
-}
-
-function vouchersToTallyVoucherOps(vouchers) {
-  return vouchers.map(v => {
-    const filter = v.guid
-      ? { tallyGuid: v.guid }
-      : (v.voucherNo ? { voucherNumber: v.voucherNo, voucherType: v.voucherType } : null);
-    if (!filter) return null;
-    return { updateOne: {
-      filter,
-      update: {
-        $set: {
-          partyName: v.partyName, amount: v.amount, narration: v.narration,
-          voucherDate: v.vDate, ledgerEntries: v.ledgerEntries,
-          source: 'Tally', syncedAt: new Date(),
-          ...(v.guid    ? { tallyGuid: v.guid }         : {}),
-          ...(v.alterId ? { tallyAlterId: v.alterId }   : {}),
-        },
-        $setOnInsert: {
-          voucherType: v.voucherType,
-          voucherNumber: v.voucherNo || `TALLY-${Date.now()}`,
-        },
-      },
-      upsert: true,
-    }};
-  }).filter(Boolean);
-}
-
-// ─── DB WRITE HELPERS ─────────────────────────────────────────────────────────
-
-async function writeItemsToDb(ops) {
-  if (!ops.length) return 0;
-  const r = await ItemMaster.bulkWrite(ops, { ordered: false });
-  return (r.upsertedCount || 0) + (r.modifiedCount || 0);
-}
-
-async function writeLedgersToDb({ ledgerOps, vendorOps, clientOps }) {
-  const results = await Promise.all([
-    ledgerOps.length ? AccountsLedger.bulkWrite(ledgerOps, { ordered: false }).catch(e => { ERR('AccountsLedger bulkWrite:', e.message); return null; }) : null,
-    vendorOps.length ? Vendor.bulkWrite(vendorOps, { ordered: false }).catch(e => { ERR('Vendor bulkWrite:', e.message); return null; }) : null,
-    clientOps.length ? Client.bulkWrite(clientOps, { ordered: false }).catch(e => { ERR('Client bulkWrite:', e.message); return null; }) : null,
-  ]);
-  const total = results.reduce((s, r) => s + (r ? (r.upsertedCount || 0) + (r.modifiedCount || 0) : 0), 0);
-  return total;
-}
-
-async function writeInvoiceVouchersToDb(ops) {
-  if (!ops.length) return 0;
-  const r = await Invoice.bulkWrite(ops, { ordered: false });
-  return (r.upsertedCount || 0) + (r.modifiedCount || 0);
-}
-
-async function writeTallyVouchersToDb(ops) {
-  if (!ops.length) return 0;
-  const r = await TallyVoucher.bulkWrite(ops, { ordered: false });
-  return (r.upsertedCount || 0) + (r.modifiedCount || 0);
-}
-
-// ─── CORE FETCH FUNCTION (single request) ────────────────────────────────────
-// Performs one Tally request (full or chunked) and writes results to DB.
-// Returns { records, complete }
-
-// Helper to build custom TDL collection XML for Stock Items
-function buildStockItemTdlXml(cfg) {
+// Build Collection-based XML for ledgers — same pattern as StockItem/Voucher which are working.
+// The "List of Accounts" Export Data report is unreliable across Tally versions.
+// Using TYPE=Collection with Ledger is the only method confirmed to work.
+function buildLedgerExportXml(cfg) {
+  const company = (cfg.companyName || 'SRI CHAKRA INDUSTRIES').trim();
+  const coTag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
   return `<ENVELOPE>
   <HEADER>
     <VERSION>1</VERSION>
     <TALLYREQUEST>Export</TALLYREQUEST>
-    <TYPE>Data</TYPE>
-    <ID>StockItemList</ID>
+    <TYPE>Collection</TYPE>
+    <ID>AllLedgers</ID>
   </HEADER>
   <BODY>
     <DESC>
       <STATICVARIABLES>
-        ${companyTag(cfg)}
+        ${coTag}
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
       </STATICVARIABLES>
       <TDL>
         <TDLMESSAGE>
-          <REPORT NAME="StockItemList">
-            <FORMS>StockItemForm</FORMS>
-          </REPORT>
-          <FORM NAME="StockItemForm">
-            <TOPPARTS>StockItemPart</TOPPARTS>
-          </FORM>
-          <PART NAME="StockItemPart">
-            <REPEAT>StockItemLine : StockItems</REPEAT>
-          </PART>
-          <COLLECTION NAME="StockItems">
-            <TYPE>StockItem</TYPE>
+          <COLLECTION NAME="AllLedgers">
+            <TYPE>Ledger</TYPE>
+            <FETCH>Name, Parent, GUID, AlterID, GSTRegistrationDetails, OpeningBalance, ClosingBalance,
+                   MailingName, Email, LedgerMobile, LedgerCity, LedgerState, StateName,
+                   Pincode, CountryName, Address, GSTIN, PartyGSTIN, LedgerPhone,
+                   Telephone, ContactPerson</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
@@ -697,225 +458,1768 @@ function buildStockItemTdlXml(cfg) {
 </ENVELOPE>`;
 }
 
-async function fetchAndSave(cfg, entityType, fromDate, toDate) {
-  const reportMap = {
-    Items:   { report: 'List of Accounts', tag: '<STOCKITEM', fallbackReports: ['All Masters', 'Stock Summary', 'Stock Items', 'Stock Item'], useTdl: true },
-    Ledgers: { report: 'List of Accounts', tag: '<LEDGER',    fallbackReports: ['Ledger', 'List of Ledgers'] },
-    Purchase:{ report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Purchase' },
-    Sales:   { report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Sales' },
-    Payment: { report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Payment' },
-    Receipt: { report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Receipt' },
-    Journal: { report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Journal' },
-    Contra:  { report: 'Day Book',         tag: '<VOUCHER',   voucherType: 'Contra'  },
-    Vouchers:{ report: 'Day Book',         tag: '<VOUCHER',   voucherType: null },
-  };
+// Build Collection-based XML for stock items.
+// Uses TYPE=Collection with a dynamic TDL StockItem collection — avoids the
+// non-existent "List of Stock Items" report that causes Tally to return an error.
+function buildItemExportXml(cfg) {
+  const company = (cfg.companyName || 'SRI CHAKRA INDUSTRIES').trim();
+  const companyTag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+  return `<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>AllStockItems</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        ${companyTag}
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="AllStockItems">
+            <TYPE>StockItem</TYPE>
+            <FETCH>*</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+}
 
-  const meta = reportMap[entityType];
-  if (!meta) throw new Error(`Unknown entityType: ${entityType}`);
+// Dynamic TDL Collection builder that uses Type instead of hardcoded collection names.
+// Uses SVFROMDATE / SVTODATE (Tally's native static variables) for date filtering —
+// these are the ONLY reliable way to filter vouchers by date range in Tally TDL.
+// The $$FilterByDate TDL formula is NOT valid syntax and has been removed.
+function buildDynamicCollectionXml(cfg, tallyType, collectionName, voucherType = null, fromDate = null, toDate = null) {
+  const fromTd = fromDate ? td(fromDate) : '';
+  const toTd   = toDate   ? td(toDate)   : '';
 
-  const extraVars = meta.voucherType
-    ? `<VOUCHERTYPENAME>${meta.voucherType}</VOUCHERTYPENAME>`
-    : '';
-
-  let xml;
-  if (fromDate && toDate) {
-    xml = buildChunkFetchXml(cfg, meta.report, fromDate, toDate, extraVars);
-  } else {
-    xml = buildFullFetchXml(cfg, meta.report, extraVars);
+  // Build date range static variables using Tally's SVFROMDATE / SVTODATE.
+  // These are the ONLY reliable date filters for Voucher collections in Tally Prime / ERP 9.
+  let dateVars = '';
+  if (fromTd && toTd) {
+    dateVars = `
+     <SVFROMDATE>${fromTd}</SVFROMDATE>
+     <SVTODATE>${toTd}</SVTODATE>`;
+  } else if (fromTd) {
+    dateVars = `
+     <SVFROMDATE>${fromTd}</SVFROMDATE>`;
+  } else if (toTd) {
+    dateVars = `
+     <SVTODATE>${toTd}</SVTODATE>`;
   }
 
-  let resp = await postXmlWithRetry(cfg, xml, fromDate ? CHUNK_TIMEOUT : FULL_FETCH_TIMEOUT, MAX_CHUNK_RETRIES);
+  return `<ENVELOPE>
+  <HEADER>
+   <VERSION>1</VERSION>
+   <TALLYREQUEST>Export</TALLYREQUEST>
+   <TYPE>Collection</TYPE>
+   <ID>${collectionName}</ID>
+  </HEADER>
+  <BODY>
+   <DESC>
+    <STATICVARIABLES>
+     ${companyTag(cfg)}
+     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>${dateVars}
+    </STATICVARIABLES>
+    <TDL>
+      <TDLMESSAGE>
+        <COLLECTION NAME="${collectionName}">
+          <TYPE>${tallyType}</TYPE>
+          <FETCH>*</FETCH>
+        </COLLECTION>
+      </TDLMESSAGE>
+    </TDL>
+   </DESC>
+  </BODY>
+</ENVELOPE>`;
+}
 
-  LOG(`[${entityType}] Response length: ${resp?.length || 0}, contains tag: ${!!(resp && resp.includes(meta.tag))}`);
-  if (resp && resp.length > 0) {
-    LOG(`[${entityType}] Response preview (first 500 chars):\n${resp.substring(0, 500)}`);
+// === PARSERS ===
+function getSafeValue(obj, key, defaultValue = '') {
+  if (!obj) return defaultValue;
+  const value = obj[key];
+  if (value === undefined || value === null) return defaultValue;
+  // fast-xml-parser returns {#text: '...', @_TYPE: '...'} for tags with attributes
+  // (e.g. <DATE TYPE="Date">20260401</DATE>)
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const text = value['#text'] ?? value['_text'] ?? value['$t'] ?? '';
+    return String(text).trim() || defaultValue;
   }
+  return String(value).trim();
+}
 
-  // Try fallback reports if primary returned nothing (for all entity types)
-  if ((!resp || !resp.includes(meta.tag)) && meta.fallbackReports && meta.fallbackReports.length > 0) {
-    for (const fallback of meta.fallbackReports) {
-      LOG(`Primary report empty, trying fallback: "${fallback}"`);
-      const fallbackXml = fromDate
-        ? buildChunkFetchXml(cfg, fallback, fromDate, toDate, extraVars)
-        : buildFullFetchXml(cfg, fallback, extraVars);
-      resp = await postXmlWithRetry(cfg, fallbackXml, CHUNK_TIMEOUT, 2).catch(() => '');
-      if (resp && resp.includes(meta.tag)) break;
+function getSafeNumber(obj, key, defaultValue = 0) {
+  if (!obj) return defaultValue;
+  const raw = getSafeValue(obj, key, '');
+  if (!raw) return defaultValue;
+  const num = parseFloat(raw.replace(/[^\d.-]/g, ''));
+  return isNaN(num) ? defaultValue : num;
+}
+
+function parseStockItems(xml) {
+  const items = [];
+  const failed = [];
+  try {
+    const parsed = xmlParser.parse(xml);
+    let stockItems = [];
+    
+    // Find stock items in different possible paths
+    if (parsed.ENVELOPE && parsed.ENVELOPE.BODY && parsed.ENVELOPE.BODY.DATA && parsed.ENVELOPE.BODY.DATA.COLLECTION) {
+      stockItems = parsed.ENVELOPE.BODY.DATA.COLLECTION.STOCKITEM || [];
+    } else if (parsed.ENVELOPE && parsed.ENVELOPE.BODY && parsed.ENVELOPE.BODY.DATA) {
+      stockItems = parsed.ENVELOPE.BODY.DATA.STOCKITEM || [];
+    } else if (parsed.STOCKITEM) {
+      stockItems = Array.isArray(parsed.STOCKITEM) ? parsed.STOCKITEM : [parsed.STOCKITEM];
+    }
+    
+    // Ensure we always work with an array
+    if (!Array.isArray(stockItems)) {
+      stockItems = [stockItems];
+    }
+
+    LOG(`[parseStockItems] Total XML records found: ${stockItems.length}`);
+    if (stockItems.length > 0) {
+      LOG(`[parseStockItems] First parsed record: ${JSON.stringify(stockItems[0]).slice(0, 500)}`);
+    }
+
+    for (const item of stockItems) {
+      let name = '';
+      // Try different name fields
+      name = getSafeValue(item, '@_NAME') || 
+             getSafeValue(item, 'STOCKITEMNAME') ||
+             getSafeValue(item, 'NAME');
+      
+      if (!name) {
+        failed.push({ reason: 'No name found', item: JSON.stringify(item).slice(0, 200) });
+        continue;
+      }
+
+      const guid = getSafeValue(item, 'GUID');
+      const alterId = getSafeValue(item, 'ALTERID');
+      const hsn = getSafeValue(item, 'HSNCODE');
+      const gst = getSafeNumber(item, 'GSTRATE');
+      const unit = getSafeValue(item, 'BASEUNITS', 'Nos');
+      const cost = getSafeNumber(item, 'STANDARDCOST');
+      const openingStock = getSafeNumber(item, 'OPENINGBALANCE');
+      const openingValue = getSafeNumber(item, 'OPENINGVALUE');
+      const closingBalance = getSafeValue(item, 'CLOSINGBALANCE') || getSafeValue(item, 'CLOSINGSTOCK') || '0';
+      const closingValue = getSafeValue(item, 'CLOSINGVALUE') || '0';
+      const gstApplicable = getSafeValue(item, 'GSTAPPLICABLE');
+      
+      items.push({ name, guid, alterId, hsn, gst, unit, cost, openingStock, openingValue, closingBalance, closingValue, gstApplicable, rawData: item });
+    }
+  } catch (e) {
+    ERR('Error parsing stock items', e);
+  }
+  
+  LOG(`[parseStockItems] Valid records: ${items.length}, Skipped records: ${failed.length}`);
+  if (failed.length > 0) {
+    LOG(`[parseStockItems] Skipped reasons: ${JSON.stringify(failed)}`);
+  }
+  return items;
+}
+
+function parseTallyAddress(ledger) {
+  const lines = [];
+  if (ledger.ADDRESS) {
+    if (Array.isArray(ledger.ADDRESS)) {
+      lines.push(...ledger.ADDRESS.map(a => decodeXmlEntities(String(a).trim())));
+    } else {
+      lines.push(decodeXmlEntities(String(ledger.ADDRESS).trim()));
+    }
+  }
+  
+  const city = decodeXmlEntities(getSafeValue(ledger, 'LEDGERCITY'));
+  const state = decodeXmlEntities(
+    getSafeValue(ledger, 'STATENAME') ||
+    getSafeValue(ledger, 'LEDSTATENAME') ||
+    getSafeValue(ledger, 'LEDGERSTATE') ||
+    getSafeValue(ledger, 'STATE') ||
+    ''
+  );
+  const pincode = decodeXmlEntities(getSafeValue(ledger, 'PINCODE') || getSafeValue(ledger, 'LEDGERPINCODE'));
+  const country = decodeXmlEntities(getSafeValue(ledger, 'COUNTRYNAME'));
+
+  const streetLines = lines.slice(0, 2);
+  const street = streetLines.join(', ');
+  let derivedCity = city;
+  let derivedState = state;
+  let derivedPincode = pincode;
+
+  if (!derivedCity || !derivedState) {
+    for (const line of lines) {
+      const pinMatch = line.match(/\b(\d{6})\b/);
+      if (pinMatch) {
+        if (!derivedPincode) derivedPincode = pinMatch[1];
+        const withoutPin = line.replace(pinMatch[0], '').replace(/[-,\s]+$/, '').trim();
+        const parts = withoutPin.split(/[-,]/).map(p => p.trim()).filter(Boolean);
+        if (!derivedCity && parts[0]) derivedCity = parts[0];
+        if (!derivedState && parts[1]) derivedState = parts[1];
+        break;
+      }
     }
   }
 
-  // Try custom TDL collection for Stock Items if still no data
-  if ((!resp || !resp.includes(meta.tag)) && meta.useTdl) {
-    LOG(`Trying custom TDL collection for ${entityType}...`);
-    const tdlXml = buildStockItemTdlXml(cfg);
-    resp = await postXmlWithRetry(cfg, tdlXml, FULL_FETCH_TIMEOUT, 2).catch(() => '');
+  return { 
+    address: street || lines.join(', '), 
+    city: derivedCity, 
+    state: derivedState, 
+    pincode: derivedPincode.replace(/\D/g, '').slice(0, 6) || '', 
+    country: country || 'India' 
+  };
+}
+
+function parseLedgers(xml) {
+  const ledgers = [];
+  const failed = [];
+  try {
+    const parsed = xmlParser.parse(xml);
+    let ledgerList = [];
+
+    // Log raw structure immediately so we can diagnose path issues
+    LOG(`[parseLedgers] Parsed envelope keys: ${Object.keys(parsed.ENVELOPE || parsed).join(', ')}`);
+    if (parsed.ENVELOPE?.BODY?.DATA) {
+      LOG(`[parseLedgers] DATA keys: ${Object.keys(parsed.ENVELOPE.BODY.DATA).join(', ')}`);
+    }
+    if (parsed.ENVELOPE?.BODY?.DATA?.COLLECTION) {
+      LOG(`[parseLedgers] COLLECTION keys: ${Object.keys(parsed.ENVELOPE.BODY.DATA.COLLECTION).join(', ')}`);
+    }
+
+    // Find ledgers in all known Tally response structures.
+    if (parsed.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER) {
+      // Collection request (primary path — used by our new buildLedgerExportXml)
+      ledgerList = parsed.ENVELOPE.BODY.DATA.COLLECTION.LEDGER;
+      LOG(`[parseLedgers] Using path: ENVELOPE.BODY.DATA.COLLECTION.LEDGER`);
+    } else if (parsed.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE?.LEDGER) {
+      // Export Data (List of Accounts)
+      ledgerList = parsed.ENVELOPE.BODY.DATA.TALLYMESSAGE.LEDGER;
+      LOG(`[parseLedgers] Using path: ENVELOPE.BODY.DATA.TALLYMESSAGE.LEDGER`);
+    } else if (parsed.ENVELOPE?.BODY?.DATA?.LEDGER) {
+      ledgerList = parsed.ENVELOPE.BODY.DATA.LEDGER;
+      LOG(`[parseLedgers] Using path: ENVELOPE.BODY.DATA.LEDGER`);
+    } else if (parsed.ENVELOPE?.TALLYMESSAGE?.LEDGER) {
+      ledgerList = parsed.ENVELOPE.TALLYMESSAGE.LEDGER;
+      LOG(`[parseLedgers] Using path: ENVELOPE.TALLYMESSAGE.LEDGER`);
+    } else if (parsed.TALLYMESSAGE?.LEDGER) {
+      ledgerList = parsed.TALLYMESSAGE.LEDGER;
+      LOG(`[parseLedgers] Using path: TALLYMESSAGE.LEDGER`);
+    } else if (parsed.LEDGER) {
+      ledgerList = parsed.LEDGER;
+      LOG(`[parseLedgers] Using path: root.LEDGER`);
+    } else {
+      // Deep scan — walk all nested objects looking for a LEDGER array
+      const deepFind = (obj, depth = 0) => {
+        if (depth > 6 || !obj || typeof obj !== 'object') return null;
+        if (Array.isArray(obj)) return null;
+        for (const key of Object.keys(obj)) {
+          if (key === 'LEDGER') {
+            const val = obj[key];
+            if (Array.isArray(val) && val.length > 0) return val;
+            if (val && typeof val === 'object' && val.NAME) return [val];
+          }
+          const found = deepFind(obj[key], depth + 1);
+          if (found) return found;
+        }
+        return null;
+      };
+      const found = deepFind(parsed);
+      if (found) {
+        ledgerList = found;
+        LOG(`[parseLedgers] Using deep-scan fallback, found ${found.length} ledgers`);
+      } else {
+        LOG(`[parseLedgers] ⚠️ Could not find LEDGER in any known path. Full parsed keys: ${JSON.stringify(Object.keys(parsed))}`);
+      }
+    }
+    
+    // Ensure array
+    if (!ledgerList) {
+      ledgerList = [];
+    } else if (!Array.isArray(ledgerList)) {
+      ledgerList = [ledgerList];
+    }
+
+    LOG(`[parseLedgers] Total ledgers fetched from Tally: ${ledgerList.length}`);
+    if (ledgerList.length > 0) {
+      LOG(`[parseLedgers] First parsed record keys: ${Object.keys(ledgerList[0]).join(', ')}`);
+      LOG(`[parseLedgers] First parsed record: ${JSON.stringify(ledgerList[0]).slice(0, 600)}`);
+    }
+
+    for (const ledger of ledgerList) {
+      let name = '';
+      // Try different name fields
+      name = decodeXmlEntities(getSafeValue(ledger, '@_NAME')) || 
+             decodeXmlEntities(getSafeValue(ledger, 'LEDGERNAME')) ||
+             decodeXmlEntities(getSafeValue(ledger, 'NAME')) ||
+             decodeXmlEntities(getSafeValue(ledger, 'LEDGSTNAME')) ||
+             decodeXmlEntities(getSafeValue(ledger, 'MAILINGNAME'));
+      
+      if (!name) {
+        failed.push({ reason: 'No name found', ledger: JSON.stringify(ledger).slice(0, 200) });
+        continue;
+      }
+
+      const parent = decodeXmlEntities(getSafeValue(ledger, 'PARENT'));
+      const parentNorm = parent?.trim().toLowerCase() || '';
+      const guid = getSafeValue(ledger, 'GUID');
+      const alterId = getSafeValue(ledger, 'ALTERID');
+      const gstNumber = decodeXmlEntities(getSafeValue(ledger, 'GSTIN') || getSafeValue(ledger, 'PARTYGSTIN'));
+      const openingBalance = getSafeNumber(ledger, 'OPENINGBALANCE');
+      const closingBalance = getSafeNumber(ledger, 'CLOSINGBALANCE') || openingBalance;
+      // Try multiple email fields
+      const email = decodeXmlEntities(
+        getSafeValue(ledger, 'EMAIL') ||
+        getSafeValue(ledger, 'LEDGEREMAIL') ||
+        getSafeValue(ledger, 'MAILINGEMAIL') ||
+        ''
+      );
+      // Try multiple phone number fields!
+      const phone = decodeXmlEntities(
+        getSafeValue(ledger, 'LEDGERMOBILE') ||
+        getSafeValue(ledger, 'MOBILE') ||
+        getSafeValue(ledger, 'MOBILENO') ||
+        getSafeValue(ledger, 'TELEPHONE') ||
+        getSafeValue(ledger, 'PHONE') ||
+        getSafeValue(ledger, 'PHONENO') ||
+        getSafeValue(ledger, 'CONTACT') ||
+        ''
+      );
+      const contactPerson = decodeXmlEntities(
+        getSafeValue(ledger, 'MAILINGNAME') ||
+        getSafeValue(ledger, 'CONTACTPERSON') ||
+        getSafeValue(ledger, 'PERSON') ||
+        ''
+      );
+      const isCreditor = parentNorm.includes('sundry creditor') || parentNorm === 'sundry creditors';
+      const isDebtor   = parentNorm.includes('sundry debtor')   || parentNorm === 'sundry debtors';
+      const addrInfo = parseTallyAddress(ledger);
+      
+      ledgers.push({ 
+        name, 
+        guid, 
+        alterId, 
+        gstNumber, 
+        openingBalance,
+        closingBalance,
+        email, 
+        phone, 
+        contactPerson, 
+        isCreditor, 
+        isDebtor,
+        parent,
+        parentNorm,
+        ...addrInfo,
+        // Ensure state has the richest possible value — addrInfo already tries
+        // STATENAME / LEDSTATENAME / LEDGERSTATE / STATE via parseTallyAddress,
+        // but fall back to direct ledger fields if addrInfo came up empty.
+        state: addrInfo.state ||
+               decodeXmlEntities(getSafeValue(ledger, 'STATENAME')) ||
+               decodeXmlEntities(getSafeValue(ledger, 'LEDSTATENAME')) ||
+               decodeXmlEntities(getSafeValue(ledger, 'LEDGERSTATE')) ||
+               decodeXmlEntities(getSafeValue(ledger, 'STATE')) ||
+               '',
+        rawData: ledger
+      });
+    }
+  } catch (e) {
+    ERR('Error parsing ledgers', e);
+  }
+  
+  // Debug: log all unique parent groups found
+  const parentGroups = [...new Set(ledgers.map(l => l.parent).filter(Boolean))];
+  LOG(`[parseLedgers] Parent groups found: ${parentGroups.join(' | ') || '(none)'}`);
+  LOG(`[parseLedgers] Suppliers (Sundry Creditors): ${ledgers.filter(l => l.isCreditor).length}`);
+  LOG(`[parseLedgers] Clients (Sundry Debtors): ${ledgers.filter(l => l.isDebtor).length}`);
+  LOG(`[parseLedgers] Valid records: ${ledgers.length}, Skipped records: ${failed.length}`);
+  if (failed.length > 0) {
+    LOG(`[parseLedgers] Skipped reasons: ${JSON.stringify(failed)}`);
+  }
+  return ledgers;
+}
+
+function normaliseTallyPhone(raw) {
+  if (!raw) return '';
+  let digits = String(raw).replace(/\D/g, '');
+  if (digits.length === 12 && digits.startsWith('91')) digits = digits.slice(2);
+  if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1);
+  return digits.length === 10 ? digits : '';
+}
+
+function ledgersToOps(ledgers) {
+  const ledgerOps = [], vendorOps = [], clientOps = [];
+  for (const l of ledgers) {
+    const { name, guid, alterId, gstNumber, openingBalance, closingBalance, email, phone, contactPerson, isCreditor, isDebtor, parent, address, city, state, pincode, country } = l;
+    if (!guid) {
+      LOG('Skipping ledger without GUID:', name);
+      continue;
+    }
+    const ledgerGroup = parent || (isCreditor ? 'Sundry Creditors' : (isDebtor ? 'Sundry Debtors' : 'Primary'));
+    const ledgerCode = `TALLY-${guid.replace(/[^A-Z0-9]/gi, '')}`;
+    const lFilter = { tallyGuid: guid };
+    const cleanPhone = normaliseTallyPhone(phone);
+    const rawDigits = phone ? String(phone).replace(/\D/g, '').slice(0, 15) : '';
+    const safePhone = cleanPhone || '';
+    const safeEmail = email || `${name.replace(/\s+/g, '').toLowerCase().slice(0, 30)}@tally.sync`;
+    // Use Tally closing balance if available; fall back to opening balance so UI never shows ₹0
+    const safeClosingBalance = (closingBalance && closingBalance !== 0) ? closingBalance : openingBalance;
+
+    ledgerOps.push({
+      updateOne: {
+        filter: lFilter,
+        update: {
+          $set: {
+            tallyGuid: guid,
+            tallyAlterId: alterId,
+            ledgerName: name,
+            groupName: ledgerGroup,
+            partyName: contactPerson,
+            gstNo: gstNumber,
+            state,
+            ledgerGroup, gstNumber, openingBalance,
+            closingBalance: safeClosingBalance,
+            closingBalanceCalculatedAt: new Date(),
+            syncedWithTally: true, lastTallySync: new Date(),
+            ...(email ? { email } : {}),
+            ...(cleanPhone ? { phone: cleanPhone } : (rawDigits ? { phone: rawDigits } : {})),
+            ...(address ? { 'address.street': address } : {}),
+            ...(city ? { 'address.city': city } : {}),
+            ...(state ? { 'address.state': state } : {}),
+            ...(pincode ? { 'address.pincode': pincode } : {}),
+            ...(country ? { 'address.country': country } : {})
+          },
+          $setOnInsert: { ledgerCode, contactPerson: contactPerson || name, panNumber: 'N/A', isActive: true }
+        },
+        upsert: true
+      }
+    });
+
+    if (isCreditor) {
+      vendorOps.push({
+        updateOne: {
+          filter: { tallyGuid: guid },
+          update: {
+            $set: {
+              tallyGuid: guid,
+              tallyAlterId: alterId,
+              tallySynced: true, lastTallySync: new Date(), phone: safePhone, email: safeEmail, contactPerson: contactPerson || name,
+              address: address || 'Imported from Tally',
+              ...(city ? { city } : {}),
+              ...(state ? { state } : {}),
+              pincode: pincode || '000000',
+              ...(gstNumber ? { gstNumber } : {})
+            },
+            $setOnInsert: {
+              vendorId: `VND-TALLY-${guid.replace(/[^A-Z0-9]/gi, '')}`,
+              companyName: name, category: 'General', status: 'Active'
+            }
+          },
+          upsert: true
+        }
+      });
+    } else if (isDebtor) {
+      clientOps.push({
+        updateOne: {
+          filter: { tallyGuid: guid },
+          update: {
+            $set: {
+              tallyGuid: guid,
+              tallyAlterId: alterId,
+              tallySynced: true, lastTallySync: new Date(), phone: safePhone, email: safeEmail, contact: contactPerson || name,
+              address: address || 'Imported from Tally',
+              ...(city ? { city } : {}),
+              ...(state ? { state } : {}),
+              pincode: pincode || '000000',
+              ...(gstNumber ? { gstNumber } : {})
+            },
+            $setOnInsert: {
+              clientId: `CLT-TALLY-${guid.replace(/[^A-Z0-9]/gi, '')}`,
+              name, category: 'Trading', status: 'Active'
+            }
+          },
+          upsert: true
+        }
+      });
+    }
+  }
+  return { ledgerOps, vendorOps, clientOps };
+}
+
+// ── Regex-based helper to extract a single tag value from a raw XML block ──
+function gTagVal(block, tag) {
+  const m = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+  return m ? m[1].trim() : '';
+}
+
+// ── Regex-based raw XML inventory/ledger entry extraction (mirrors tallySyncStream approach) ──
+// Returns a Map keyed by voucherNumber (or GUID) → { inventoryEntries, ledgerEntries }
+function extractEntriesFromRawXml(xml) {
+  const result = new Map(); // key: guid → { inventoryEntries, ledgerEntries }
+
+  // Split XML into per-voucher blocks.
+  // Collection XML structure: <VOUCHER REMOTEID="..." VCHTYPE="..."> (always has attributes)
+  // The CMPINFO section has <VOUCHER>0</VOUCHER> reference counts — skip those by
+  // only matching <VOUCHER followed by a space (i.e. real vouchers with attributes).
+  // Also handle nesting depth in case Tally emits sub-voucher elements.
+  const OPEN_TAG  = '<VOUCHER ';   // 9 chars — only real vouchers (have attributes)
+  const CLOSE_TAG = '</VOUCHER>'; // 10 chars
+  const blocks = [];
+  let searchFrom = 0;
+  while (true) {
+    // Find the next top-level <VOUCHER ...> or <VOUCHER>
+    const start = xml.indexOf(OPEN_TAG, searchFrom);
+    if (start === -1) break;
+    // Verify it is really an opening tag (followed by > or whitespace)
+    const afterOpen = xml[start + OPEN_TAG.length - 1]; // char after '<VOUCHER'
+    // OPEN_TAG is '<VOUCHER ' so start already points to a real voucher
+    // Walk forward tracking nesting depth
+    let depth = 0;
+    let i = start;
+    let blockEnd = -1;
+    while (i < xml.length) {
+      const lt = xml.indexOf('<', i);
+      if (lt === -1) break;
+      // Opening <VOUCHER tag (any kind — with or without attributes)
+      if (xml.startsWith('<VOUCHER', lt)) {
+        const ch = xml[lt + 8];
+        if (ch === '>' || (ch && /\s/.test(ch))) {
+          depth++;
+          i = lt + 8;
+          continue;
+        }
+      }
+      // Closing </VOUCHER> tag
+      if (xml.startsWith(CLOSE_TAG, lt)) {
+        depth--;
+        if (depth === 0) {
+          blockEnd = lt + CLOSE_TAG.length;
+          break;
+        }
+        i = lt + CLOSE_TAG.length;
+        continue;
+      }
+      i = lt + 1;
+    }
+    if (blockEnd !== -1) {
+      blocks.push(xml.slice(start, blockEnd));
+      searchFrom = blockEnd;
+    } else {
+      // Malformed — no matching close tag found; skip
+      searchFrom = start + OPEN_TAG.length;
+    }
+  }
+  LOG(`[extractEntriesFromRawXml] Extracted ${blocks.length} voucher blocks (nesting-aware)`);
+
+  for (const block of blocks) {
+    const guid = gTagVal(block, 'GUID');
+    const vNo  = gTagVal(block, 'VOUCHERNUMBER');
+    const key  = guid || vNo;
+    if (!key) continue;
+
+    // ── Ledger entries ──
+    const le = [];
+    for (const lex of block.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/gi)) {
+      const lb = lex[1];
+      const ln = gTagVal(lb, 'LEDGERNAME');
+      if (ln) le.push({
+        ledgerName: ln,
+        amount: parseFloat(gTagVal(lb, 'AMOUNT').replace(/[^\d.-]/g, '')) || 0,
+        isDeemed: gTagVal(lb, 'ISDEEMEDPOSITIVE') === 'Yes',
+      });
+    }
+    // Fallback: LEDGERENTRIES.LIST
+    if (le.length === 0) {
+      for (const lex of block.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/gi)) {
+        const lb = lex[1];
+        const ln = gTagVal(lb, 'LEDGERNAME');
+        if (ln) le.push({
+          ledgerName: ln,
+          amount: parseFloat(gTagVal(lb, 'AMOUNT').replace(/[^\d.-]/g, '')) || 0,
+          isDeemed: gTagVal(lb, 'ISDEEMEDPOSITIVE') === 'Yes',
+        });
+      }
+    }
+
+    // ── Inventory entries ──
+    const ie = [];
+    const invPattern = /<ALLINVENTORYENTRIES\.LIST>([\s\S]*?)<\/ALLINVENTORYENTRIES\.LIST>|<INVENTORYENTRIES\.LIST>([\s\S]*?)<\/INVENTORYENTRIES\.LIST>/gi;
+    for (const inv of block.matchAll(invPattern)) {
+      const ib = inv[1] || inv[2];
+      const sn = gTagVal(ib, 'STOCKITEMNAME');
+      if (!sn) continue;
+      const rawQty  = gTagVal(ib, 'BILLEDQTY') || gTagVal(ib, 'ACTUALQTY') || '0';
+      const rawRate = gTagVal(ib, 'RATE') || '0';
+      const qty   = parseFloat(rawQty.replace(/[^\d.-]/g, ''))  || 0;
+      const rate  = parseFloat(rawRate.replace(/[^\d.-]/g, '')) || 0;
+      const amt   = Math.abs(parseFloat(gTagVal(ib, 'AMOUNT').replace(/[^\d.-]/g, '')) || 0);
+
+      // Per-item ACCOUNTINGALLOCATIONS (tax breakdown)
+      const itemTaxEntries = [];
+      for (const aa of ib.matchAll(/<ACCOUNTINGALLOCATIONS\.LIST>([\s\S]*?)<\/ACCOUNTINGALLOCATIONS\.LIST>/gi)) {
+        const ab = aa[1];
+        const an = gTagVal(ab, 'LEDGERNAME');
+        const aa2 = Math.abs(parseFloat(gTagVal(ab, 'AMOUNT').replace(/[^\d.-]/g, '')) || 0);
+        if (an) itemTaxEntries.push({ ledgerName: an, amount: aa2 });
+      }
+
+      ie.push({ stockItemName: sn, qty, rate, amount: amt, taxEntries: itemTaxEntries });
+    }
+
+    result.set(key, { inventoryEntries: ie, ledgerEntries: le });
   }
 
-  if (!resp || !resp.includes(meta.tag)) {
-    LOG(`No ${entityType} data in response`);
-    return { records: 0, complete: true }; // empty but valid
+  LOG(`[extractEntriesFromRawXml] Extracted entries for ${result.size} voucher blocks`);
+  return result;
+}
+
+function parseVouchers(xml, voucherTypes) {
+  const vouchers = [];
+  const mismatched = [];
+  const failed = [];
+
+  // Pre-extract all entries via raw XML regex (guaranteed to find dot-named LIST tags)
+  const rawEntryMap = extractEntriesFromRawXml(xml);
+  LOG(`[parseVouchers] Raw entry map has ${rawEntryMap.size} vouchers with inventory/ledger data`);
+
+  try {
+    const parsed = xmlParser.parse(xml);
+    let voucherList = [];
+    
+    // Find vouchers in all known Tally response structures.
+    // Day Book "Export Data" returns:
+    //   ENVELOPE.BODY.IMPORTDATA.REQUESTDATA.TALLYMESSAGE = [{VOUCHER: {...}}, ...]
+    //   — TALLYMESSAGE is an ARRAY, each element has one VOUCHER object.
+    // Collection format returns:
+    //   ENVELOPE.BODY.DATA.COLLECTION.VOUCHER = [...]  or  DATA.TALLYMESSAGE.VOUCHER = [...]
+
+    const tryPath = (...keys) => {
+      let node = parsed.ENVELOPE?.BODY;
+      for (const k of keys) { if (!node) break; node = node[k]; }
+      return node;
+    };
+
+    // ── Path 1: Day Book — TALLYMESSAGE is array of {VOUCHER} ──
+    const tallyMsgArr = tryPath('IMPORTDATA', 'REQUESTDATA', 'TALLYMESSAGE');
+    if (Array.isArray(tallyMsgArr) && tallyMsgArr.length > 0 && tallyMsgArr[0]?.VOUCHER) {
+      voucherList = tallyMsgArr.map(m => m.VOUCHER).filter(Boolean);
+      LOG(`[parseVouchers] Using path: IMPORTDATA.REQUESTDATA.TALLYMESSAGE[].VOUCHER → ${voucherList.length} vouchers`);
+    }
+    // ── Path 2: Day Book — TALLYMESSAGE is object with VOUCHER array ──
+    else if (tryPath('IMPORTDATA', 'REQUESTDATA', 'TALLYMESSAGE', 'VOUCHER')) {
+      voucherList = tryPath('IMPORTDATA', 'REQUESTDATA', 'TALLYMESSAGE', 'VOUCHER');
+      voucherList = Array.isArray(voucherList) ? voucherList : [voucherList];
+      LOG(`[parseVouchers] Using path: IMPORTDATA.REQUESTDATA.TALLYMESSAGE.VOUCHER → ${voucherList.length} vouchers`);
+    }
+    // ── Path 3: Collection VOUCHER array ──
+    else if (tryPath('DATA', 'COLLECTION', 'VOUCHER')) {
+      voucherList = tryPath('DATA', 'COLLECTION', 'VOUCHER');
+      voucherList = Array.isArray(voucherList) ? voucherList : [voucherList];
+      LOG(`[parseVouchers] Using path: DATA.COLLECTION.VOUCHER → ${voucherList.length} vouchers`);
+    }
+    // ── Path 4: Older TALLYMESSAGE.VOUCHER ──
+    else if (tryPath('DATA', 'TALLYMESSAGE', 'VOUCHER')) {
+      voucherList = tryPath('DATA', 'TALLYMESSAGE', 'VOUCHER');
+      voucherList = Array.isArray(voucherList) ? voucherList : [voucherList];
+      LOG(`[parseVouchers] Using path: DATA.TALLYMESSAGE.VOUCHER → ${voucherList.length} vouchers`);
+    }
+    // ── Path 5: Root TALLYMESSAGE array ──
+    else {
+      const rootTm = parsed.ENVELOPE?.TALLYMESSAGE || parsed.TALLYMESSAGE;
+      if (Array.isArray(rootTm) && rootTm[0]?.VOUCHER) {
+        voucherList = rootTm.map(m => m.VOUCHER).filter(Boolean);
+        LOG(`[parseVouchers] Using path: root.TALLYMESSAGE[].VOUCHER → ${voucherList.length} vouchers`);
+      } else if (rootTm?.VOUCHER) {
+        voucherList = Array.isArray(rootTm.VOUCHER) ? rootTm.VOUCHER : [rootTm.VOUCHER];
+        LOG(`[parseVouchers] Using path: root.TALLYMESSAGE.VOUCHER → ${voucherList.length} vouchers`);
+      } else if (parsed.VOUCHER) {
+        voucherList = Array.isArray(parsed.VOUCHER) ? parsed.VOUCHER : [parsed.VOUCHER];
+        LOG(`[parseVouchers] Using path: root.VOUCHER → ${voucherList.length} vouchers`);
+      } else {
+        LOG(`[parseVouchers] ❌ Could not find VOUCHER in any known path`);
+        LOG(`[parseVouchers] BODY keys: ${Object.keys(parsed.ENVELOPE?.BODY || {}).join(', ')}`);
+      }
+    }
+
+    // Ensure we always work with a flat array of voucher objects
+    if (!voucherList) {
+      voucherList = [];
+    } else if (!Array.isArray(voucherList)) {
+      voucherList = [voucherList];
+    }
+
+    LOG(`[parseVouchers] Total vouchers fetched from Tally: ${voucherList.length}`);
+    if (voucherList.length > 0) {
+      LOG(`[parseVouchers] First parsed record: ${JSON.stringify(voucherList[0]).slice(0, 500)}`);
+    }
+
+    // Log ALL voucher type names coming from Tally — critical for diagnosing custom type names
+    const foundVoucherTypes = new Set();
+    voucherList.forEach(v => {
+      const vt = getSafeValue(v, 'VOUCHERTYPENAME') || getSafeValue(v, 'VCHTYPE') || '';
+      if (vt) foundVoucherTypes.add(vt);
+    });
+    LOG(`[parseVouchers] All voucher types found in XML: ${Array.from(foundVoucherTypes).join(' | ') || '(none)'}`);
+    if (voucherTypes && voucherTypes.length > 0) {
+      LOG(`[parseVouchers] Filtering for types: ${voucherTypes.join(' | ')}`);
+    }
+
+    for (const voucher of voucherList) {
+      // Try VOUCHERTYPENAME first, then VCHTYPE element, then @_VCHTYPE attribute (Collection format)
+      const vt = getSafeValue(voucher, 'VOUCHERTYPENAME') || getSafeValue(voucher, 'VCHTYPE') || getSafeValue(voucher, '@_VCHTYPE') || '';
+      
+      // Filter by voucher types if specified (case-insensitive, also partial match for custom names)
+      if (voucherTypes && voucherTypes.length > 0) {
+        const vtLower = vt.toLowerCase();
+        const typeMatches = voucherTypes.some(type => {
+          const tLower = type.toLowerCase();
+          return vtLower === tLower || vtLower.includes(tLower) || tLower.includes(vtLower);
+        });
+        if (!typeMatches) {
+          mismatched.push({ type: vt, voucherNumber: getSafeValue(voucher, 'VOUCHERNUMBER') });
+          continue;
+        }
+      }
+
+      const guid      = getSafeValue(voucher, 'GUID');
+      const alterId   = getSafeValue(voucher, 'ALTERID');
+      const voucherNumber = getSafeValue(voucher, 'VOUCHERNUMBER');
+      // PARTYLEDGERNAME is the debtors ledger name (party). Fall back to PARTYNAME.
+      const partyName = getSafeValue(voucher, 'PARTYLEDGERNAME') || getSafeValue(voucher, 'PARTYNAME');
+      const rawDate   = getSafeValue(voucher, 'DATE');
+      const narration = getSafeValue(voucher, 'NARRATION');
+      const partyGstin = getSafeValue(voucher, 'PARTYGSTIN');
+      const placeOfSupply = getSafeValue(voucher, 'PLACEOFSUPPLY');
+      // DATE format: YYYYMMDD (e.g. 20260401). Null-safe — skip if date invalid
+      let vDate;
+      if (rawDate && rawDate.length === 8 && /^\d{8}$/.test(rawDate)) {
+        vDate = new Date(`${rawDate.slice(0,4)}-${rawDate.slice(4,6)}-${rawDate.slice(6,8)}`);
+        if (isNaN(vDate.getTime())) vDate = null;
+      } else {
+        vDate = null; // will be skipped or use today as last resort
+      }
+      if (!vDate) {
+        LOG(`[parseVouchers] Skipping voucher ${voucherNumber} — no valid date (rawDate="${rawDate}")`);
+        continue;
+      }
+
+      // ── Qty/Rate parser — handles "36 Nos", "910.00 /Nos", plain numbers ──
+      const parseTallyQty = (raw) => {
+        if (raw === null || raw === undefined || raw === '') return 0;
+        if (typeof raw === 'number') return isNaN(raw) ? 0 : Math.abs(raw);
+        // Strip unit suffixes like " Nos", " /Nos", " KG" etc.
+        const s = String(raw).replace(/[a-zA-Z\/\s]+$/, '').replace(/[^\d.-]/g, '').trim();
+        const n = parseFloat(s);
+        return isNaN(n) ? 0 : Math.abs(n);
+      };
+
+      // ── Get regex-extracted entries (primary — bypasses fast-xml-parser dot-tag issues) ──
+      const rawData = rawEntryMap.get(guid) || rawEntryMap.get(voucherNumber) || null;
+
+      // ── Parse ALLLEDGERENTRIES.LIST / LEDGERENTRIES.LIST (party + tax lines) ─────────────
+      // Prefer regex-extracted data; fall back to XML-parsed data
+      let ledgerEntries = rawData?.ledgerEntries || [];
+      if (ledgerEntries.length === 0) {
+        const rawLedgerEntries =
+          voucher['ALLLEDGERENTRIES.LIST'] ||   // Collection format
+          voucher['LEDGERENTRIES.LIST']    ||   // Day Book format (actual Tally Prime response)
+          voucher['ACCOUNTINGALLOCATIONS.LIST'] || [];
+        const ledgerEntriesArray = Array.isArray(rawLedgerEntries)
+          ? rawLedgerEntries
+          : (rawLedgerEntries ? [rawLedgerEntries] : []);
+        for (const le of ledgerEntriesArray) {
+          const lName = getSafeValue(le, 'LEDGERNAME');
+          const lAmt  = getSafeNumber(le, 'AMOUNT');
+          const isDmd = getSafeValue(le, 'ISDEEMEDPOSITIVE', 'No').trim() === 'Yes';
+          if (lName) ledgerEntries.push({ ledgerName: lName, amount: lAmt, isDeemed: isDmd });
+        }
+      }
+
+      // ── Parse ALLINVENTORYENTRIES.LIST (item lines) ───────────────────────
+      // Prefer regex-extracted data; fall back to XML-parsed data
+      let inventoryEntries = rawData?.inventoryEntries || [];
+      if (inventoryEntries.length === 0) {
+        const rawInvEntries =
+          voucher['ALLINVENTORYENTRIES.LIST'] ||
+          voucher['INVENTORYENTRIES.LIST']    || [];
+        const inventoryEntriesArray = Array.isArray(rawInvEntries)
+          ? rawInvEntries
+          : (rawInvEntries ? [rawInvEntries] : []);
+
+        // Log structure of first voucher's first inventory entry to help diagnose
+        if (inventoryEntriesArray.length > 0 && vouchers.length === 0) {
+          LOG(`[parseVouchers] First inventory entry raw (XML-parsed): ${JSON.stringify(inventoryEntriesArray[0]).slice(0, 800)}`);
+        }
+
+        for (const ie of inventoryEntriesArray) {
+          const stockItemName = getSafeValue(ie, 'STOCKITEMNAME');
+          if (!stockItemName) continue;
+          const rawQty  = getSafeValue(ie, 'BILLEDQTY') || getSafeValue(ie, 'ACTUALQTY') || '0';
+          const qty     = parseTallyQty(rawQty);
+          const rawRate = getSafeValue(ie, 'RATE') || '0';
+          const rate    = parseTallyQty(rawRate);
+          const amt     = Math.abs(getSafeNumber(ie, 'AMOUNT'));
+          const itemTaxEntries = [];
+          const rawAccAlloc = ie['ACCOUNTINGALLOCATIONS.LIST'] || [];
+          const accAllocArr = Array.isArray(rawAccAlloc) ? rawAccAlloc : (rawAccAlloc ? [rawAccAlloc] : []);
+          for (const aa of accAllocArr) {
+            const aaName = getSafeValue(aa, 'LEDGERNAME');
+            const aaAmt  = Math.abs(getSafeNumber(aa, 'AMOUNT'));
+            if (aaName) itemTaxEntries.push({ ledgerName: aaName, amount: aaAmt });
+          }
+          inventoryEntries.push({ stockItemName, qty, rate, amount: amt, taxEntries: itemTaxEntries });
+        }
+      }
+
+      if (inventoryEntries.length > 0 && vouchers.length === 0) {
+        LOG(`[parseVouchers] First voucher inventory entries (${inventoryEntries.length}): ${JSON.stringify(inventoryEntries[0])}`);
+      }
+
+      // ── Parse BILLALLOCATIONS.LIST ────────────────────────────────────────
+      const billAllocations = [];
+      const rawBillAlloc = voucher['BILLALLOCATIONS.LIST'] || [];
+      const billAllocArr = Array.isArray(rawBillAlloc) ? rawBillAlloc : [rawBillAlloc];
+      for (const ba of billAllocArr) {
+        const billName = getSafeValue(ba, 'BILLNAME');
+        const billAmt  = getSafeNumber(ba, 'AMOUNT');
+        if (billName) billAllocations.push({ billName, amount: billAmt });
+      }
+
+      // ── Detect tax lines from ledger entries ──────────────────────────────
+      const taxLines = ledgerEntries.filter(le => {
+        const n = le.ledgerName.toLowerCase();
+        return n.includes('cgst') || n.includes('sgst') || n.includes('igst') ||
+               n.includes('cess') || n.includes('utgst');
+      });
+
+      // ── Amount calculation ────────────────────────────────────────────────
+      // Priority 1: inventory items exist → subtotal + tax ledger lines
+      // Priority 2: ledger entries only (payment/receipt/journal)
+      // Priority 3: top-level AMOUNT field
+      let subtotal = 0;
+      let taxTotal = 0;
+      let amount   = 0;
+
+      if (inventoryEntries.length > 0) {
+        subtotal = inventoryEntries.reduce((s, ie) => s + ie.amount, 0);
+        taxTotal = taxLines.reduce((s, le) => s + Math.abs(le.amount), 0);
+        // Also catch round-off ledger entry
+        const roundOff = ledgerEntries
+          .filter(le => le.ledgerName.toLowerCase().includes('round'))
+          .reduce((s, le) => s + Math.abs(le.amount), 0);
+        amount = subtotal + taxTotal + roundOff;
+      } else if (ledgerEntries.length > 0) {
+        amount = Math.max(...ledgerEntries.map(le => Math.abs(le.amount)));
+        if (!isFinite(amount)) amount = 0;
+        subtotal = amount;
+      } else {
+        amount   = Math.abs(getSafeNumber(voucher, 'AMOUNT'));
+        subtotal = amount;
+      }
+
+      // Final fallback to top-level AMOUNT
+      if (amount === 0) {
+        amount = Math.abs(getSafeNumber(voucher, 'AMOUNT'));
+      }
+
+      vouchers.push({
+        guid,
+        alterId,
+        voucherNumber,
+        voucherType: vt,       // raw Tally type — normalised later
+        partyName,
+        partyGstin,
+        placeOfSupply,
+        amount,
+        subtotal,
+        taxTotal,
+        taxLines,              // [{ledgerName, amount}] — CGST/SGST/IGST lines
+        narration,
+        vDate,
+        ledgerEntries,
+        inventoryEntries,      // [{stockItemName, qty, rate, amount, taxEntries}]
+        billAllocations,
+      });
+    }
+  } catch (e) {
+    ERR('Error parsing vouchers', e);
   }
 
-  const complete = isResponseComplete(resp);
-  if (!complete) {
-    ERR(`Response for ${entityType} appears truncated (${resp.length} bytes)`);
+  // Group mismatched by type so the log is readable
+  if (mismatched.length > 0) {
+    const byType = {};
+    mismatched.forEach(m => { byType[m.type || '(blank)'] = (byType[m.type || '(blank)'] || 0) + 1; });
+    LOG(`[parseVouchers] Skipped ${mismatched.length} mismatched vouchers by type: ${JSON.stringify(byType)}`);
+    LOG(`[parseVouchers] ⚠️  If Sales Register is empty, check that the Tally voucher type name matches one of: ${(voucherTypes||[]).join(', ')}`);
+  }
+  LOG(`[parseVouchers] Valid records: ${vouchers.length}, Mismatched: ${mismatched.length}, Failed: ${failed.length}`);
+  return { vouchers, mismatchedCount: mismatched.length, failedCount: failed.length, foundTypes: [...new Set(vouchers.map(v => v.voucherType))] };
+}
+
+// Normalize a raw Tally voucherTypeName to one of the TallyVoucher model enum values.
+// Tally companies can have custom type names like "GST Credit Note" or "Tax Invoice".
+// We do a case-insensitive keyword match to map them to canonical values.
+const VOUCHER_TYPE_ENUM = ['Payment', 'Receipt', 'Journal', 'Contra', 'Sales', 'Purchase', 'Debit Note', 'Credit Note'];
+function normaliseVoucherType(raw) {
+  if (!raw) return null;
+  const lower = raw.trim().toLowerCase();
+  // Exact match first (after normalisation)
+  for (const t of VOUCHER_TYPE_ENUM) {
+    if (lower === t.toLowerCase()) return t;
+  }
+  // Keyword / partial match
+  if (lower.includes('credit note')) return 'Credit Note';
+  if (lower.includes('debit note'))  return 'Debit Note';
+  if (lower.includes('purchase'))    return 'Purchase';
+  if (lower.includes('sales') || lower.includes('invoice') || lower.includes('tax invoice')) return 'Sales';
+  if (lower.includes('payment'))     return 'Payment';
+  if (lower.includes('receipt'))     return 'Receipt';
+  if (lower.includes('journal'))     return 'Journal';
+  if (lower.includes('contra'))      return 'Contra';
+  return null; // cannot map — caller will skip
+}
+
+function vouchersToInvoiceOps(vouchers) {
+  return vouchers.map(v => {
+    if (!v.guid) {
+      LOG('Skipping invoice voucher without GUID:', JSON.stringify(v).slice(0, 200));
+      return null;
+    }
+    const invoiceNo = v.voucherNumber
+      ? v.voucherNumber.trim()
+      : `TALLY-${v.guid.replace(/[^A-Z0-9]/gi, '').slice(0, 30)}`;
+
+    const safePartyName = (v.partyName || 'Unknown Party').trim();
+
+    // Detect CGST/SGST/IGST from taxLines (preferred) or ledgerEntries
+    const taxSource = v.taxLines?.length ? v.taxLines : (v.ledgerEntries || []).filter(le => {
+      const n = le.ledgerName.toLowerCase();
+      return n.includes('cgst') || n.includes('sgst') || n.includes('igst') || n.includes('cess');
+    });
+
+    const cgstAmt = taxSource
+      .filter(t => t.ledgerName.toLowerCase().includes('cgst'))
+      .reduce((s, t) => s + Math.abs(t.amount), 0);
+    const sgstAmt = taxSource
+      .filter(t => t.ledgerName.toLowerCase().includes('sgst'))
+      .reduce((s, t) => s + Math.abs(t.amount), 0);
+    const igstAmt = taxSource
+      .filter(t => t.ledgerName.toLowerCase().includes('igst'))
+      .reduce((s, t) => s + Math.abs(t.amount), 0);
+
+    // Map inventory entries → invoice items[]
+    const items = (v.inventoryEntries || []).map(ie => {
+      const basic    = ie.amount || (ie.qty * ie.rate);
+      // Item-level tax from ACCOUNTINGALLOCATIONS.LIST inside inventory entry
+      const itemCgst = (ie.taxEntries || [])
+        .filter(t => t.ledgerName.toLowerCase().includes('cgst'))
+        .reduce((s, t) => s + t.amount, 0);
+      const itemSgst = (ie.taxEntries || [])
+        .filter(t => t.ledgerName.toLowerCase().includes('sgst'))
+        .reduce((s, t) => s + t.amount, 0);
+      const itemIgst = (ie.taxEntries || [])
+        .filter(t => t.ledgerName.toLowerCase().includes('igst'))
+        .reduce((s, t) => s + t.amount, 0);
+      const taxAmount = itemCgst + itemSgst + itemIgst;
+      const taxRate   = basic > 0 ? Math.round((taxAmount / basic) * 100) : 0;
+
+      return {
+        description: ie.stockItemName,
+        hsn:         '',
+        qty:         ie.qty   || 0,
+        unit:        'Nos',
+        rate:        ie.rate  || 0,
+        discount:    0,
+        taxRate,
+        basic,
+        amount:      basic,
+        taxAmount,
+        total:       basic + taxAmount,
+        cgst:        itemCgst,
+        sgst:        itemSgst,
+        igst:        itemIgst,
+      };
+    });
+
+    // If no item-level tax was found, distribute voucher-level tax proportionally
+    const totalItemTax = items.reduce((s, it) => s + it.taxAmount, 0);
+    if (totalItemTax === 0 && (cgstAmt || sgstAmt || igstAmt) && items.length > 0) {
+      const voucherTax = cgstAmt + sgstAmt + igstAmt;
+      items.forEach(it => {
+        const share = items.length > 0 ? voucherTax / items.length : 0;
+        it.cgst = cgstAmt / items.length;
+        it.sgst = sgstAmt / items.length;
+        it.igst = igstAmt / items.length;
+        it.taxAmount = share;
+        it.total     = it.basic + share;
+        it.taxRate   = it.basic > 0 ? Math.round((share / it.basic) * 100) : 0;
+      });
+    }
+
+    const subtotal   = v.subtotal || items.reduce((s, it) => s + it.basic, 0);
+    const totalTax   = v.taxTotal || cgstAmt + sgstAmt + igstAmt;
+    const grandTotal = v.amount   || subtotal + totalTax;
+
+    return {
+      updateOne: {
+        filter: { tallyGuid: v.guid },
+        update: {
+          $set: {
+            tallyGuid:    v.guid,
+            tallyAlterId: v.alterId,
+            partyName:    safePartyName,
+            partyGST:     v.partyGstin || '',
+            grandTotal,
+            subtotal,
+            totalTax,
+            narration:    v.narration,
+            invoiceDate:  v.vDate,
+            source:       'Tally',
+            status:       'Sent',
+            invoiceType:  items.length > 1 ? 'multi' : 'single',
+            items,
+            ledgerEntries:   v.ledgerEntries,
+            billAllocations: v.billAllocations,
+            tallyVoucherNumber: v.voucherNumber,
+          },
+          $setOnInsert: { invoiceNo }
+        },
+        upsert: true
+      }
+    };
+  }).filter(Boolean);
+}
+
+function vouchersToTallyVoucherOps(vouchers) {
+  const skipped = [];
+  const ops = vouchers.map(v => {
+    if (!v.guid) {
+      LOG('Skipping voucher without GUID:', JSON.stringify(v).slice(0, 200));
+      return null;
+    }
+
+    // Normalise raw Tally type name → enum value.
+    // Reject vouchers whose type cannot be mapped to avoid Mongoose validation errors.
+    const canonicalType = normaliseVoucherType(v.voucherType);
+    if (!canonicalType) {
+      skipped.push({ guid: v.guid, rawType: v.voucherType });
+      return null;
+    }
+
+    const safePartyName = (v.partyName || '').trim();
+
+    // Always update core fields. Only overwrite inventoryEntries/ledgerEntries/amount
+    // when the parsed data actually has content — this prevents a partial Day Book response
+    // (e.g. a chunk that returns a voucher header but no sub-lists) from wiping good data
+    // that was already saved from a previous full sync.
+    const alwaysSet = {
+      tallyGuid:       v.guid,
+      tallyAlterId:    v.alterId,
+      voucherNumber:   v.voucherNumber,
+      voucherType:     canonicalType,
+      partyName:       safePartyName,
+      partyLedgerName: safePartyName,
+      partyGstin:      v.partyGstin  || '',
+      placeOfSupply:   v.placeOfSupply || '',
+      narration:       v.narration,
+      voucherDate:     v.vDate,
+      source:          'Tally',
+      syncedAt:        new Date(),
+    };
+
+    // Only overwrite amount/subtotal/taxTotal when they are non-zero in the parsed data
+    if (v.amount > 0) {
+      alwaysSet.amount   = v.amount;
+      alwaysSet.subtotal = v.subtotal || 0;
+      alwaysSet.taxTotal = v.taxTotal || 0;
+    }
+    // Only overwrite taxLines when we have actual tax entries
+    if (v.taxLines && v.taxLines.length > 0) {
+      alwaysSet.taxLines = v.taxLines;
+    }
+    // Only overwrite ledgerEntries when we have actual entries
+    if (v.ledgerEntries && v.ledgerEntries.length > 0) {
+      alwaysSet.ledgerEntries = v.ledgerEntries;
+    }
+    // Only overwrite inventoryEntries when we have actual items
+    if (v.inventoryEntries && v.inventoryEntries.length > 0) {
+      alwaysSet.inventoryEntries = v.inventoryEntries;
+    }
+    // Only overwrite billAllocations when we have actual allocations
+    if (v.billAllocations && v.billAllocations.length > 0) {
+      alwaysSet.billAllocations = v.billAllocations;
+    }
+
+    return {
+      updateOne: {
+        filter: { tallyGuid: v.guid },
+        update: { $set: alwaysSet },
+        upsert: true
+      }
+    };
+  }).filter(Boolean);
+
+  if (skipped.length > 0) {
+    LOG(`[vouchersToTallyVoucherOps] Skipped ${skipped.length} vouchers with unmappable types: ${JSON.stringify(skipped.slice(0, 5))}`);
+  }
+  return ops;
+}
+
+// === DB WRITE HELPERS ===
+async function writeItemsToDb(ops) {
+  if (!ops.length) return 0;
+  try {
+    const r = await ItemMaster.bulkWrite(ops, { ordered: false });
+    return (r.upsertedCount || 0) + (r.modifiedCount || 0);
+  } catch (e) {
+    ERR('ItemMaster bulkWrite:', e.message);
+    return 0;
+  }
+}
+
+async function writeLedgersToDb({ ledgerOps, vendorOps, clientOps }) {
+  const results = await Promise.all([
+    ledgerOps.length ? AccountsLedger.bulkWrite(ledgerOps, { ordered: false }).catch(e => { ERR('AccountsLedger bulkWrite:', e.message); return null; }) : null,
+    vendorOps.length ? Vendor.bulkWrite(vendorOps, { ordered: false }).catch(e => { ERR('Vendor bulkWrite:', e.message); return null; }) : null,
+    clientOps.length ? Client.bulkWrite(clientOps, { ordered: false }).catch(e => { ERR('Client bulkWrite:', e.message); return null; }) : null
+  ]);
+  return results.reduce((s, r) => s + (r ? (r.upsertedCount || 0) + (r.modifiedCount || 0) : 0), 0);
+}
+
+async function autoCreateMissingLedgers(vouchers) {
+  // Collect all unique ledger names from vouchers
+  const ledgerNames = new Set();
+  
+  vouchers.forEach(voucher => {
+    if (voucher.partyName) {
+      ledgerNames.add(voucher.partyName);
+    }
+    voucher.ledgerEntries.forEach(entry => {
+      if (entry.ledgerName) {
+        ledgerNames.add(entry.ledgerName);
+      }
+    });
+  });
+  
+  if (ledgerNames.size === 0) {
+    return 0;
+  }
+  
+  LOG(`Auto-create: Checking ${ledgerNames.size} unique ledgers from vouchers`);
+  
+  // Find existing ledgers
+  const existingLedgers = await AccountsLedger.find({ 
+    ledgerName: { $in: Array.from(ledgerNames) } 
+  });
+  
+  const existingNames = new Set(existingLedgers.map(ledger => ledger.ledgerName));
+  
+  // Create ops for missing ledgers
+  const missingLedgerOps = [];
+  Array.from(ledgerNames).forEach(name => {
+    if (!existingNames.has(name)) {
+      const ledgerCode = `TALLY-${name.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 30)}-${Math.random().toString(36).substring(2, 8)}`;
+      
+      // Try to determine group based on name (fallback to 'Primary')
+      let ledgerGroup = 'Primary';
+      let ledgerType = 'Other';
+      const lowerName = name.toLowerCase();
+      
+      if (lowerName.includes('cash')) {
+        ledgerGroup = 'Cash';
+        ledgerType = 'Cash';
+      } else if (lowerName.includes('bank')) {
+        ledgerGroup = 'Bank';
+        ledgerType = 'Bank';
+      } else if (lowerName.includes('tax') || lowerName.includes('gst') || lowerName.includes('duty')) {
+        ledgerGroup = 'Duties & Taxes';
+        ledgerType = 'Duty';
+      } else if (lowerName.includes('expense') || lowerName.includes('exp')) {
+        ledgerGroup = 'Expenses';
+        ledgerType = 'Expense';
+      } else if (lowerName.includes('income') || lowerName.includes('revenue') || lowerName.includes('sales')) {
+        ledgerGroup = 'Incomes';
+        ledgerType = 'Income';
+      } else if (lowerName.includes('asset')) {
+        ledgerGroup = 'Assets';
+        ledgerType = 'Asset';
+      } else if (lowerName.includes('liability')) {
+        ledgerGroup = 'Liabilities';
+        ledgerType = 'Liability';
+      }
+      
+      missingLedgerOps.push({
+        updateOne: {
+          filter: { ledgerName: name },
+          update: {
+            $set: {
+              ledgerGroup,
+              syncedWithTally: true,
+              lastTallySync: new Date()
+            },
+            $setOnInsert: {
+              ledgerCode,
+              ledgerName: name,
+              ledgerType,
+              contactPerson: name,
+              panNumber: 'N/A',
+              isActive: true
+            }
+          },
+          upsert: true
+        }
+      });
+    }
+  });
+  
+  if (missingLedgerOps.length > 0) {
+    LOG(`Auto-create: Creating ${missingLedgerOps.length} missing ledgers`);
+    const result = await AccountsLedger.bulkWrite(missingLedgerOps, { ordered: false });
+    LOG(`Auto-create: Done - upserted ${result.upsertedCount} ledgers, modified ${result.modifiedCount}`);
+    return result.upsertedCount;
+  }
+  
+  LOG(`Auto-create: No missing ledgers found`);
+  return 0;
+}
+
+async function writeInvoiceVouchersToDb(ops) {
+  if (!ops.length) return 0;
+  try {
+    const r = await Invoice.bulkWrite(ops, { ordered: false });
+    return (r.upsertedCount || 0) + (r.modifiedCount || 0);
+  } catch (e) {
+    ERR('Invoice bulkWrite:', e.message);
+    return 0;
+  }
+}
+
+async function writeTallyVouchersToDb(ops) {
+  if (!ops.length) return 0;
+  try {
+    const r = await TallyVoucher.bulkWrite(ops, { ordered: false });
+    return (r.upsertedCount || 0) + (r.modifiedCount || 0);
+  } catch (e) {
+    ERR('TallyVoucher bulkWrite:', e.message);
+    return 0;
+  }
+}
+
+// === VOUCHER FETCH CACHE ===
+// All voucher types share ONE Collection API response fetched from Tally.
+// The Collection API returns ALL vouchers regardless of date range (~14MB).
+// Cache is cleared at the start of each import run via clearVoucherCache().
+let _voucherXmlCache = null; // { xml: string, timestamp: number }
+const VOUCHER_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes (covers entire sync run)
+const _chunkXmlCache = new Map(); // date-range key → xml (for chunked requests)
+
+async function getOrFetchAllVouchers(cfg, fromDate, toDate, timeoutMs) {
+  const now = Date.now();
+
+  // Collection API returns ALL vouchers regardless of date filters — no point chunking.
+  // Cache the single response for the entire sync run so all 8 entity types share it.
+  if (
+    _voucherXmlCache &&
+    _voucherXmlCache.xml &&
+    now - _voucherXmlCache.timestamp < VOUCHER_CACHE_TTL_MS
+  ) {
+    LOG(`[AllVouchers] Using cached XML (${_voucherXmlCache.xml.length} chars)`);
+    return _voucherXmlCache.xml;
+  }
+
+  LOG(`[AllVouchers] Fetching all vouchers from Tally via Collection API...`);
+  const xmlReq = buildAllVouchersCollectionXml(cfg, fromDate, toDate);
+  const resp = await postXmlWithRetry(cfg, xmlReq, timeoutMs, MAX_CHUNK_RETRIES);
+  LOG(`[AllVouchers] Response length: ${resp?.length || 0} chars`);
+
+  if (resp) _voucherXmlCache = { xml: resp, timestamp: now };
+  return resp || '';
+}
+
+// Clear the voucher cache (call before starting a new import run)
+export function clearVoucherCache() {
+  _voucherXmlCache = null;
+  _chunkXmlCache.clear();
+  LOG('[Cache] Voucher XML cache cleared (full + chunk)');
+}
+
+async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
+  // Dynamic entity mapping that uses Tally type names, not hardcoded collection names
+  const entityConfig = {
+    Items: { 
+      tallyType: 'StockItem', 
+      dynamicCollection: 'DynamicInventory',
+      tagPattern: /<STOCKITEM\b|<STOCKITEMS?.LIST\b/i 
+    },
+    Ledgers: { 
+      tallyType: 'Ledger', 
+      dynamicCollection: 'DynamicLedger',
+      tagPattern: /<LEDGER\b|<LEDGERS?.LIST\b/i 
+    },
+    Purchase: { 
+      tallyType: 'Voucher', 
+      tagPattern: /<VOUCHER[\s>]/i, 
+      voucherTypes: ['Purchase', 'Purchase Order', 'Purchase Invoice', 'Purchase Bill']
+    },
+    Sales: { 
+      tallyType: 'Voucher', 
+      tagPattern: /<VOUCHER[\s>]/i, 
+      voucherTypes: ['Sales', 'Sales Order', 'Sales Invoice', 'Sales Bill', 'Tax Invoice', 'GST Sales Invoice', 'GST Invoice', 'Retail Invoice', 'Invoice']
+    },
+    Payment: { 
+      tallyType: 'Voucher', 
+      tagPattern: /<VOUCHER[\s>]/i, 
+      voucherTypes: ['Payment']
+    },
+    Receipt: { 
+      tallyType: 'Voucher', 
+      tagPattern: /<VOUCHER[\s>]/i, 
+      voucherTypes: ['Receipt']
+    },
+    Journal: { 
+      tallyType: 'Voucher', 
+      tagPattern: /<VOUCHER[\s>]/i, 
+      voucherTypes: ['Journal']
+    },
+    Contra: { 
+      tallyType: 'Voucher', 
+      tagPattern: /<VOUCHER[\s>]/i, 
+      voucherTypes: ['Contra']
+    },
+    'Debit Note': { 
+      tallyType: 'Voucher', 
+      tagPattern: /<VOUCHER[\s>]/i, 
+      voucherTypes: ['Debit Note']
+    },
+    'Credit Note': { 
+      tallyType: 'Voucher', 
+      tagPattern: /<VOUCHER[\s>]/i, 
+      voucherTypes: ['Credit Note']
+    },
+    Vouchers: { 
+      tallyType: 'Voucher', 
+      tagPattern: /<VOUCHER[\s>]/i, 
+      voucherTypes: null 
+    }
+  };
+
+  const config = entityConfig[entityType];
+  if (!config) throw new Error(`Unknown entityType: ${entityType}`);
+
+  let resp;
+  
+  // ALL voucher types (Purchase, Sales, Payment, Receipt, Journal, Contra, Debit Note, Credit Note)
+  // share ONE COLLECTION-based fetch via the cache. This avoids making 8 separate round-trips
+  // to Tally for the same data. The first voucher entity fetches and caches; the rest reuse it.
+  if (config.tallyType === 'Voucher') {
+    resp = await getOrFetchAllVouchers(cfg, fromDate, toDate, timeoutMs);
+    LOG(`[${entityType}] Using shared AllVouchers collection (${resp?.length || 0} chars)`);
+  } else if (entityType === 'Ledgers') {
+    resp = await postXmlWithRetry(cfg, buildLedgerExportXml(cfg), timeoutMs, MAX_CHUNK_RETRIES);
+    LOG(`[Ledgers] Collection-based fetch: ${resp?.length || 0} chars`);
+    if (resp) {
+      LOG(`[Ledgers] First 1500 chars of raw response:`);
+      console.log(resp.slice(0, 1500));
+    }
+  } else if (entityType === 'Items') {
+    resp = await postXmlWithRetry(cfg, buildItemExportXml(cfg), timeoutMs, MAX_CHUNK_RETRIES);
+    LOG(`[${entityType}] Using Collection-based format (AllStockItems, ${resp?.length || 0} chars)`);
+  } else {
+    resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml(cfg, config.tallyType, config.tallyType + 'Collection', null, fromDate, toDate), timeoutMs, MAX_CHUNK_RETRIES);
+    LOG(`[${entityType}] Using dynamic TDL collection (${resp?.length || 0} chars)`);
+  }
+
+  const hasMatchingTag = resp && config.tagPattern.test(resp);
+  LOG(`[${entityType}] contains expected tag: ${hasMatchingTag}`);
+
+  if (!resp || !config.tagPattern.test(resp)) {
+    LOG(`No ${entityType} data found in response`);
+    return { records: 0, complete: true, created: 0, updated: 0, skipped: 0, failed: 0, totalFound: 0 };
   }
 
   let records = 0;
-  if (entityType === 'Items') {
-    const parsed = parseStockItems(resp);
-    const ops    = itemsToOps(parsed);
-    records = await writeItemsToDb(ops);
-    LOG(`  Items written: ${records}`);
+  let totalFound = 0;
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+  let failed = 0;
 
+  if (entityType === 'Items') {
+    LOG(`[Tally] Parsing stock items`);
+    const parsed = parseStockItems(resp);
+    totalFound = parsed.length;
+    
+    // Step 1: Generate itemId using full GUID (no truncation), skip items without GUID
+    const itemsWithIds = parsed.map(({ name, guid, alterId, hsn, gst, unit, cost, openingStock, openingValue, closingBalance, closingValue, gstApplicable }) => {
+      if (!guid) {
+        LOG('Skipping stock item without GUID:', name);
+        return null;
+      }
+      const UNIT_MAP = { Nos: 'units', Kg: 'kg', Ltr: 'liter', Mtr: 'meter', Box: 'box', Pcs: 'piece' };
+      const cleanGuid = guid.replace(/[^A-Z0-9]/gi, ''); // Full GUID, no truncation
+      const sku = `TALLY-${cleanGuid}`;
+      const itemId = `TALLY-${cleanGuid}`;
+      const filter = { tallyGuid: guid };
+      return { name, guid, alterId, hsn, gst, unit, cost, openingStock, openingValue, closingBalance, closingValue, gstApplicable, cleanGuid, sku, itemId, filter };
+    }).filter(Boolean);
+
+    // Step 2: Remove duplicates from parsed items array using itemId
+    const uniqueItemsMap = new Map();
+    itemsWithIds.forEach(item => {
+      uniqueItemsMap.set(item.itemId, item);
+    });
+    const uniqueItems = Array.from(uniqueItemsMap.values());
+    const duplicatesRemoved = itemsWithIds.length - uniqueItems.length;
+
+    LOG(`[Tally] Total fetched items: ${totalFound}, skipped (no GUID): ${totalFound - itemsWithIds.length}, duplicates removed: ${duplicatesRemoved}, unique items to process: ${uniqueItems.length}`);
+
+    // Step 3: Create bulk operations
+    const ops = uniqueItems.map(({ name, guid, alterId, hsn, gst, unit, cost, openingStock, openingValue, closingBalance, closingValue, gstApplicable, sku, itemId, filter }) => {
+      const UNIT_MAP = { Nos: 'units', Kg: 'kg', Ltr: 'liter', Mtr: 'meter', Box: 'box', Pcs: 'piece' };
+      return {
+        updateOne: {
+          filter,
+          update: {
+            $set: {
+              itemId,  // Always update itemId and sku to correct values
+              sku,
+              itemName: name,
+              tallyGuid: guid,
+              tallyAlterId: alterId,
+              hsn, gst, unit: UNIT_MAP[unit] || 'units', costPrice: cost, unitPrice: cost,
+              openingStock,
+              openingValue: openingValue || 0,
+              closingBalance: closingBalance || '0',
+              closingValue: closingValue || '0',
+              gstApplicable,
+              tallySynced: true, lastTallySync: new Date()
+            },
+            $setOnInsert: { name, sellingPrice: cost, isActive: true }
+          },
+          upsert: true
+        }
+      };
+    });
+    
+    if (ops.length > 0) {
+      try {
+        const result = await ItemMaster.bulkWrite(ops, { ordered: false });
+        created = result.upsertedCount || 0;
+        updated = result.modifiedCount || 0;
+        records = created + updated;
+        skipped = duplicatesRemoved;
+        failed = totalFound - records - duplicatesRemoved;
+        LOG(`[Tally] Sync complete - created: ${created}, updated: ${updated}, skipped (duplicates): ${skipped}, failed: ${failed}`);
+      } catch (e) {
+        ERR('ItemMaster bulkWrite:', e.message);
+        failed = totalFound;
+      }
+    }
   } else if (entityType === 'Ledgers') {
     const parsed = parseLedgers(resp);
-    const ops    = ledgersToOps(parsed);
-    records = await writeLedgersToDb(ops);
-    LOG(`  Ledgers written: ${records}`);
+    totalFound = parsed.length;
+    const { ledgerOps, vendorOps, clientOps } = ledgersToOps(parsed);
+    
+    let ledgerResult = null, vendorResult = null, clientResult = null;
+    
+    if (ledgerOps.length > 0) {
+      try {
+        ledgerResult = await AccountsLedger.bulkWrite(ledgerOps, { ordered: false });
+      } catch (e) {
+        ERR('AccountsLedger bulkWrite:', e.message);
+      }
+    }
+    
+    if (vendorOps.length > 0) {
+      try {
+        vendorResult = await Vendor.bulkWrite(vendorOps, { ordered: false });
+      } catch (e) {
+        ERR('Vendor bulkWrite:', e.message);
+      }
+    }
+    
+    if (clientOps.length > 0) {
+      try {
+        clientResult = await Client.bulkWrite(clientOps, { ordered: false });
+      } catch (e) {
+        ERR('Client bulkWrite:', e.message);
+      }
+    }
+    
+    created = (ledgerResult?.upsertedCount || 0) + (vendorResult?.upsertedCount || 0) + (clientResult?.upsertedCount || 0);
+    updated = (ledgerResult?.modifiedCount || 0) + (vendorResult?.modifiedCount || 0) + (clientResult?.modifiedCount || 0);
+    records = created + updated;
+    skipped = 0;
+    failed = totalFound - records;
+  } else if (['Purchase', 'Sales'].includes(entityType)) {
+    LOG(`[${entityType}] Starting voucher parsing with type filter: ${config.voucherTypes?.join(', ')}`);
+    LOG(`[${entityType}] Raw response length: ${resp?.length || 0}`);
+    const { vouchers: parsed, mismatchedCount, failedCount } = parseVouchers(resp, config.voucherTypes);
+    LOG(`[${entityType}] Parsed vouchers: ${parsed.length}, mismatched (other types): ${mismatchedCount}, parse-failed: ${failedCount}`);
+    // totalFound = all vouchers in the shared XML response for this type's pass
+    totalFound = parsed.length;  // only count vouchers that matched this type
+    skipped = 0;                 // "mismatched" are handled by other entity passes — not truly skipped
+    failed = failedCount;        // only XML-parse failures count as failed initially
+    await autoCreateMissingLedgers(parsed);
 
-  } else if (entityType === 'Purchase' || entityType === 'Sales') {
-    const parsed = parseVouchers(resp, meta.voucherType);
-    const ops    = vouchersToInvoiceOps(parsed);
-    records = await writeInvoiceVouchersToDb(ops);
-    LOG(`  ${entityType} vouchers written: ${records}`);
-
-  } else if (entityType === 'Payment' || entityType === 'Receipt') {
-    const parsed = parseVouchers(resp, meta.voucherType);
-    const ops    = vouchersToTallyVoucherOps(parsed);
-    records = await writeTallyVouchersToDb(ops);
-    LOG(`  ${entityType} vouchers written: ${records}`);
-
-  } else if (entityType === 'Journal' || entityType === 'Contra') {
-    // Journal & Contra → stored in TallyVoucher (same as Payment/Receipt)
-    const parsed = parseVouchers(resp, meta.voucherType);
-    const ops    = vouchersToTallyVoucherOps(parsed);
-    records = await writeTallyVouchersToDb(ops);
-    LOG(`  ${entityType} vouchers written: ${records}`);
-
-  } else if (entityType === 'Vouchers') {
-    // All voucher types together
-    const parsed   = parseVouchers(resp, null);
-    const salesPur = parsed.filter(v => ['Sales','Purchase'].includes(v.voucherType));
-    const payRec   = parsed.filter(v => ['Payment','Receipt'].includes(v.voucherType));
-    const r1 = await writeInvoiceVouchersToDb(vouchersToInvoiceOps(salesPur));
-    const r2 = await writeTallyVouchersToDb(vouchersToTallyVoucherOps(payRec));
-    records = r1 + r2;
-  }
-
-  return { records, complete };
-}
-
-// ─── FULL FETCH ATTEMPT ───────────────────────────────────────────────────────
-// Tries to pull all data in a single request. Returns success/failure + record count.
-
-async function tryFullFetch(cfg, state, entityType) {
-  LOG(`[${entityType}] Attempting FULL FETCH...`);
-  try {
-    const { records, complete } = await fetchAndSave(cfg, entityType, null, null);
-
-    if (!complete) {
-      LOG(`[${entityType}] Full fetch incomplete — switching to chunk sync`);
-      return { ok: false, records, reason: 'truncated' };
+    // Save to Invoice model (for ERP invoice management)
+    const invoiceOps = vouchersToInvoiceOps(parsed);
+    LOG(`[${entityType}] Created ${invoiceOps.length} invoice ops`);
+    
+    if (invoiceOps.length > 0) {
+      try {
+        const result = await Invoice.bulkWrite(invoiceOps, { ordered: false });
+        created = result.upsertedCount || 0;
+        updated = result.modifiedCount || 0;
+        records = created + updated;
+        // Count individual write errors from the result
+        const writeErrors = result.getWriteErrors ? result.getWriteErrors() : [];
+        if (writeErrors.length > 0) {
+          failed += writeErrors.length;
+          LOG(`[${entityType}] Invoice bulkWrite errors (${writeErrors.length}): ${writeErrors[0]?.errmsg || ''}`);
+        }
+        LOG(`[${entityType}] Invoice bulkWrite - created: ${created}, updated: ${updated}, errors: ${writeErrors.length}`);
+      } catch (e) {
+        ERR('Invoice bulkWrite:', e.message);
+        failed += parsed.length;
+      }
     }
 
-    LOG(`[${entityType}] Full fetch SUCCESS — ${records} records`);
-    state.usedFullFetch   = true;
-    state.syncStatus      = 'completed';
-    state.totalRecords    = records;
-    state.lastSuccessAt   = new Date();
-    state.lastSyncedDate  = new Date();
-    state.chunks          = [];
+    // ALSO save to TallyVoucher model so Finance → Tally Ledger → Vouchers tab shows them
+    const tallyVoucherOps = vouchersToTallyVoucherOps(parsed);
+    LOG(`[${entityType}] Created ${tallyVoucherOps.length} tallyVoucher ops (for Finance UI)`);
+    if (tallyVoucherOps.length > 0) {
+      try {
+        const tvResult = await TallyVoucher.bulkWrite(tallyVoucherOps, { ordered: false });
+        LOG(`[${entityType}] TallyVoucher bulkWrite - created: ${tvResult.upsertedCount || 0}, updated: ${tvResult.modifiedCount || 0}`);
+        const tvErrors = tvResult.getWriteErrors ? tvResult.getWriteErrors() : [];
+        if (tvErrors.length > 0) {
+          LOG(`[${entityType}] TallyVoucher write errors (${tvErrors.length}): ${tvErrors[0]?.errmsg || ''}`);
+        }
+      } catch (e) {
+        ERR(`TallyVoucher bulkWrite for ${entityType}:`, e.message);
+      }
+    }
+  } else if (['Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'].includes(entityType)) {
+    LOG(`[${entityType}] Starting voucher parsing with type filter: ${config.voucherTypes?.join(', ')}`);
+    LOG(`[${entityType}] Raw response length: ${resp?.length || 0}`);
+    const { vouchers: parsed, mismatchedCount, failedCount } = parseVouchers(resp, config.voucherTypes);
+    LOG(`[${entityType}] Parsed vouchers: ${parsed.length}, mismatched (other types): ${mismatchedCount}, parse-failed: ${failedCount}`);
+    totalFound = parsed.length;   // only count vouchers that matched this type
+    skipped = 0;                  // "mismatched" are handled by other entity passes — not truly skipped
+    failed = failedCount;
+    await autoCreateMissingLedgers(parsed);
+    const ops = vouchersToTallyVoucherOps(parsed);
+    LOG(`[${entityType}] Created ${ops.length} tally voucher ops`);
+    
+    if (ops.length > 0) {
+      try {
+        const result = await TallyVoucher.bulkWrite(ops, { ordered: false });
+        created = result.upsertedCount || 0;
+        updated = result.modifiedCount || 0;
+        records = created + updated;
+        const writeErrors = result.getWriteErrors ? result.getWriteErrors() : [];
+        if (writeErrors.length > 0) {
+          failed += writeErrors.length;
+          LOG(`[${entityType}] TallyVoucher bulkWrite errors (${writeErrors.length}): ${writeErrors[0]?.errmsg || ''}`);
+        }
+        LOG(`[${entityType}] TallyVoucher bulkWrite - created: ${created}, updated: ${updated}, errors: ${writeErrors.length}`);
+      } catch (e) {
+        ERR('TallyVoucher bulkWrite:', e.message);
+        failed += parsed.length;
+      }
+    }
+  } else if (entityType === 'Vouchers') {
+    const { vouchers: parsed, mismatchedCount, failedCount } = parseVouchers(resp, null);
+    totalFound = parsed.length;
+    skipped = 0;   // in the catch-all Vouchers pass there are no "other-type" skips
+    failed = failedCount;
+    await autoCreateMissingLedgers(parsed);
+    const salesPur = parsed.filter(v => ['Sales', 'Purchase'].some(t => normaliseVoucherType(v.voucherType) === t));
+    const payRec   = parsed.filter(v => ['Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'].some(t => normaliseVoucherType(v.voucherType) === t));
+
+    let invoiceResult = null, tallyVoucherResult = null, tvSalesPurResult = null;
+    const invoiceOps = vouchersToInvoiceOps(salesPur);
+    if (invoiceOps.length > 0) {
+      try {
+        invoiceResult = await Invoice.bulkWrite(invoiceOps, { ordered: false });
+      } catch (e) {
+        ERR('Invoice bulkWrite:', e.message);
+      }
+    }
+
+    // Sales/Purchase also saved to TallyVoucher so Finance → Tally Ledger → Vouchers tab shows amounts
+    const tvSalesPurOps = vouchersToTallyVoucherOps(salesPur);
+    if (tvSalesPurOps.length > 0) {
+      try {
+        tvSalesPurResult = await TallyVoucher.bulkWrite(tvSalesPurOps, { ordered: false });
+      } catch (e) {
+        ERR('TallyVoucher bulkWrite (Sales/Purchase):', e.message);
+      }
+    }
+
+    const tallyVoucherOps = vouchersToTallyVoucherOps(payRec);
+    if (tallyVoucherOps.length > 0) {
+      try {
+        tallyVoucherResult = await TallyVoucher.bulkWrite(tallyVoucherOps, { ordered: false });
+      } catch (e) {
+        ERR('TallyVoucher bulkWrite:', e.message);
+      }
+    }
+
+    created = (invoiceResult?.upsertedCount || 0) + (tvSalesPurResult?.upsertedCount || 0) + (tallyVoucherResult?.upsertedCount || 0);
+    updated = (invoiceResult?.modifiedCount || 0) + (tvSalesPurResult?.modifiedCount || 0) + (tallyVoucherResult?.modifiedCount || 0);
+    records = created + updated;
+    // failed stays as failedCount (parse failures only)
+  }
+
+  LOG(`${entityType} - Total Found: ${totalFound}, Created: ${created}, Updated: ${updated}, Skipped: ${skipped}, Failed: ${failed}`);
+  return { records, complete: true, created, updated, skipped, failed, totalFound };
+}
+
+// === FULL FETCH ===
+async function tryFullFetch(cfg, state, entityType, timeoutMs) {
+  LOG(`Entity Started: ${entityType}`);
+  LOG(`Trying full fetch for ${entityType}`);
+  try {
+    const { records, created, updated, skipped, failed, totalFound } = await fetchAndSave(cfg, entityType, null, null, timeoutMs);
+    state.usedFullFetch = true;
+    state.syncStatus = 'completed';
+    state.totalRecords = records;
+    state.lastSuccessAt = new Date();
+    state.lastSyncedDate = new Date();
+    state.chunks = [];
     state.lastCompletedChunkIndex = -1;
     await state.save();
-
-    return { ok: true, records };
+    LOG(`Entity Success: ${entityType}`);
+    return { ok: true, records, created, updated, skipped, failed, totalFound };
   } catch (err) {
-    ERR(`[${entityType}] Full fetch failed: ${err.message}`);
-    return { ok: false, records: 0, reason: err.message };
+    ERR(`Entity Failed: ${entityType}`, err);
+    return { ok: false, records: 0, created: 0, updated: 0, skipped: 0, failed: 0, totalFound: 0, reason: err.message };
   }
 }
 
-// ─── CHUNK SYNC ENGINE ────────────────────────────────────────────────────────
-
-async function runChunkSync(cfg, state, entityType, fromDate, toDate) {
-  LOG(`[${entityType}] Starting CHUNK SYNC from ${td(fromDate)} to ${td(toDate)}`);
-
-  // Build chunks only if not already built for this window
-  // (allows resume after crash)
-  const sameWindow =
-    state.syncWindowStart?.toDateString() === fromDate.toDateString() &&
-    state.syncWindowEnd?.toDateString()   === toDate.toDateString() &&
-    state.chunks.length > 0;
+// === CHUNK SYNC ===
+async function runChunkSync(cfg, state, entityType, fromDate, toDate, timeoutMs) {
+  LOG(`Starting chunk sync for ${entityType}: ${td(fromDate)} → ${td(toDate)}`);
+  const sameWindow = state.syncWindowStart?.toDateString() === fromDate.toDateString() &&
+                     state.syncWindowEnd?.toDateString() === toDate.toDateString() &&
+                     state.chunks.length > 0;
 
   if (!sameWindow) {
-    LOG(`[${entityType}] Building new chunk plan`);
-    state.chunks                  = buildChunks(fromDate, toDate);
+    state.chunks = buildChunks(fromDate, toDate);
     state.lastCompletedChunkIndex = -1;
-    state.syncWindowStart         = fromDate;
-    state.syncWindowEnd           = toDate;
-    state.totalRecords            = 0;
+    state.syncWindowStart = fromDate;
+    state.syncWindowEnd = toDate;
+    state.totalRecords = 0;
+    state.totalCreated = 0;
+    state.totalUpdated = 0;
+    state.totalSkipped = 0;
+    state.totalFailed = 0;
+    state.totalTotalFound = 0;
     await state.save();
   } else {
-    LOG(`[${entityType}] Resuming existing chunk plan from chunk ${state.lastCompletedChunkIndex + 1}`);
+    LOG(`Resuming chunk sync for ${entityType} from chunk ${state.lastCompletedChunkIndex + 1}`);
   }
 
   let totalRecords = state.totalRecords || 0;
+  let totalCreated = state.totalCreated || 0;
+  let totalUpdated = state.totalUpdated || 0;
+  let totalSkipped = state.totalSkipped || 0;
+  let totalFailed = state.totalFailed || 0;
+  let totalTotalFound = state.totalTotalFound || 0;
   let failedChunks = 0;
 
   for (let i = state.lastCompletedChunkIndex + 1; i < state.chunks.length; i++) {
     const chunk = state.chunks[i];
     if (chunk.status === 'success') {
-      LOG(`[${entityType}] Chunk ${i} already done — skipping`);
       totalRecords += chunk.records || 0;
+      totalCreated += chunk.created || 0;
+      totalUpdated += chunk.updated || 0;
+      totalSkipped += chunk.skipped || 0;
+      totalFailed += chunk.failed || 0;
+      totalTotalFound += chunk.totalFound || 0;
       continue;
     }
-
-    LOG(`[${entityType}] Chunk ${i + 1}/${state.chunks.length}: ${td(chunk.fromDate)} → ${td(chunk.toDate)}`);
+    LOG(`Chunk Started ${i+1}/${state.chunks.length}: ${td(chunk.fromDate)} → ${td(chunk.toDate)}`);
     chunk.attempts = (chunk.attempts || 0) + 1;
-    chunk.status   = 'pending';
+    chunk.status = 'pending';
 
     let chunkOk = false;
     let lastChunkErr = '';
     let chunkRecords = 0;
+    let chunkCreated = 0;
+    let chunkUpdated = 0;
+    let chunkSkipped = 0;
+    let chunkFailed = 0;
+    let chunkTotalFound = 0;
 
-    // Retry loop per chunk
     for (let attempt = 0; attempt < MAX_CHUNK_RETRIES; attempt++) {
       try {
-        const { records, complete } = await fetchAndSave(cfg, entityType, chunk.fromDate, chunk.toDate);
+        const { records, complete, created, updated, skipped, failed, totalFound } = await fetchAndSave(cfg, entityType, chunk.fromDate, chunk.toDate, timeoutMs);
         chunkRecords = records;
         chunk.records = records;
-
+        chunkCreated = created;
+        chunk.created = created;
+        chunkUpdated = updated;
+        chunk.updated = updated;
+        chunkSkipped = skipped;
+        chunk.skipped = skipped;
+        chunkFailed = failed;
+        chunk.failed = failed;
+        chunkTotalFound = totalFound;
+        chunk.totalFound = totalFound;
         if (!complete) {
-          // Sub-chunk: split this chunk further in half if possible
           const halfDays = Math.ceil(CHUNK_DAYS / 2);
           if (halfDays >= 3) {
-            LOG(`[${entityType}] Chunk ${i} truncated — splitting into ${halfDays}-day sub-chunks`);
+            LOG(`${entityType} chunk ${i} truncated, splitting to ${halfDays} days`);
             const subChunks = buildChunks(chunk.fromDate, chunk.toDate, halfDays);
             let subRecords = 0;
+            let subCreated = 0;
+            let subUpdated = 0;
+            let subSkipped = 0;
+            let subFailed = 0;
+            let subTotalFound = 0;
             let subAllOk = true;
             for (const sc of subChunks) {
               try {
-                const sr = await fetchAndSave(cfg, entityType, sc.fromDate, sc.toDate);
+                const sr = await fetchAndSave(cfg, entityType, sc.fromDate, sc.toDate, timeoutMs);
                 subRecords += sr.records;
+                subCreated += sr.created || 0;
+                subUpdated += sr.updated || 0;
+                subSkipped += sr.skipped || 0;
+                subFailed += sr.failed || 0;
+                subTotalFound += sr.totalFound || 0;
               } catch (scErr) {
-                ERR(`Sub-chunk failed: ${scErr.message}`);
+                ERR('Sub-chunk failed:', scErr);
                 subAllOk = false;
               }
             }
-            chunkRecords  = subRecords;
+            chunkRecords = subRecords;
             chunk.records = subRecords;
-            chunkOk       = subAllOk;
+            chunkCreated = subCreated;
+            chunk.created = subCreated;
+            chunkUpdated = subUpdated;
+            chunk.updated = subUpdated;
+            chunkSkipped = subSkipped;
+            chunk.skipped = subSkipped;
+            chunkFailed = subFailed;
+            chunk.failed = subFailed;
+            chunkTotalFound = subTotalFound;
+            chunk.totalFound = subTotalFound;
+            chunkOk = subAllOk;
           } else {
-            chunkOk = true; // Accept partial at this granularity
+            chunkOk = true;
           }
         } else {
           chunkOk = true;
         }
-
         if (chunkOk) break;
       } catch (err) {
         lastChunkErr = err.message;
-        ERR(`[${entityType}] Chunk ${i} attempt ${attempt + 1} failed: ${err.message}`);
+        ERR(`${entityType} chunk ${i} attempt ${attempt+1} failed:`, err);
         if (attempt < MAX_CHUNK_RETRIES - 1) {
           await new Promise(r => setTimeout(r, 3000 * (attempt + 1)));
         }
@@ -923,213 +2227,158 @@ async function runChunkSync(cfg, state, entityType, fromDate, toDate) {
     }
 
     if (chunkOk) {
-      chunk.status          = 'success';
-      chunk.completedAt     = new Date();
-      chunk.lastError       = '';
-      totalRecords          += chunkRecords;
+      chunk.status = 'success';
+      chunk.completedAt = new Date();
+      chunk.lastError = '';
+      totalRecords += chunkRecords;
+      totalCreated += chunkCreated;
+      totalUpdated += chunkUpdated;
+      totalSkipped += chunkSkipped;
+      totalFailed += chunkFailed;
+      totalTotalFound += chunkTotalFound;
       state.lastCompletedChunkIndex = i;
-      state.totalRecords    = totalRecords;
-      LOG(`[${entityType}] Chunk ${i + 1} OK — ${chunkRecords} records`);
+      state.totalRecords = totalRecords;
+      state.totalCreated = totalCreated;
+      state.totalUpdated = totalUpdated;
+      state.totalSkipped = totalSkipped;
+      state.totalFailed = totalFailed;
+      state.totalTotalFound = totalTotalFound;
+      LOG(`Chunk Success ${i+1}/${state.chunks.length}: ${entityType}`);
     } else {
-      chunk.status    = 'failed';
+      chunk.status = 'failed';
       chunk.lastError = lastChunkErr;
       failedChunks++;
-      ERR(`[${entityType}] Chunk ${i + 1} FAILED after ${MAX_CHUNK_RETRIES} attempts: ${lastChunkErr}`);
+      LOG(`Chunk Failed ${i+1}/${state.chunks.length}: ${entityType}`);
     }
-
-    // Persist progress after every chunk (so crashes can resume)
-    // Use markModified because chunks is a nested array
     state.markModified('chunks');
     await state.save();
   }
 
-  // Final status
-  const allDone     = state.chunks.every(c => c.status === 'success' || c.status === 'failed');
-  const anyFailed   = failedChunks > 0;
-  state.syncStatus  = allDone ? (anyFailed ? 'partial' : 'completed') : 'running';
-  state.usedFullFetch  = false;
-  state.totalRecords   = totalRecords;
+  const allDone = state.chunks.every(c => c.status === 'success' || c.status === 'failed');
+  const anyFailed = failedChunks > 0;
+  state.syncStatus = allDone ? (anyFailed ? 'partial' : 'completed') : 'running';
+  state.usedFullFetch = false;
+  state.totalRecords = totalRecords;
+  state.totalCreated = totalCreated;
+  state.totalUpdated = totalUpdated;
+  state.totalSkipped = totalSkipped;
+  state.totalFailed = totalFailed;
+  state.totalTotalFound = totalTotalFound;
   if (!anyFailed) {
-    state.lastSuccessAt  = new Date();
+    state.lastSuccessAt = new Date();
     state.lastSyncedDate = toDate;
   }
   await state.save();
-
-  LOG(`[${entityType}] Chunk sync done — ${totalRecords} records, ${failedChunks} failed chunks`);
+  LOG(`${entityType} chunk sync complete: ${totalRecords} records, ${failedChunks} failed chunks`);
   return {
-    ok: !anyFailed || totalRecords > 0,
-    records: totalRecords,
-    failedChunks,
-    error: anyFailed ? `${failedChunks} chunk(s) failed` : undefined,
+    ok: !anyFailed || totalRecords > 0, records: totalRecords, failedChunks, error: anyFailed ? `${failedChunks} chunks failed` : undefined, created: totalCreated, updated: totalUpdated, skipped: totalSkipped, failed: totalFailed, totalFound: totalTotalFound
   };
 }
 
-// ─── MAIN PULL ORCHESTRATOR ───────────────────────────────────────────────────
-/**
- * pullEntityFromTally(entityType, options)
- *
- * entityType: 'Items' | 'Ledgers' | 'Purchase' | 'Sales' | 'Payment' | 'Receipt'
- * options.forceChunk   — skip full-fetch attempt, go straight to chunk sync
- * options.forceRefresh — ignore lastSyncedDate, re-pull everything from companyStartDate
- * options.triggeredBy  — user ObjectId for log
- * options.startDate    — override sync window start (default: company start or 2 years ago)
- * options.endDate      — override sync window end (default: today)
- *
- * Strategy:
- *   1. If lastSyncedDate exists and !forceRefresh → incremental (lastSyncedDate → today)
- *   2. Try FULL FETCH (no date filter) unless forceChunk
- *   3. If full fetch incomplete → CHUNK SYNC
- */
+// === PULL ENTITY ===
 export async function pullEntityFromTally(entityType, options = {}) {
-  const start   = Date.now();
-  const syncId  = `PULL-${entityType.toUpperCase()}-${Date.now()}`;
+  const start = Date.now();
+  const syncId = `PULL-${entityType.toUpperCase()}-${Date.now()}`;
   const logType = entityType === 'Items' ? 'Item Master' : entityType;
-  LOG(`=== pullEntityFromTally [${entityType}] START ===`);
-
+  const timeout = ENTITY_TIMEOUTS[entityType] || 60000;
+  LOG(`Entity Timeout = ${timeout} ms`);
   let state;
   try {
+    await acquireLock();
     const cfg = await getCfg();
-    state     = await getOrCreateState(entityType);
-
-    // Mark as running
-    state.syncStatus    = 'running';
+    state = await getOrCreateState(entityType);
+    state.syncStatus = 'running';
     state.syncStartedAt = new Date();
     await state.save();
 
-    // Determine date window for chunk-sync fallback
-    const today     = new Date();
-    const endDate   = options.endDate   ? new Date(options.endDate)   : today;
-    let   startDate = options.startDate ? new Date(options.startDate) : null;
+    const isTimeless = entityType === 'Items' || entityType === 'Ledgers';
+    // Voucher Collection API returns ALL vouchers regardless of date range.
+    // So chunking adds no value — one full fetch is sufficient.
+    // The shared _chunkXmlCache (keyed by date range) ensures all 8 voucher entity
+    // types share the same XML response from a single Tally request per sync run.
+    const isVoucherEntity = !isTimeless;
+
+    const today = new Date();
+    const endDate = options.endDate ? new Date(options.endDate) : today;
+    let startDate = options.startDate ? new Date(options.startDate) : null;
 
     if (!startDate) {
       if (state.lastSyncedDate && !options.forceRefresh) {
-        // Incremental: start day after last successful sync
         startDate = new Date(state.lastSyncedDate);
         startDate.setDate(startDate.getDate() + 1);
-        LOG(`[${entityType}] Incremental sync from ${td(startDate)}`);
+        LOG(`${entityType} incremental sync from ${td(startDate)}`);
       } else {
-        // Default to 2 years back for first-time sync
-        startDate = new Date();
-        startDate.setFullYear(startDate.getFullYear() - 2);
-        LOG(`[${entityType}] Full history sync from ${td(startDate)}`);
+        // For voucher entities, default to the Tally financial year start
+        // (stored in TallyConfig.financialYearStart, e.g. 1-Apr-2026).
+        // If not configured, auto-detect: April 1 of the current fiscal year
+        // (Indian FY: Apr–Mar). Fall back to 2 years for non-voucher entities.
+        if (isVoucherEntity || cfg.financialYearStart) {
+          if (cfg.financialYearStart) {
+            startDate = new Date(cfg.financialYearStart);
+            LOG(`${entityType} using configured financial year start: ${td(startDate)}`);
+          } else {
+            // Auto-detect Indian fiscal year start (April 1)
+            const now = new Date();
+            const fyYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+            startDate = new Date(fyYear, 3, 1); // April = month index 3
+            LOG(`${entityType} auto-detected FY start: ${td(startDate)}`);
+          }
+        } else {
+          startDate = new Date();
+          startDate.setFullYear(startDate.getFullYear() - 2);
+          LOG(`${entityType} full history sync from ${td(startDate)}`);
+        }
       }
     }
-
-    // For Ledgers/Items: no date filter makes sense — always try full fetch
-    const isTimeless = entityType === 'Items' || entityType === 'Ledgers';
-
     let result;
+    
+    if (entityType === 'Items') {
+      // Special handling for Items: only use tryFullFetch, no chunks!
+      result = await tryFullFetch(cfg, state, entityType, timeout);
+      const status = result.ok ? 'Success' : 'Failed';
+      const duration = `${((Date.now() - start)/1000).toFixed(1)}s`;
+      await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status, duration, error: result.error, records: result.records });
+      await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { upsert: true });
+      releaseLock();
+      await new Promise(r => setTimeout(r, 1000));
+      return { ok: result.ok, records: result.records, usedChunks: false, created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, totalFound: result.totalFound };
+    }
+
+    // Regular handling for other entities
+    // Voucher entities use tryFullFetch — Collection API returns ALL vouchers in one shot.
+    // The _chunkXmlCache ensures the 14MB response is fetched only once per sync run
+    // and shared across all voucher entity types (Sales, Purchase, Payment, etc.)
     if (!options.forceChunk) {
-      result = await tryFullFetch(cfg, state, entityType);
+      result = await tryFullFetch(cfg, state, entityType, timeout);
       if (result.ok) {
-        await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status: 'Success',
-          duration: `${((Date.now() - start) / 1000).toFixed(1)}s`, records: result.records });
+        await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status: 'Success', duration: `${((Date.now() - start)/1000).toFixed(1)}s`, records: result.records });
         await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { upsert: true });
-        return { ok: true, records: result.records, usedChunks: false };
+        releaseLock();
+        await new Promise(r => setTimeout(r, 1000));
+        return { ok: true, records: result.records, usedChunks: false, created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, totalFound: result.totalFound };
       }
-      LOG(`[${entityType}] Full fetch not viable (${result.reason}) — falling back to chunk sync`);
+      LOG(`${entityType} full fetch not viable (${result.reason}), switching to chunks`);
     }
-
-    // For timeless entities (Items/Ledgers), a single request covering all time is
-    // the correct approach; if that failed, try once more with a very wide date window
-    if (isTimeless) {
-      const wideStart = new Date();
-      wideStart.setFullYear(wideStart.getFullYear() - 5);
-      result = await runChunkSync(cfg, state, entityType, wideStart, endDate);
-    } else {
-      result = await runChunkSync(cfg, state, entityType, startDate, endDate);
-    }
-
-    const status   = result.ok ? (result.failedChunks > 0 ? 'Partial' : 'Success') : 'Failed';
-    const duration = `${((Date.now() - start) / 1000).toFixed(1)}s`;
-    await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status, duration,
-      error: result.error, records: result.records });
+    const windowStart = isTimeless ? (() => { let d = new Date(); d.setFullYear(d.getFullYear()-5); return d; })() : startDate;
+    result = await runChunkSync(cfg, state, entityType, windowStart, endDate, timeout);
+    const status = result.ok ? (result.failedChunks > 0 ? 'Partial' : 'Success') : 'Failed';
+    const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
+    await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status, duration, error: result.error, records: result.records });
     await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { upsert: true });
-
-    LOG(`=== pullEntityFromTally [${entityType}] END — ok:${result.ok} records:${result.records} ===`);
-    return { ok: result.ok, records: result.records, usedChunks: true, failedChunks: result.failedChunks };
-
+    releaseLock();
+    await new Promise(r => setTimeout(r, 1000));
+    return { ok: result.ok, records: result.records, usedChunks: true, failedChunks: result.failedChunks, created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, totalFound: result.totalFound };
   } catch (err) {
-    ERR(`pullEntityFromTally [${entityType}] FATAL:`, err.message);
+    ERR(`pullEntityFromTally ${entityType} FATAL:`, err);
     if (state) {
       state.syncStatus = 'failed';
-      await state.save().catch(() => {});
+      state.lastError = err.message;
+      await state.save();
     }
-    const duration = `${((Date.now() - start) / 1000).toFixed(1)}s`;
-    await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status: 'Failed',
-      duration, error: err.message, records: 0 });
-    return { ok: false, records: 0, error: err.message };
+    const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
+    await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status: 'Failed', duration, error: err.message, records: 0 });
+    releaseLock();
+    return { ok: false, records: 0, error: err.message, created: 0, updated: 0, skipped: 0, failed: 0, totalFound: 0 };
   }
 }
 
-// ─── CONVENIENCE EXPORTS ──────────────────────────────────────────────────────
-
-export const pullItemsRobust   = (opts) => pullEntityFromTally('Items',   opts);
-export const pullLedgersRobust = (opts) => pullEntityFromTally('Ledgers', opts);
-export const pullPurchaseRobust= (opts) => pullEntityFromTally('Purchase',opts);
-export const pullSalesRobust   = (opts) => pullEntityFromTally('Sales',   opts);
-export const pullPaymentRobust = (opts) => pullEntityFromTally('Payment', opts);
-export const pullReceiptRobust = (opts) => pullEntityFromTally('Receipt', opts);
-
-/**
- * runRobustFullPull — pulls ALL entity types in order with full/chunk fallback logic.
- * Drop-in replacement for the pull phase of runFullSync in tallyService.js
- */
-export async function runRobustFullPull(options = {}) {
-  LOG('======= runRobustFullPull START =======');
-  const results = [];
-  const entities = ['Items', 'Ledgers', 'Purchase', 'Sales', 'Payment', 'Receipt', 'Journal', 'Contra'];
-
-  for (const entity of entities) {
-    const r = await pullEntityFromTally(entity, options);
-    results.push({ entity, ...r });
-    LOG(`  ${entity}: ok=${r.ok} records=${r.records} usedChunks=${r.usedChunks || false}`);
-  }
-
-  const totalRecords = results.reduce((s, r) => s + (r.records || 0), 0);
-  const failed       = results.filter(r => !r.ok);
-  const ok           = failed.length === 0;
-  LOG(`======= runRobustFullPull END — ok:${ok} total:${totalRecords} =======`);
-  return { ok, records: totalRecords, results, error: failed.map(r => `${r.entity}: ${r.error}`).join('; ') || undefined };
-}
-
-/**
- * getSyncStateStatus — returns current state for all entity types (for API/dashboard)
- */
-export async function getSyncStateStatus() {
-  const states = await TallySyncState.find({}).lean();
-  return states.map(s => ({
-    entityType            : s.entityType,
-    syncStatus            : s.syncStatus,
-    lastSyncedDate        : s.lastSyncedDate,
-    lastSuccessAt         : s.lastSuccessAt,
-    totalRecords          : s.totalRecords,
-    usedFullFetch         : s.usedFullFetch,
-    totalChunks           : s.chunks?.length || 0,
-    completedChunks       : s.chunks?.filter(c => c.status === 'success').length || 0,
-    failedChunks          : s.chunks?.filter(c => c.status === 'failed').length || 0,
-    lastCompletedChunkIndex: s.lastCompletedChunkIndex,
-    syncWindowStart       : s.syncWindowStart,
-    syncWindowEnd         : s.syncWindowEnd,
-    syncStartedAt         : s.syncStartedAt,
-  }));
-}
-
-/**
- * resetSyncState — resets the sync state for an entity so next run starts fresh.
- * Useful if the DB was wiped or sync state is corrupted.
- */
-export async function resetSyncState(entityType) {
-  await TallySyncState.findOneAndUpdate(
-    { entityType },
-    {
-      $set: {
-        syncStatus: 'idle', lastSyncedDate: null, totalRecords: 0,
-        chunks: [], lastCompletedChunkIndex: -1,
-        syncWindowStart: null, syncWindowEnd: null, lastSuccessAt: null,
-      },
-    },
-    { upsert: true }
-  );
-  LOG(`[${entityType}] Sync state reset`);
-}

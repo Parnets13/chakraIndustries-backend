@@ -16,6 +16,10 @@ import {
   getUploadSummary,
   deleteInvoice,
   migrateHSN,
+  listCompanies,
+  createCompany,
+  updateCompany,
+  deleteCompany,
 } from '../controllers/poGeneratorController.js';
 
 const router = express.Router();
@@ -24,6 +28,12 @@ router.use(protect);
 // Stats
 router.get('/stats', getStats);
 router.get('/upload-summary', getUploadSummary);
+
+// Company management (must be before /:id patterns)
+router.get('/companies',          listCompanies);
+router.post('/companies',         createCompany);
+router.put('/companies/:id',      updateCompany);
+router.delete('/companies/:id',   deleteCompany);
 
 // PO listing for upload/selection
 router.get('/pos', listPOs);

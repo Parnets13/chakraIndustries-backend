@@ -97,14 +97,44 @@ export const createGRN = async (req, res) => {
 // READ ALL
 export const getAllGRNs = async (req, res) => {
   try {
-    const grns = await GRN.find()
-      .populate('poId', 'poId grandTotal')
-      .populate('vendorId', 'companyName vendorId')
-      .populate('warehouseId', 'warehouseId name location')
-      .populate('batchId')
-      .populate('inventoryId')
-      .sort({ createdAt: -1 });
-    res.json({ success: true, data: grns });
+    const { status, vendor, search, page, limit } = req.query;
+    const filter = {};
+    if (status) filter.grnStatus = status;
+    if (vendor) filter.vendorId = vendor;
+    if (search) {
+      filter.$or = [
+        { grnId: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+    const skip = usePagination ? (pageNum - 1) * limitNum : 0;
+
+    const [grns, totalCount] = await Promise.all([
+      GRN.find(filter)
+        .populate('poId', 'poId grandTotal')
+        .populate('vendorId', 'companyName vendorId')
+        .populate('warehouseId', 'warehouseId name location')
+        .populate('batchId')
+        .populate('inventoryId')
+        .sort({ createdAt: -1 })
+        .skip(usePagination ? skip : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? GRN.countDocuments(filter) : Promise.resolve(null),
+    ]);
+
+    const response = { success: true, data: grns };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

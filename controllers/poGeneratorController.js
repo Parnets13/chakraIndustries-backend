@@ -4,6 +4,32 @@ import POInvoice from '../models/POInvoice.js';
 import PendingOrder from '../models/PendingOrder.js';
 import AccountsPayable from '../models/AccountsPayable.js';
 import Vendor from '../models/Vendor.js';
+import Company from '../models/Company.js';
+
+// ── Find or create a Company by buyer name ────────────────────────────────────
+// Matches by exact name OR any stored alias (case-insensitive)
+const findOrCreateCompany = async (buyerName, buyerGSTIN = '') => {
+  if (!buyerName || !buyerName.trim()) return null;
+  const name = buyerName.trim();
+  // Try exact match first, then alias match
+  let company = await Company.findOne({
+    $or: [
+      { companyName: { $regex: `^${name}$`, $options: 'i' } },
+      { aliases:     { $regex: `^${name}$`, $options: 'i' } },
+    ],
+  });
+  if (!company) {
+    company = await Company.create({
+      companyName: name,
+      gstNumber:   buyerGSTIN || '',
+      aliases:     [],
+    });
+  } else if (buyerGSTIN && !company.gstNumber) {
+    company.gstNumber = buyerGSTIN;
+    await company.save();
+  }
+  return company;
+};
 
 // ── ID generator ──────────────────────────────────────────────────────────────
 const genInvoiceNo = async () => {
@@ -222,7 +248,7 @@ export const generateInvoice = async (req, res) => {
 // Creates invoice directly from PDF-parsed data (no PO in DB required)
 export const generateInvoiceFromPDF = async (req, res) => {
   try {
-    const { poNumber, vendorName, buyerName, buyerAddress = '', buyerGSTIN = '', shipToName = '', shipToAddress = '', items = [], total, notes = '' } = req.body;
+    const { poNumber, vendorName, buyerName, buyerAddress = '', buyerGSTIN = '', shipToName = '', shipToAddress = '', items = [], total, notes = '', companyId: explicitCompanyId } = req.body;
 
     if (!items.length)
       return res.status(400).json({ success: false, message: 'No items provided' });
@@ -302,8 +328,19 @@ export const generateInvoiceFromPDF = async (req, res) => {
       grandTotal = +pdfTotal.toFixed(2);
     }
 
+    // ── Auto-detect / create company from buyerName (or use explicit companyId) ─
+    let company;
+    if (explicitCompanyId) {
+      company = await Company.findById(explicitCompanyId);
+    }
+    if (!company) {
+      company = await findOrCreateCompany(buyerName, buyerGSTIN);
+    }
+
     const invoice = await POInvoice.create({
       invoiceNo,
+      companyId:   company?._id   || null,
+      companyName: company?.companyName || buyerName || '',
       poId:        null,
       poRef:       poNumber || 'PDF-UPLOAD',
       vendorName:  vendorName || '',
@@ -330,20 +367,22 @@ export const generateInvoiceFromPDF = async (req, res) => {
 };
 export const listInvoices = async (req, res) => {
   try {
-    const { status, search, prefix } = req.query;
+    const { status, search, prefix, companyId } = req.query;
     const filter = {};
-    if (status) filter.status = status;
-    // prefix filter — e.g. prefix=GRNINV to show only GRN receipt invoices
-    if (prefix) filter.invoiceNo = { $regex: `^${prefix}`, $options: 'i' };
+    if (status)    filter.status    = status;
+    if (companyId) filter.companyId = companyId;
+    if (prefix)    filter.invoiceNo = { $regex: `^${prefix}`, $options: 'i' };
     if (search) {
       filter.$or = [
-        { invoiceNo:  { $regex: search, $options: 'i' } },
-        { poRef:      { $regex: search, $options: 'i' } },
-        { vendorName: { $regex: search, $options: 'i' } },
+        { invoiceNo:   { $regex: search, $options: 'i' } },
+        { poRef:       { $regex: search, $options: 'i' } },
+        { vendorName:  { $regex: search, $options: 'i' } },
+        { companyName: { $regex: search, $options: 'i' } },
       ];
     }
     const invoices = await POInvoice.find(filter)
-      .populate('poId', 'poId status vendor')
+      .populate('poId',      'poId status vendor')
+      .populate('companyId', 'companyName gstNumber')
       .sort({ createdAt: -1 });
     res.json({ success: true, data: invoices });
   } catch (err) {
@@ -601,6 +640,8 @@ export const getUploadSummary = async (req, res) => {
             poRef: 1,
             vendorName: 1,
             buyerName: 1,
+            companyId: 1,
+            companyName: 1,
             status: 1,
             grandTotal: 1,
             createdAt: 1,
@@ -729,6 +770,55 @@ export const getStats = async (req, res) => {
         trend,
       },
     });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── Company CRUD ──────────────────────────────────────────────────────────────
+
+// GET /api/po-generator/companies
+export const listCompanies = async (req, res) => {
+  try {
+    const companies = await Company.find().sort({ companyName: 1 });
+    res.json({ success: true, data: companies });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/po-generator/companies
+export const createCompany = async (req, res) => {
+  try {
+    const { companyName, gstNumber, address, email, phone, aliases } = req.body;
+    if (!companyName?.trim())
+      return res.status(400).json({ success: false, message: 'companyName is required' });
+    const company = await Company.create({ companyName: companyName.trim(), gstNumber, address, email, phone, aliases: aliases || [] });
+    res.status(201).json({ success: true, data: company });
+  } catch (err) {
+    if (err.code === 11000)
+      return res.status(400).json({ success: false, message: 'Company already exists' });
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /api/po-generator/companies/:id
+export const updateCompany = async (req, res) => {
+  try {
+    const company = await Company.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+    res.json({ success: true, data: company });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+// DELETE /api/po-generator/companies/:id
+export const deleteCompany = async (req, res) => {
+  try {
+    const company = await Company.findByIdAndDelete(req.params.id);
+    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+    res.json({ success: true, message: 'Company deleted' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

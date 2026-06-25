@@ -4,7 +4,7 @@ import {
   getSyncLogs, getSyncStats,
   getMasterDataStatus, getTransactionStatus,
   triggerSync, retrySync,
-  getVouchers, createVoucher, deleteVoucher,
+  getVouchers, getVoucherById, resetVoucherSyncStates, createVoucher, deleteVoucher,
   getGuidStatus,
   // Directional streams (legacy)
   importFromTallyStream,
@@ -16,6 +16,12 @@ import {
   fullExportToTallyStream,
   selectiveExportStream,
   getExportCounts,
+  // File-based import
+  importFromTallyFiles,
+  importFromTallyFilesStream,
+  // Sales Register (April–June import + query)
+  importSalesRegister,
+  getSalesInvoices,
 } from '../controllers/tallyController.js';
 import { tallyWebhook } from '../controllers/tallyWebhookController.js';
 import { protect } from '../middleware/authMiddleware.js';
@@ -45,6 +51,9 @@ router.post('/validate-company',     protect, validateCompany);
 router.get('/import-stream',         importFromTallyStream);   // auth via ?token=
 // Non-streaming POST
 router.post('/import',               protect, importFromTally);
+// File-based import endpoints
+router.post('/import-from-files',    protect, importFromTallyFiles);
+router.get('/import-from-files-stream', importFromTallyFilesStream); // auth via ?token=
 
 // ── EXPORT TO TALLY — Complete new system (ERP → Tally) ─────────────────────
 // Full export: all 14 entity types in dependency order
@@ -61,13 +70,21 @@ router.post('/export',               protect, exportToTally);
 router.post('/sync',                 protect, triggerSync);
 router.post('/retry/:id',            protect, retrySync);
 
-// ── Voucher management (payments & receipts) ──────────────────────────────────
-router.get('/vouchers',              protect, getVouchers);
-router.post('/vouchers',             protect, createVoucher);
-router.delete('/vouchers/:id',       protect, deleteVoucher);
+// ── Voucher management ────────────────────────────────────────────────────────
+router.get('/vouchers',                    protect, getVouchers);
+router.get('/vouchers/:id',                protect, getVoucherById);
+router.post('/vouchers',                   protect, createVoucher);
+router.delete('/vouchers/:id',             protect, deleteVoucher);
+router.post('/reset-voucher-sync-states',  protect, resetVoucherSyncStates);
 
 // ── GUID / AlterID sync status ────────────────────────────────────────────────
 router.get('/guid-status',           protect, getGuidStatus);
+
+// ── Sales Register: Import by date range + Query ──────────────────────────────
+// POST /api/tally/import-sales-register  { fromDate, toDate }
+router.post('/import-sales-register',protect, importSalesRegister);
+// GET  /api/tally/sales-invoices?fromDate=2025-04-01&toDate=2025-06-30
+router.get('/sales-invoices',        protect, getSalesInvoices);
 
 // ── Tally-pushed webhook (no auth — secured by optional shared secret) ────────
 router.post('/webhook',              tallyWebhook);

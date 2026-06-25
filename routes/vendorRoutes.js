@@ -12,6 +12,8 @@ router.get('/prices/product',  vendorController.getPricesByProduct);
 
 // Send email to vendor  (must be before /:id)
 router.post('/send-email',     vendorController.sendVendorEmail);
+// Diagnostic: test SMTP connection (GET /api/vendors/test-email)
+router.get('/test-email',      vendorController.testEmailConfig);
 
 // Vendor CRUD
 router.get('/',                vendorController.getAllVendors);

@@ -69,12 +69,41 @@ export const createPurchaseRequisition = async (req, res) => {
 // GET /api/purchase-requisitions
 export const getAllPurchaseRequisitions = async (req, res) => {
   try {
-    const { status, department } = req.query;
+    const { status, department, search, page, limit } = req.query;
     const filter = {};
     if (status) filter.status = status;
     if (department) filter.department = department;
-    const prs = await PurchaseRequisition.find(filter).sort({ createdAt: -1 });
-    res.json({ success: true, data: prs });
+    if (search) {
+      filter.$or = [
+        { prId:       { $regex: search, $options: 'i' } },
+        { department: { $regex: search, $options: 'i' } },
+        { remarks:    { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+    const skip = usePagination ? (pageNum - 1) * limitNum : 0;
+
+    const [prs, totalCount] = await Promise.all([
+      PurchaseRequisition.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(usePagination ? skip : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? PurchaseRequisition.countDocuments(filter) : Promise.resolve(null),
+    ]);
+
+    const response = { success: true, data: prs };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

@@ -1,7 +1,9 @@
+// Load .env BEFORE all other imports — use the dotenv/config side-effect import
+// so it runs at module evaluation time (ES modules hoist static imports, so
+// calling dotenv.config() inline doesn't guarantee it runs first)
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
-dotenv.config(); // ← MUST be first before any other import reads process.env
 import rateLimit from 'express-rate-limit';
 import connectDB from './config/database.js';
 import authRoutes from './routes/authRoutes.js';
@@ -108,6 +110,7 @@ import './models/ActivityLog.js';
 import './models/Approval.js';
 import './models/Asset.js';
 import './models/BOM.js';
+import './models/Company.js';
 import './models/Batch.js';
 import './models/BrandOrder.js';
 import './models/Category.js';
@@ -285,6 +288,51 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'Server is running' });
 });
 
+// ── Email SMTP test endpoint ──────────────────────────────────────────────────
+// POST /api/email/test  — verify SMTP credentials without sending an actual email
+app.post('/api/email/test', async (req, res) => {
+  try {
+    const { verifyTransporter, classifySMTPError } = await import('./utils/emailService.js');
+    // Read using canonical EMAIL_* keys (SMTP_* accepted as fallback)
+    const user = (process.env.EMAIL_USERNAME || process.env.SMTP_USER || '').trim();
+    const pass = (process.env.EMAIL_PASSWORD || process.env.SMTP_PASS || '').replace(/\s/g, '');
+    const host = process.env.EMAIL_HOST || process.env.SMTP_HOST || 'smtp.gmail.com';
+    const port = parseInt(process.env.EMAIL_PORT || process.env.SMTP_PORT || '587', 10);
+
+    if (!user || !pass) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email credentials not set in backend .env. Need EMAIL_USERNAME + EMAIL_PASSWORD',
+        config: { host, port, user: user || '(not set)', passLength: pass.length },
+      });
+    }
+
+    await verifyTransporter();
+
+    res.json({
+      success: true,
+      message: 'SMTP working successfully — credentials are valid',
+      config: { host, port, user, passLength: pass.length },
+    });
+  } catch (err) {
+    const { classifySMTPError } = await import('./utils/emailService.js');
+    const { userMessage, code } = classifySMTPError(err);
+    const user = (process.env.EMAIL_USERNAME || process.env.SMTP_USER || '').trim();
+    const pass = (process.env.EMAIL_PASSWORD || process.env.SMTP_PASS || '').replace(/\s/g, '');
+    res.status(500).json({
+      success: false,
+      error: userMessage,
+      code,
+      config: {
+        host: process.env.EMAIL_HOST || process.env.SMTP_HOST || 'smtp.gmail.com',
+        port: parseInt(process.env.EMAIL_PORT || process.env.SMTP_PORT || '587', 10),
+        user: user || '(not set)',
+        passLength: pass.length,
+      },
+    });
+  }
+});
+
 // Error handling middleware
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
@@ -299,11 +347,23 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5001;
 
 // Start server immediately, connect to MongoDB in background
-connectDB(); 
+connectDB();
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`✓ Server running on port ${PORT}`);
   startTallyScheduler();
+
+  // ── SMTP startup verification ────────────────────────────────────────────
+  try {
+    const { verifyTransporter } = await import('./utils/emailService.js');
+    await verifyTransporter();
+    const emailUser = (process.env.EMAIL_USERNAME || process.env.SMTP_USER || '').trim();
+    console.log(`✓ SMTP connected — authenticated as ${emailUser}`);
+  } catch (err) {
+    console.warn(`⚠ SMTP verification failed at startup: ${err.message}`);
+    console.warn('  Email sending will not work until EMAIL_USERNAME / EMAIL_PASSWORD are correct in .env');
+  }
+  // ────────────────────────────────────────────────────────────────────────
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`✗ Port ${PORT} is already in use. Stop the other process and restart.`);

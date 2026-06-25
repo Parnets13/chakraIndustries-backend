@@ -1,6 +1,7 @@
 import Vendor from '../models/Vendor.js';
 import VendorPrice from '../models/VendorPrice.js';
-import { sendEmail } from '../utils/emailService.js';
+import BOM from '../models/BOM.js';
+import { sendEmail, verifyTransporter, classifySMTPError } from '../utils/emailService.js';
 
 // ── Auto-generate vendor ID ───────────────────────────────────────────────────
 const generateVendorId = async () => {
@@ -10,10 +11,33 @@ const generateVendorId = async () => {
   return `V-${String(num).padStart(3, '0')}`;
 };
 
+// ── GET /api/vendors/test-email ───────────────────────────────────────────────
+// Diagnostic route — verifies SMTP config without sending a real email
+export const testEmailConfig = async (req, res) => {
+  try {
+    await verifyTransporter();
+    const user = (process.env.EMAIL_USERNAME || process.env.SMTP_USER || '').trim();
+    res.json({
+      success: true,
+      message: `✅ SMTP connection verified. Ready to send emails from ${user}`,
+    });
+  } catch (err) {
+    console.error('[testEmailConfig]', err.message);
+    const { userMessage, code } = classifySMTPError(err);
+    res.status(500).json({
+      success: false,
+      message: userMessage,
+      code: err.code || code,
+      fix: 'Update EMAIL_PASSWORD in backend .env with a valid Gmail App Password, then restart the server.',
+      appPasswordUrl: 'https://myaccount.google.com/apppasswords',
+    });
+  }
+};
+
 // ── POST /api/vendors/send-email ──────────────────────────────────────────────
 export const sendVendorEmail = async (req, res) => {
   try {
-    const { vendorId, itemName, itemCode, qty, unit, bomProduct } = req.body;
+    const { vendorId, itemName, itemCode, qty, unit, bomProduct, bomId, componentId } = req.body;
 
     if (!vendorId) return res.status(400).json({ success: false, message: 'vendorId is required' });
     if (!itemName) return res.status(400).json({ success: false, message: 'itemName is required' });
@@ -179,13 +203,49 @@ This is a system-generated email.`;
 
     const info = await sendEmail({ to: vendor.email, subject, text, html });
 
+    // ── Persist rfqStatus = 'Sent' on the BOM component ─────────────────────
+    if (bomId && componentId) {
+      try {
+        await BOM.updateOne(
+          { _id: bomId, 'components._id': componentId },
+          {
+            $set: {
+              'components.$.rfqStatus': 'Sent',
+              'components.$.rfqSentAt': new Date(),
+            },
+          }
+        );
+      } catch (dbErr) {
+        console.warn('[sendVendorEmail] Could not update rfqStatus in BOM:', dbErr.message);
+      }
+    }
+
     res.json({
       success: true,
       message: `Email sent successfully to ${vendor.companyName} (${vendor.email})`,
+      sentTo: vendor.email,
+      sentAt: new Date().toISOString(),
     });
   } catch (error) {
-    console.error('[sendVendorEmail]', error.message);
-    res.status(500).json({ success: false, message: error.message || 'Failed to send email' });
+    console.error('[sendVendorEmail] Error:', error.message);
+    console.error('[sendVendorEmail] Code:', error.code);
+
+    const { userMessage, code } = classifySMTPError(error);
+
+    // Use 503 for credential/config issues so the frontend can show a better message
+    const statusCode =
+      code === 'INVALID_APP_PASSWORD' || code === 'MISSING_CREDENTIALS' || code === 'INVALID_CREDENTIALS'
+        ? 503
+        : 500;
+
+    res.status(statusCode).json({
+      success: false,
+      message: userMessage,
+      code: code,
+      ...(statusCode === 503 && {
+        fix: 'Generate a new Gmail App Password at https://myaccount.google.com/apppasswords and update EMAIL_PASSWORD in backend .env, then restart the server.',
+      }),
+    });
   }
 };
 
@@ -203,20 +263,42 @@ export const createVendor = async (req, res) => {
 // ── GET /api/vendors ──────────────────────────────────────────────────────────
 export const getAllVendors = async (req, res) => {
   try {
-    const { search, category, status } = req.query;
+    const { search, category, status, page, limit } = req.query;
     const filter = {};
     if (category) filter.category = category;
     if (status)   filter.status   = status;
     if (search) {
       filter.$or = [
-        { companyName:   { $regex: search, $options: 'i' } },
-        { vendorId:      { $regex: search, $options: 'i' } },
-        { contactPerson: { $regex: search, $options: 'i' } },
-        { city:          { $regex: search, $options: 'i' } },
+        { companyName:    { $regex: search, $options: 'i' } },
+        { vendorId:       { $regex: search, $options: 'i' } },
+        { contactPerson:  { $regex: search, $options: 'i' } },
+        { city:           { $regex: search, $options: 'i' } },
       ];
     }
-    const vendors = await Vendor.find(filter).sort({ createdAt: -1 });
-    res.json({ success: true, data: vendors });
+
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+    const skip = usePagination ? (pageNum - 1) * limitNum : 0;
+
+    const [vendors, totalCount] = await Promise.all([
+      Vendor.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(usePagination ? skip : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? Vendor.countDocuments(filter) : Promise.resolve(null),
+    ]);
+
+    const response = { success: true, data: vendors };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

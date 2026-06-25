@@ -93,19 +93,45 @@ export const createItem = async (req, res) => {
 // READ ALL - Get all items
 export const getAllItems = async (req, res) => {
   try {
-    const { status, isActive, category } = req.query;
+    const { status, isActive, category, search, page, limit } = req.query;
     const filter = {};
 
     if (status) filter.status = status;
     if (isActive !== undefined) filter.isActive = isActive === 'true';
     if (category) filter.category = category;
+    if (search) {
+      filter.$or = [
+        { itemName: { $regex: search, $options: 'i' } },
+        { itemCode: { $regex: search, $options: 'i' } },
+        { sku:      { $regex: search, $options: 'i' } },
+      ];
+    }
 
-    const items = await ItemMaster.find(filter)
-      .populate('category', 'name')
-      .populate('createdBy', 'name email')
-      .sort({ createdAt: -1 });
+    const pageNum  = parseInt(page)  || 0;
+    const limitNum = parseInt(limit) || 0;
+    const usePagination = pageNum > 0 && limitNum > 0;
+    const skip = usePagination ? (pageNum - 1) * limitNum : 0;
 
-    res.json({ success: true, data: items });
+    const [items, totalCount] = await Promise.all([
+      ItemMaster.find(filter)
+        .populate('category', 'name')
+        .populate('createdBy', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(usePagination ? skip : 0)
+        .limit(usePagination ? limitNum : 0),
+      usePagination ? ItemMaster.countDocuments(filter) : Promise.resolve(null),
+    ]);
+
+    const response = { success: true, data: items };
+    if (usePagination) {
+      response.pagination = {
+        total: totalCount,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+      };
+    }
+    res.json(response);
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

@@ -26,13 +26,13 @@ const accountsLedgerSchema = new mongoose.Schema({
   // Ledger classification
   ledgerGroup: {
     type: String,
-    enum: ['Sundry Debtors', 'Sundry Creditors', 'Cash', 'Bank'],
+    enum: ['Sundry Debtors', 'Sundry Creditors', 'Cash', 'Bank', 'Duties & Taxes', 'Expenses', 'Incomes', 'Assets', 'Liabilities', 'Capital', 'Primary'],
     default: 'Sundry Debtors'
   },
   
   ledgerType: {
     type: String,
-    enum: ['Customer', 'Vendor', 'Bank', 'Cash', 'Expense', 'Income'],
+    enum: ['Customer', 'Vendor', 'Bank', 'Cash', 'Expense', 'Income', 'Duty', 'Asset', 'Liability', 'Capital', 'Other'],
     default: 'Customer'
   },
   
@@ -101,6 +101,24 @@ const accountsLedgerSchema = new mongoose.Schema({
     type: String,
     enum: ['Dr', 'Cr'],
     default: 'Dr'
+  },
+  
+  // Closing balance (from Tally CLOSINGBALANCE or calculated from vouchers)
+  closingBalance: {
+    type: Number,
+    default: 0
+  },
+  
+  closingBalanceType: {
+    type: String,
+    enum: ['Dr', 'Cr'],
+    default: 'Dr'
+  },
+  
+  // Timestamp of when closing balance was last calculated
+  closingBalanceCalculatedAt: {
+    type: Date,
+    default: null
   },
   
   // Payment terms
