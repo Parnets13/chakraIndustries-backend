@@ -59,7 +59,7 @@ const invoiceSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ['Draft', 'Sent', 'Paid', 'Overdue', 'Cancelled', 'Partial'],
+    enum: ['Draft', 'Approved', 'Sent', 'Paid', 'Overdue', 'Cancelled', 'Partial'],
     default: 'Draft',
   },
 

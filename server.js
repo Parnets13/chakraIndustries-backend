@@ -77,6 +77,7 @@ import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
 import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
 import brsRoutes from './routes/brsRoutes.js';
 import financeRoutes from './routes/financeRoutes.js';
+import productionRoutes from './routes/productionRoutes.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -150,6 +151,7 @@ import './models/VendorPrice.js';
 import './models/WarehouseGateEntry.js';
 import './models/WarehouseVerification.js';
 import './models/WorkOrder.js';
+import './models/Production.js';
 
 // Server configuration
 const app = express();
@@ -281,6 +283,7 @@ app.use('/api/loss-tracking', lossTrackingRoutes);
 app.use('/api/po-generator', poGeneratorRoutes);
 app.use('/api/brs', brsRoutes);
 app.use('/api/finance', financeRoutes);
+app.use('/api/production-entries', productionRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars
