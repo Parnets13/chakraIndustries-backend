@@ -56,6 +56,7 @@ export const getAllWorkOrders = async (req, res) => {
       })
       .populate('productItemMasterId', 'itemId sku name unit description')
       .populate('oemBrand', 'brandId name code color status')
+      .populate({ path: 'materialConsumption.vendorId', select: 'companyName contactName' })
       .sort({ createdAt: -1 });
     
     const data = wos.map(wo => {
@@ -479,8 +480,9 @@ export const recordWastage = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid consumption line' });
     }
 
-    line.wastedQty = parseFloat(wastedQty) || 0;
+    line.wastedQty     = parseFloat(wastedQty) || 0;
     line.wastageReason = wastageReason || '';
+    line.wastedAt      = line.wastedQty > 0 ? new Date() : null;
 
     // Create loss tracking record
     if (line.wastedQty > 0) {
@@ -502,7 +504,11 @@ export const recordWastage = async (req, res) => {
     }
 
     await wo.save();
-    res.json({ success: true, message: 'Wastage recorded', data: wo });
+
+    // Return with vendor populated so frontend can show vendor name immediately
+    const populated = await WorkOrder.findById(wo._id)
+      .populate({ path: 'materialConsumption.vendorId', select: 'companyName contactName' });
+    res.json({ success: true, message: 'Wastage recorded', data: populated });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
 

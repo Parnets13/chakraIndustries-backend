@@ -37,6 +37,12 @@ const componentSchema = new mongoose.Schema({
   vendorId:    { type: mongoose.Schema.Types.ObjectId, ref: 'Vendor', default: null },
   oemBrand:    { type: mongoose.Schema.Types.ObjectId, ref: 'OEMBrand', default: null },
 
+  // Preferred vendor (display name stored alongside ID for quick read)
+  preferredVendorId:   { type: mongoose.Schema.Types.ObjectId, ref: 'Vendor', default: null },
+  preferredVendorName: { type: String, default: '' },
+  rfqStatus:   { type: String, enum: ['Not Sent', 'Sent', 'Quotation Received'], default: 'Not Sent' },
+  rfqSentAt:   { type: Date, default: null },
+
   // Alternate materials
   alternates:  [alternateSchema],
 

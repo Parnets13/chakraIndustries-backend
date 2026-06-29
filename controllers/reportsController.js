@@ -39,10 +39,51 @@ export const getStockSummary = async (req, res) => {
     const { warehouse } = req.query;
     const filter = {};
     if (warehouse && warehouse !== 'All Warehouses') filter.warehouse = warehouse;
+
     const items = await InventoryItem.find(filter)
       .populate('category', 'name')
+      .populate('itemMasterId', 'unitPrice costPrice sellingPrice')
       .sort({ sku: 1 });
-    res.json({ success: true, data: items });
+
+    const mapped = items.map(item => {
+      // Prefer unitPrice from linked ItemMaster, fall back to InventoryItem's own unitPrice
+      const masterUnitPrice =
+        item.itemMasterId?.unitPrice ||
+        item.itemMasterId?.costPrice ||
+        item.unitPrice ||
+        0;
+
+      const totalQty      = item.qty ?? item.currentQuantity ?? 0;
+      const reserved      = item.reservedQuantity ?? 0;
+      const available     = Math.max(0, totalQty - reserved);
+      const minQty        = item.minQty ?? item.reorderPoint ?? 0;
+      const totalValue    = parseFloat((totalQty * masterUnitPrice).toFixed(2));
+
+      // Re-derive status based on live quantities
+      let status = item.status || 'Active';
+      if (totalQty === 0) status = 'Dead';
+      else if (available <= minQty) status = 'Critical';
+      else status = 'Active';
+
+      return {
+        _id:               item._id,
+        sku:               item.sku || item.itemCode || '—',
+        name:              item.name || item.itemName || '—',
+        category:          item.category,
+        warehouse:         item.warehouse,
+        totalQuantity:     totalQty,
+        availableQuantity: available,
+        reservedQuantity:  reserved,
+        incomingQuantity:  item.incomingQuantity ?? 0,
+        minQuantity:       minQty,
+        unit:              item.unit || 'Nos',
+        unitPrice:         masterUnitPrice,
+        totalValue,
+        status,
+      };
+    });
+
+    res.json({ success: true, data: mapped });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 

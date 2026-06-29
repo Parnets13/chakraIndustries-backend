@@ -1,5 +1,6 @@
 import BOM from '../models/BOM.js';
 import ItemMaster from '../models/ItemMaster.js';
+import InventoryItem from '../models/InventoryItem.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function generateBomId() {
@@ -41,6 +42,10 @@ export const getAllBOMs = async (req, res) => {
         select: 'vendorId companyName'
       })
       .populate({
+        path: 'components.preferredVendorId',
+        select: 'companyName name vendorId email contactPerson'
+      })
+      .populate({
         path: 'components.oemBrand',
         select: 'brandId name code'
       })
@@ -78,6 +83,10 @@ export const getBOMById = async (req, res) => {
       .populate({
         path: 'components.vendorId',
         select: 'vendorId companyName contactPerson email phone'
+      })
+      .populate({
+        path: 'components.preferredVendorId',
+        select: 'companyName name vendorId email contactPerson'
       })
       .populate({
         path: 'components.oemBrand',
@@ -259,34 +268,58 @@ export const addComponent = async (req, res) => {
   try {
     const bom = await BOM.findById(req.params.id);
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+
     const { itemMasterId, qty, scrapFactor } = req.body;
-    if (!itemMasterId) return res.status(400).json({ success: false, message: 'Item Master ID is required' });
-    if (!qty || qty <= 0)  return res.status(400).json({ success: false, message: 'Quantity must be > 0' });
+    if (!itemMasterId) return res.status(400).json({ success: false, message: 'Item ID is required' });
+    if (!qty || qty <= 0) return res.status(400).json({ success: false, message: 'Quantity must be > 0' });
 
-    // Fetch Item Master
-    const item = await ItemMaster.findById(itemMasterId);
-    if (!item) return res.status(404).json({ success: false, message: 'Item not found in Item Master' });
+    // Try ItemMaster first, then fall back to InventoryItem
+    let itemName, itemCode, itemUnit, itemCost, resolvedMasterId;
 
-    // Check for duplicates
-    const existingComponent = bom.components.find(c => String(c.itemMasterId) === String(itemMasterId));
-    if (existingComponent) return res.status(400).json({ success: false, message: 'Item already exists in BOM' });
+    const masterItem = await ItemMaster.findById(itemMasterId).catch(() => null);
+    if (masterItem) {
+      itemName         = masterItem.name;
+      itemCode         = masterItem.sku;
+      itemUnit         = masterItem.unit;
+      itemCost         = masterItem.costPrice || 0;
+      resolvedMasterId = masterItem._id;
+    } else {
+      // Try InventoryItem (items from /inventory/stock)
+      const invItem = await InventoryItem.findById(itemMasterId).catch(() => null);
+      if (!invItem) return res.status(404).json({ success: false, message: 'Item not found in Item Master or Inventory' });
+      itemName         = invItem.name || invItem.sku || 'Unknown';
+      itemCode         = invItem.sku  || invItem.itemCode || '';
+      itemUnit         = invItem.unit || 'Nos';
+      itemCost         = invItem.unitPrice || 0;
+      resolvedMasterId = invItem.itemMasterId || invItem._id; // prefer linked ItemMaster ID
+    }
+
+    // Check for duplicates by resolved ID
+    const alreadyExists = bom.components.find(
+      c => String(c.itemMasterId) === String(resolvedMasterId)
+    );
+    if (alreadyExists) return res.status(400).json({ success: false, message: `"${itemName}" is already in this BOM` });
 
     bom.components.push({
-      itemMasterId: item._id,
-      itemName: item.name,
-      itemCode: item.sku,
-      description: item.description,
-      unit: item.unit,
-      qty: qty,
+      ...req.body,
+      itemMasterId: resolvedMasterId,
+      itemName,
+      itemCode,
+      description: req.body.description || '',
+      unit:        req.body.unit || itemUnit,
+      qty,
       scrapFactor: scrapFactor || 0,
-      unitCost: item.costPrice || 0,
-      ...req.body
+      unitCost:    req.body.unitCost != null ? req.body.unitCost : itemCost,
     });
+
     await bom.save();
-    // Populate components before returning
     await bom.populate('components.itemMasterId', 'itemId sku name unit description');
+    await bom.populate('components.preferredVendorId', 'companyName vendorId email');
+
     res.status(201).json({ success: true, message: 'Component added', data: { ...bom.toObject(), ...calcCosts(bom) } });
-  } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
 };
 
 export const updateComponent = async (req, res) => {

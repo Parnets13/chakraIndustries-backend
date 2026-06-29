@@ -1,7 +1,6 @@
 import express from 'express';
 import http from 'http';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import connectDB from './config/database.js';
 import authRoutes from './routes/authRoutes.js';
@@ -75,6 +74,7 @@ import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
 import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
 import brsRoutes from './routes/brsRoutes.js';
 import financeRoutes from './routes/financeRoutes.js';
+import productionRoutes from './routes/productionRoutes.js';
 import { initConnectorServer, getConnectorStatuses } from './services/tallyConnectorServer.js';
 
 // Ensure new models are registered
@@ -109,6 +109,7 @@ import './models/ActivityLog.js';
 import './models/Approval.js';
 import './models/Asset.js';
 import './models/BOM.js';
+import './models/Company.js';
 import './models/Batch.js';
 import './models/BrandOrder.js';
 import './models/Category.js';
@@ -281,6 +282,7 @@ app.use('/api/loss-tracking', lossTrackingRoutes);
 app.use('/api/po-generator', poGeneratorRoutes);
 app.use('/api/brs', brsRoutes);
 app.use('/api/finance', financeRoutes);
+app.use('/api/production-entries', productionRoutes);
 
 // Health check
 // eslint-disable-next-line no-unused-vars
@@ -302,16 +304,28 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5001;
 
 // Start server immediately, connect to MongoDB in background
-connectDB(); 
+connectDB();
 
 // Create HTTP server and attach Socket.IO
 const httpServer = http.createServer(app);
 initConnectorServer(httpServer);
 
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, async () => {
   console.log(`✓ Server running on port ${PORT}`);
   console.log(`✓ Connector Socket.IO server ready`);
   startTallyScheduler();
+
+  // ── SMTP startup verification ────────────────────────────────────────────
+  try {
+    const { verifyTransporter } = await import('./utils/emailService.js');
+    await verifyTransporter();
+    const emailUser = (process.env.EMAIL_USERNAME || process.env.SMTP_USER || '').trim();
+    console.log(`✓ SMTP connected — authenticated as ${emailUser}`);
+  } catch (err) {
+    console.warn(`⚠ SMTP verification failed at startup: ${err.message}`);
+    console.warn('  Email sending will not work until EMAIL_USERNAME / EMAIL_PASSWORD are correct in .env');
+  }
+  // ────────────────────────────────────────────────────────────────────────
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`✗ Port ${PORT} is already in use. Stop the other process and restart.`);

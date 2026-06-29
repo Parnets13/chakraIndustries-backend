@@ -724,6 +724,30 @@ export const getAllStock = async (req, res) => {
   }
 };
 
+// ── Dropdown for BOM / Work Order selectors ───────────────────────────────────
+export const getInventoryDropdown = async (req, res) => {
+  try {
+    const items = await InventoryItem.find({})
+      .select('_id name sku unit unitPrice qty itemMasterId')
+      .sort({ name: 1 });
+
+    // Normalise: use name || sku as the display name so nothing is blank
+    const data = items.map(item => ({
+      _id:         item._id,
+      name:        item.name || item.sku || 'Unknown',
+      sku:         item.sku  || item.itemCode || '',
+      unit:        item.unit || 'Nos',
+      costPrice:   item.unitPrice || 0,
+      qty:         item.qty || 0,
+      itemMasterId: item.itemMasterId || null,
+    }));
+
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // ── GRN to Inventory Conversion ──────────────────────────────────────────────
 export const convertGRNToInventory = async (req, res) => {
   try {

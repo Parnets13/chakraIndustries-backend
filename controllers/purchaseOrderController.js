@@ -1,7 +1,7 @@
 import PurchaseOrder from '../models/PurchaseOrder.js';
 import XLSX from 'xlsx';
 import { logActivity } from '../utils/activityLogger.js';
-import nodemailer from 'nodemailer';
+import { sendEmail } from '../utils/emailService.js';
 
 // Generate PO ID
 const generatePOId = async () => {
@@ -360,21 +360,6 @@ export const sendPOEmail = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No email recipient provided' });
     }
 
-    const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
-    if (!SMTP_USER || !SMTP_PASS) {
-      return res.status(500).json({ success: false, message: 'Email service not configured' });
-    }
-
-    const transporter = nodemailer.createTransport({
-      host: SMTP_HOST || 'smtp.gmail.com',
-      port: parseInt(SMTP_PORT || '587'),
-      secure: parseInt(SMTP_PORT || '587') === 465,
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-    });
-
-    const fromName = process.env.SMTP_FROM_NAME || 'Sri Chakra Industries';
-    const fromEmail = SMTP_USER;
-
     const fmtDate = (d) => {
       try { return new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); }
       catch { return d || ''; }
@@ -507,8 +492,7 @@ export const sendPOEmail = async (req, res) => {
 </body>
 </html>`;
 
-    await transporter.sendMail({
-      from: `"${fromName}" <${fromEmail}>`,
+    await sendEmail({
       to: recipientEmail,
       subject: `Purchase Order ${po.poId} from Sri Chakra Industries`,
       html: htmlBody,

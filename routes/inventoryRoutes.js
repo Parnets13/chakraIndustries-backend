@@ -5,7 +5,7 @@ import {
   getWarehouses, createWarehouse, updateWarehouse, deleteWarehouse, getNextWarehouseId,
   getMovements, createMovement, deleteMovement,
   convertGRNToInventory,
-  getStockByWarehouse, getAllStock,
+  getStockByWarehouse, getAllStock, getInventoryDropdown,
 } from '../controllers/inventoryController.js';
 import {
   getInventoryFlowDashboard,
@@ -19,6 +19,9 @@ router.use(protect);
 
 // Stats (must be before /:id routes)
 router.get('/stats',      getInventoryStats);
+
+// Dropdown for BOM / WO selectors (must be before /:id)
+router.get('/dropdown',   getInventoryDropdown);
 
 // Inventory Flow Dashboard
 router.get('/flow/dashboard', getInventoryFlowDashboard);

@@ -258,10 +258,9 @@ export const searchItems = async (req, res) => {
         { sku: { $regex: q, $options: 'i' } },
         { name: { $regex: q, $options: 'i' } },
         { itemId: { $regex: q, $options: 'i' } }
-      ],
-      isActive: true,
-      status: 'Active'
+      ]
     })
+      .select('_id itemId sku name unit costPrice status')
       .populate('category', 'name')
       .limit(20);
 
@@ -272,10 +271,11 @@ export const searchItems = async (req, res) => {
 };
 
 // GET DROPDOWN - Get items for dropdown (minimal data)
+// Returns all items so BOM / Work Order selectors are not blocked by status filters
 export const getItemsForDropdown = async (req, res) => {
   try {
-    const items = await ItemMaster.find({ isActive: true, status: 'Active' })
-      .select('_id itemId sku name unit')
+    const items = await ItemMaster.find({})
+      .select('_id itemId sku name unit costPrice status isActive')
       .sort({ name: 1 });
 
     res.json({ success: true, data: items });
