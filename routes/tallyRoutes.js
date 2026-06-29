@@ -25,6 +25,9 @@ import {
 } from '../controllers/tallyController.js';
 import { tallyWebhook } from '../controllers/tallyWebhookController.js';
 import { protect } from '../middleware/authMiddleware.js';
+import { getConnectorStatuses } from '../services/tallyConnectorServer.js';
+import TallyConfig from '../models/TallyConfig.js';
+import crypto from 'crypto';
 
 const router = express.Router();
 
@@ -88,5 +91,36 @@ router.get('/sales-invoices',        protect, getSalesInvoices);
 
 // ── Tally-pushed webhook (no auth — secured by optional shared secret) ────────
 router.post('/webhook',              tallyWebhook);
+
+// ── Connector endpoints ───────────────────────────────────────────────────────
+router.get('/connectors/status',     protect, async (req, res) => {
+  try {
+    const statuses = getConnectorStatuses();
+    res.json({ success: true, connectors: statuses });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/connectors/generate-credentials', protect, async (req, res) => {
+  try {
+    const connectorId = crypto.randomUUID();
+    const connectorSecret = crypto.randomBytes(32).toString('hex');
+    
+    // Update or create TallyConfig with credentials
+    await TallyConfig.findOneAndUpdate(
+      {},
+      { connectorId, connectorSecret },
+      { upsert: true, new: true }
+    );
+    
+    res.json({
+      success: true,
+      credentials: { connectorId, connectorSecret }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 export default router;

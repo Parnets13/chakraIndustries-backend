@@ -25,6 +25,41 @@ const tallyVoucherSchema = new mongoose.Schema({
   partyGstin:        { type: String, trim: true },
   placeOfSupply:     { type: String, trim: true },
 
+  // E-invoice fields
+  irn:               { type: String, trim: true },
+  ackNo:             { type: String, trim: true },
+  ackDate:           { type: Date },
+
+  // Delivery & reference fields
+  deliveryNote:      { type: String, trim: true },
+  referenceNo:       { type: String, trim: true },
+  referenceDate:     { type: Date },
+  buyersOrderNo:     { type: String, trim: true },
+  buyersOrderDate:   { type: Date },
+  dispatchDocNo:     { type: String, trim: true },
+  dispatchedThrough: { type: String, trim: true },
+  destination:       { type: String, trim: true },
+  billOfLadingNo:    { type: String, trim: true },
+  motorVehicleNo:    { type: String, trim: true },
+  termsOfDelivery:   { type: String, trim: true },
+
+  // Bill To & Ship To (full Tally details)
+  billToName:        { type: String, trim: true },
+  billToMailingName: { type: String, trim: true },
+  billToAddress:     { type: String, trim: true },
+  billToCity:        { type: String, trim: true },
+  billToState:       { type: String, trim: true },
+  billToCountry:     { type: String, trim: true },
+  billToGST:         { type: String, trim: true },
+  billToGstRegType:  { type: String, trim: true },
+  shipToName:        { type: String, trim: true },
+  shipToMailingName: { type: String, trim: true },
+  shipToAddress:     { type: String, trim: true },
+  shipToCity:        { type: String, trim: true },
+  shipToState:       { type: String, trim: true },
+  shipToCountry:     { type: String, trim: true },
+  shipToGST:         { type: String, trim: true },
+
   // Ledger allocations (as imported from Tally)
   ledgerEntries: [{
     ledgerName:  { type: String },

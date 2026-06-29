@@ -11,6 +11,7 @@ import Vendor from '../models/Vendor.js';
 import Client from '../models/Client.js';
 import Invoice from '../models/Invoice.js';
 import TallyVoucher from '../models/TallyVoucher.js';
+import { sendTallyRequest, isConnectorOnline } from './tallyConnectorServer.js';
 
 // === CONSTANTS ===
 const CHUNK_DAYS = 30;  // Fetch 30 days per chunk (Tally honours short date ranges reliably)
@@ -40,11 +41,12 @@ let _healthCheckInProgress = false;
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
-  parseTagValue: true,
-  parseAttributeValue: true,
+  parseTagValue: false,
+  parseAttributeValue: false,
   allowBooleanAttributes: true,
   ignoreDeclaration: true,
-  trimValues: true,
+  trimValues: false,
+  processEntities: true,
   arrayMode: (tagName, jPath, isLeafNode, isAttribute) => {
     // Always treat these as arrays regardless of count in the XML
     return ['LEDGER', 'STOCKITEM', 'VOUCHER',
@@ -154,7 +156,8 @@ function decodeXmlEntities(s) {
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'");
+    .replace(/&apos;/g, "'")
+    .replace(/[\r\n]+/g, ' ');
 }
 
 // === XML VALIDATION ===
@@ -294,6 +297,25 @@ export async function testTallyConnection() {
 
 // === HTTP POST WITH RETRIES AND TIMEOUT ===
 async function postXml(cfg, xml, timeoutMs) {
+  if (cfg.useConnector && cfg.connectorId) {
+    if (!validateXml(xml)) {
+      throw new Error('Invalid XML format');
+    }
+    LOG(`POST via connector ${cfg.connectorId} bytes=${xml.length} timeout=${timeoutMs}ms`);
+    const body = await sendTallyRequest(cfg.connectorId, xml, timeoutMs);
+    console.log("RAW TALLY RESPONSE (via connector):", body); // Raw XML log
+    LOG(`  → Received bytes=${body.length}`);
+    
+    if (body.includes("<LINEERROR>")) {
+      throw new Error(`Tally returned LINEERROR: ${body}`);
+    }
+    if (body.includes("<STATUS>0</STATUS>")) {
+      return ""; // Empty collection
+    }
+    return body;
+  }
+  
+  // Fallback to direct Tally connection
   const url = tallyBaseUrl(cfg);
   if (!validateXml(xml)) {
     throw new Error('Invalid XML format');
@@ -415,7 +437,7 @@ function buildAllVouchersCollectionXml(cfg, fromDate = null, toDate = null) {
     <TDL><TDLMESSAGE>
       <COLLECTION NAME="AllVouchers">
         <TYPE>Voucher</TYPE>
-        <FETCH>GUID, VoucherNumber, Date, PartyLedgerName, Amount, VoucherTypeName, Narration, ALLLEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST</FETCH>
+        <FETCH>GUID, VoucherNumber, Date, PartyLedgerName, Amount, VoucherTypeName, Narration, ALLLEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST, BILLTOLEDGERNAME, BILLTOADDRESS, BILLTOSTATE, BILLTOCOUNTRY, BILLTOPINCODE, BILLTOGSTIN, BILLTONAME, BILLTOMAILINGNAME, BILLTOCITY, BILLTOGSTREGISTRATIONTYPE, BASICBUYERNAME, BUYERNAME, BUYERADDRESS, BUYERCITY, BUYERSTATE, BUYERCOUNTRY, BUYERPINCODE, BUYERGSTIN, CONSIGNEENAME, CONSIGNEEADDRESS, CONSIGNEESTATE, CONSIGNEECOUNTRY, CONSIGNEEPINCODE, CONSIGNEEGSTIN, CONSIGNEEMAILINGNAME, CONSIGNEECITY, BASICSHIPTO, SHIPTONAME, SHIPTOADDRESS, SHIPTOSTATE, SHIPTOCOUNTRY, SHIPTOPINCODE, SHIPTOGSTIN, SHIPTOMAILINGNAME, SHIPTOCITY, DELIVERYNAME, DELIVERYADDRESS, DELIVERYADDRESS.LIST, PARTYSHIPPINGNAME, PARTYSHIPPINGADDRESS, $BillToAddress, $BillToAddress.LIST, $ShipToAddress, $ShipToAddress.LIST, $ConsigneeAddress, $ConsigneeAddress.LIST</FETCH>
       </COLLECTION>
     </TDLMESSAGE></TDL>
   </DESC>
@@ -542,15 +564,386 @@ function buildDynamicCollectionXml(cfg, tallyType, collectionName, voucherType =
 // === PARSERS ===
 function getSafeValue(obj, key, defaultValue = '') {
   if (!obj) return defaultValue;
-  const value = obj[key];
+  let value = obj[key];
   if (value === undefined || value === null) return defaultValue;
   // fast-xml-parser returns {#text: '...', @_TYPE: '...'} for tags with attributes
   // (e.g. <DATE TYPE="Date">20260401</DATE>)
   if (typeof value === 'object' && !Array.isArray(value)) {
-    const text = value['#text'] ?? value['_text'] ?? value['$t'] ?? '';
-    return String(text).trim() || defaultValue;
+    value = value['#text'] ?? value['_text'] ?? value['$t'] ?? '';
   }
-  return String(value).trim();
+  if (value === '' || value === null || value === undefined) return defaultValue;
+  // Replace any newlines/carriage returns with single spaces to fix split names, preserve all other whitespace
+  return String(value).replace(/[\r\n]+/g, ' ');
+}
+
+// Helper to recursively search an object for any of the given keys (case-insensitive)
+function findFirstValue(obj, keys, defaultValue = '') {
+  if (!obj) return defaultValue;
+  
+  // First check direct keys (case-insensitive)
+  const objKeys = Object.keys(obj);
+  for (const key of keys) {
+    const lowerKey = key.toLowerCase();
+    const matchingKey = objKeys.find(k => k.toLowerCase() === lowerKey);
+    if (matchingKey) {
+      const value = obj[matchingKey];
+      const safeVal = getSafeValue(obj, matchingKey);
+      if (safeVal && safeVal.trim() !== '') {
+        return safeVal;
+      }
+    }
+  }
+  
+  // Recursively check nested objects
+  for (const key of objKeys) {
+    const value = obj[key];
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      const found = findFirstValue(value, keys, defaultValue);
+      if (found && found !== defaultValue) {
+        return found;
+      }
+    }
+  }
+  
+  return defaultValue;
+}
+
+// Helper to extract BILL TO ADDRESS ONLY from parsed voucher object
+function extractBillToAddressFromParsed(obj) {
+  const lines = [];
+  
+  // Try $BillToAddress.LIST first
+  const dollarBillToList = obj['$BillToAddress.LIST'];
+  if (dollarBillToList) {
+    if (Array.isArray(dollarBillToList)) {
+      dollarBillToList.forEach(item => {
+        const line = getSafeValue(item, 'ADDRESS');
+        if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      });
+    } else if (typeof dollarBillToList === 'object') {
+      const innerAddr = dollarBillToList['ADDRESS'];
+      if (Array.isArray(innerAddr)) {
+        innerAddr.forEach(item => {
+          const line = getSafeValue(item, 'ADDRESS');
+          if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+        });
+      } else {
+        const line = getSafeValue(dollarBillToList, 'ADDRESS');
+        if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      }
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try BILLTOADDRESS.LIST
+  const billToAddressList = obj['BILLTOADDRESS.LIST'];
+  if (billToAddressList) {
+    if (Array.isArray(billToAddressList)) {
+      billToAddressList.forEach(item => {
+        const line = getSafeValue(item, 'ADDRESS');
+        if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      });
+    } else if (typeof billToAddressList === 'object') {
+      const innerAddr = billToAddressList['ADDRESS'];
+      if (Array.isArray(innerAddr)) {
+        innerAddr.forEach(item => {
+          const line = getSafeValue(item, 'ADDRESS');
+          if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+        });
+      } else {
+        const line = getSafeValue(billToAddressList, 'ADDRESS');
+        if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      }
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try single $BillToAddress
+  const dollarBillToAddr = getSafeValue(obj, '$BillToAddress');
+  if (dollarBillToAddr) return decodeXmlEntities(dollarBillToAddr);
+  
+  // Try single BILLTOADDRESS
+  const billToAddr = getSafeValue(obj, 'BILLTOADDRESS');
+  if (billToAddr) return decodeXmlEntities(billToAddr);
+  
+  // Try single BASICBUYERADDRESS
+  const basicBuyerAddr = getSafeValue(obj, 'BASICBUYERADDRESS');
+  if (basicBuyerAddr) return decodeXmlEntities(basicBuyerAddr);
+  
+  return '';
+}
+
+// Helper to extract SHIP TO ADDRESS ONLY from parsed voucher object
+function extractShipToAddressFromParsed(obj) {
+  const lines = [];
+  
+  // Try $ShipToAddress.LIST first
+  const dollarShipToList = obj['$ShipToAddress.LIST'];
+  if (dollarShipToList) {
+    if (Array.isArray(dollarShipToList)) {
+      dollarShipToList.forEach(item => {
+        const line = getSafeValue(item, 'ADDRESS');
+        if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      });
+    } else if (typeof dollarShipToList === 'object') {
+      const innerAddr = dollarShipToList['ADDRESS'];
+      if (Array.isArray(innerAddr)) {
+        innerAddr.forEach(item => {
+          const line = getSafeValue(item, 'ADDRESS');
+          if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+        });
+      } else {
+        const line = getSafeValue(dollarShipToList, 'ADDRESS');
+        if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      }
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try SHIPTOADDRESS.LIST
+  const shipToAddressList = obj['SHIPTOADDRESS.LIST'];
+  if (shipToAddressList) {
+    if (Array.isArray(shipToAddressList)) {
+      shipToAddressList.forEach(item => {
+        const line = getSafeValue(item, 'ADDRESS');
+        if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      });
+    } else if (typeof shipToAddressList === 'object') {
+      const innerAddr = shipToAddressList['ADDRESS'];
+      if (Array.isArray(innerAddr)) {
+        innerAddr.forEach(item => {
+          const line = getSafeValue(item, 'ADDRESS');
+          if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+        });
+      } else {
+        const line = getSafeValue(shipToAddressList, 'ADDRESS');
+        if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      }
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try $ConsigneeAddress.LIST
+  const dollarConsigneeList = obj['$ConsigneeAddress.LIST'];
+  if (dollarConsigneeList) {
+    if (Array.isArray(dollarConsigneeList)) {
+      dollarConsigneeList.forEach(item => {
+        const line = getSafeValue(item, 'ADDRESS');
+        if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      });
+    } else if (typeof dollarConsigneeList === 'object') {
+      const innerAddr = dollarConsigneeList['ADDRESS'];
+      if (Array.isArray(innerAddr)) {
+        innerAddr.forEach(item => {
+          const line = getSafeValue(item, 'ADDRESS');
+          if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+        });
+      } else {
+        const line = getSafeValue(dollarConsigneeList, 'ADDRESS');
+        if (line) lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      }
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try single $ShipToAddress
+  const dollarShipToAddr = getSafeValue(obj, '$ShipToAddress');
+  if (dollarShipToAddr) return decodeXmlEntities(dollarShipToAddr);
+  
+  // Try single SHIPTOADDRESS
+  const shipToAddr = getSafeValue(obj, 'SHIPTOADDRESS');
+  if (shipToAddr) return decodeXmlEntities(shipToAddr);
+  
+  // Try single CONSIGNEEADDRESS
+  const consigneeAddr = getSafeValue(obj, 'CONSIGNEEADDRESS');
+  if (consigneeAddr) return decodeXmlEntities(consigneeAddr);
+  
+  // Try single DELIVERYADDRESS
+  const deliveryAddr = getSafeValue(obj, 'DELIVERYADDRESS');
+  if (deliveryAddr) return decodeXmlEntities(deliveryAddr);
+  
+  return '';
+}
+
+// ------------------------------
+// SEPARATE MAP BILL TO FROM PARSED OBJECT
+// ------------------------------
+function mapBillToFromParsed(voucher) {
+  const billTo = {
+    name: '',
+    mailingName: '',
+    address: '',
+    city: '',
+    state: '',
+    country: '',
+    pincode: '',
+    gstin: '',
+    gstRegType: ''
+  };
+  
+  // Name - BILL TO ONLY
+  const billToName = getSafeValue(voucher, 'BILLTONAME');
+  if (billToName) billTo.name = billToName;
+  
+  const basicBuyerName = getSafeValue(voucher, 'BASICBUYERNAME');
+  if (!billTo.name && basicBuyerName) billTo.name = basicBuyerName;
+  
+  const buyerName = getSafeValue(voucher, 'BUYERNAME');
+  if (!billTo.name && buyerName) billTo.name = buyerName;
+  
+  const billToLedgerName = getSafeValue(voucher, 'BILLTOLEDGERNAME');
+  if (!billTo.name && billToLedgerName) billTo.name = billToLedgerName;
+  
+  // Mailing name - BILL TO ONLY
+  const billToMailingName = getSafeValue(voucher, 'BILLTOMAILINGNAME');
+  if (billToMailingName) billTo.mailingName = billToMailingName;
+  
+  // Address - BILL TO ONLY
+  billTo.address = extractBillToAddressFromParsed(voucher);
+  
+  // City - BILL TO ONLY
+  const billToCity = getSafeValue(voucher, 'BILLTOCITY');
+  if (billToCity) billTo.city = billToCity;
+  
+  // State - BILL TO ONLY
+  const billToState = getSafeValue(voucher, 'BILLTOSTATE');
+  if (billToState) billTo.state = billToState;
+  
+  // Country - BILL TO ONLY
+  const billToCountry = getSafeValue(voucher, 'BILLTOCOUNTRY');
+  if (billToCountry) billTo.country = billToCountry;
+  
+  // Pincode - BILL TO ONLY
+  const billToPincode = getSafeValue(voucher, 'BILLTOPINCODE');
+  if (billToPincode) billTo.pincode = billToPincode;
+  
+  // GSTIN - BILL TO ONLY
+  const billToGstin = getSafeValue(voucher, 'BILLTOGSTIN');
+  if (billToGstin) billTo.gstin = billToGstin;
+  
+  // GST Reg Type - BILL TO ONLY
+  const billToGstRegType = getSafeValue(voucher, 'BILLTOGSTREGISTRATIONTYPE');
+  if (billToGstRegType) billTo.gstRegType = billToGstRegType;
+  
+  return billTo;
+}
+
+// ------------------------------
+// SEPARATE MAP SHIP TO FROM PARSED OBJECT
+// ------------------------------
+function mapShipToFromParsed(voucher) {
+  const shipTo = {
+    name: '',
+    mailingName: '',
+    address: '',
+    city: '',
+    state: '',
+    country: '',
+    pincode: '',
+    gstin: ''
+  };
+  
+  // Name - SHIP TO ONLY
+  const shipToName = getSafeValue(voucher, 'SHIPTONAME');
+  if (shipToName) shipTo.name = shipToName;
+  
+  const basicShipTo = getSafeValue(voucher, 'BASICSHIPTO');
+  if (!shipTo.name && basicShipTo) shipTo.name = basicShipTo;
+  
+  const consigneeName = getSafeValue(voucher, 'CONSIGNEENAME');
+  if (!shipTo.name && consigneeName) shipTo.name = consigneeName;
+  
+  const deliveryName = getSafeValue(voucher, 'DELIVERYNAME');
+  if (!shipTo.name && deliveryName) shipTo.name = deliveryName;
+  
+  const partyShippingName = getSafeValue(voucher, 'PARTYSHIPPINGNAME');
+  if (!shipTo.name && partyShippingName) shipTo.name = partyShippingName;
+  
+  // Mailing name - SHIP TO ONLY
+  const shipToMailingName = getSafeValue(voucher, 'SHIPTOMAILINGNAME');
+  if (shipToMailingName) shipTo.mailingName = shipToMailingName;
+  
+  const consigneeMailingName = getSafeValue(voucher, 'CONSIGNEEMAILINGNAME');
+  if (!shipTo.mailingName && consigneeMailingName) shipTo.mailingName = consigneeMailingName;
+  
+  // Address - SHIP TO ONLY
+  shipTo.address = extractShipToAddressFromParsed(voucher);
+  
+  // City - SHIP TO ONLY
+  const shipToCity = getSafeValue(voucher, 'SHIPTOCITY');
+  if (shipToCity) shipTo.city = shipToCity;
+  
+  const consigneeCity = getSafeValue(voucher, 'CONSIGNEECITY');
+  if (!shipTo.city && consigneeCity) shipTo.city = consigneeCity;
+  
+  // State - SHIP TO ONLY
+  const shipToState = getSafeValue(voucher, 'SHIPTOSTATE');
+  if (shipToState) shipTo.state = shipToState;
+  
+  const consigneeState = getSafeValue(voucher, 'CONSIGNEESTATE');
+  if (!shipTo.state && consigneeState) shipTo.state = consigneeState;
+  
+  // Country - SHIP TO ONLY
+  const shipToCountry = getSafeValue(voucher, 'SHIPTOCOUNTRY');
+  if (shipToCountry) shipTo.country = shipToCountry;
+  
+  const consigneeCountry = getSafeValue(voucher, 'CONSIGNEECOUNTRY');
+  if (!shipTo.country && consigneeCountry) shipTo.country = consigneeCountry;
+  
+  // Pincode - SHIP TO ONLY
+  const shipToPincode = getSafeValue(voucher, 'SHIPTOPINCODE');
+  if (shipToPincode) shipTo.pincode = shipToPincode;
+  
+  const consigneePincode = getSafeValue(voucher, 'CONSIGNEEPINCODE');
+  if (!shipTo.pincode && consigneePincode) shipTo.pincode = consigneePincode;
+  
+  // GSTIN - SHIP TO ONLY
+  const shipToGstin = getSafeValue(voucher, 'SHIPTOGSTIN');
+  if (shipToGstin) shipTo.gstin = shipToGstin;
+  
+  const consigneeGstin = getSafeValue(voucher, 'CONSIGNEEGSTIN');
+  if (!shipTo.gstin && consigneeGstin) shipTo.gstin = consigneeGstin;
+  
+  return shipTo;
+}
+
+// Helper to extract GST rate from voucher, inventory entries, or tax ledgers
+function extractGstRate(voucher, inventoryEntry = null, taxLines = []) {
+  // 1. Check RATEDETAILS, GSTDETAILS, TAXRATE, RATE, GSTRATE in voucher
+  const rateDetails = findFirstValue(voucher, ['RATEDETAILS', 'GSTDETAILS', 'TAXRATE', 'RATE', 'GSTRATE']);
+  if (rateDetails) {
+    const match = String(rateDetails).match(/(\d+(?:\.\d+)?)\s*%?/);
+    if (match) {
+      return parseFloat(match[1]);
+    }
+  }
+  
+  // 2. Check inventory entry's GST details if provided
+  if (inventoryEntry) {
+    const invRate = findFirstValue(inventoryEntry, ['RATEDETAILS', 'GSTDETAILS', 'TAXRATE', 'GSTRATE', 'RATE']);
+    if (invRate) {
+      const match = String(invRate).match(/(\d+(?:\.\d+)?)\s*%?/);
+      if (match) {
+        return parseFloat(match[1]);
+      }
+    }
+  }
+  
+  // 3. Extract from tax ledger names (common patterns: "CGST 9%", "SGST @ 6%", etc.)
+  for (const line of taxLines) {
+    const ledgerName = String(line.ledgerName || '');
+    const match = ledgerName.match(/(\d+(?:\.\d+)?)\s*%/);
+    if (match) {
+      // For CGST/SGST, the total rate is double (since they're half each)
+      if (ledgerName.toLowerCase().includes('cgst') || ledgerName.toLowerCase().includes('sgst') || ledgerName.toLowerCase().includes('utgst')) {
+        return parseFloat(match[1]) * 2;
+      }
+      return parseFloat(match[1]);
+    }
+  }
+  
+  // 4. Fall back to 0 (never calculate from amounts)
+  return 0;
 }
 
 function getSafeNumber(obj, key, defaultValue = 0) {
@@ -951,13 +1344,261 @@ function ledgersToOps(ledgers) {
 // ── Regex-based helper to extract a single tag value from a raw XML block ──
 function gTagVal(block, tag) {
   const m = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
-  return m ? m[1].trim() : '';
+  return m ? decodeXmlEntities(m[1].trim()) : '';
+}
+
+// Helper to extract address for BILL TO ONLY - no ship to logic here
+function extractBillToAddressOnly(block) {
+  const lines = [];
+  
+  // Try $BillToAddress.LIST
+  const billToListPattern = /<\$BillToAddress\.LIST[^>]*>([\s\S]*?)<\/\$BillToAddress\.LIST>/gi;
+  for (const match of [...block.matchAll(billToListPattern)]) {
+    const listContent = match[1];
+    const addressMatches = [...listContent.matchAll(/<ADDRESS[^>]*>([\s\S]*?)<\/ADDRESS>/gi)];
+    for (const addrMatch of addressMatches) {
+      lines.push(decodeXmlEntities(addrMatch[1].trim()));
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try BILLTOADDRESS.LIST
+  const billToAddressListPattern = /<BILLTOADDRESS\.LIST[^>]*>([\s\S]*?)<\/BILLTOADDRESS\.LIST>/gi;
+  for (const match of [...block.matchAll(billToAddressListPattern)]) {
+    const listContent = match[1];
+    const addressMatches = [...listContent.matchAll(/<ADDRESS[^>]*>([\s\S]*?)<\/ADDRESS>/gi)];
+    for (const addrMatch of addressMatches) {
+      lines.push(decodeXmlEntities(addrMatch[1].trim()));
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try single $BillToAddress
+  const singleBillToAddr = gTagVal(block, '$BillToAddress');
+  if (singleBillToAddr) return singleBillToAddr;
+  
+  // Try single BILLTOADDRESS
+  const singleBillToAddress = gTagVal(block, 'BILLTOADDRESS');
+  if (singleBillToAddress) return singleBillToAddress;
+  
+  // Try single BASICBUYERADDRESS
+  const basicBuyerAddress = gTagVal(block, 'BASICBUYERADDRESS');
+  if (basicBuyerAddress) return basicBuyerAddress;
+  
+  return '';
+}
+
+// Helper to extract address for SHIP TO ONLY - no bill to logic here
+function extractShipToAddressOnly(block) {
+  const lines = [];
+  
+  // Try $ShipToAddress.LIST
+  const shipToListPattern = /<\$ShipToAddress\.LIST[^>]*>([\s\S]*?)<\/\$ShipToAddress\.LIST>/gi;
+  for (const match of [...block.matchAll(shipToListPattern)]) {
+    const listContent = match[1];
+    const addressMatches = [...listContent.matchAll(/<ADDRESS[^>]*>([\s\S]*?)<\/ADDRESS>/gi)];
+    for (const addrMatch of addressMatches) {
+      lines.push(decodeXmlEntities(addrMatch[1].trim()));
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try SHIPTOADDRESS.LIST
+  const shipToAddressListPattern = /<SHIPTOADDRESS\.LIST[^>]*>([\s\S]*?)<\/SHIPTOADDRESS\.LIST>/gi;
+  for (const match of [...block.matchAll(shipToAddressListPattern)]) {
+    const listContent = match[1];
+    const addressMatches = [...listContent.matchAll(/<ADDRESS[^>]*>([\s\S]*?)<\/ADDRESS>/gi)];
+    for (const addrMatch of addressMatches) {
+      lines.push(decodeXmlEntities(addrMatch[1].trim()));
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try $ConsigneeAddress.LIST
+  const consigneeListPattern = /<\$ConsigneeAddress\.LIST[^>]*>([\s\S]*?)<\/\$ConsigneeAddress\.LIST>/gi;
+  for (const match of [...block.matchAll(consigneeListPattern)]) {
+    const listContent = match[1];
+    const addressMatches = [...listContent.matchAll(/<ADDRESS[^>]*>([\s\S]*?)<\/ADDRESS>/gi)];
+    for (const addrMatch of addressMatches) {
+      lines.push(decodeXmlEntities(addrMatch[1].trim()));
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try single $ShipToAddress
+  const singleShipToAddr = gTagVal(block, '$ShipToAddress');
+  if (singleShipToAddr) return singleShipToAddr;
+  
+  // Try single SHIPTOADDRESS
+  const singleShipToAddress = gTagVal(block, 'SHIPTOADDRESS');
+  if (singleShipToAddress) return singleShipToAddress;
+  
+  // Try single CONSIGNEEADDRESS
+  const consigneeAddress = gTagVal(block, 'CONSIGNEEADDRESS');
+  if (consigneeAddress) return consigneeAddress;
+  
+  // Try single DELIVERYADDRESS
+  const deliveryAddress = gTagVal(block, 'DELIVERYADDRESS');
+  if (deliveryAddress) return deliveryAddress;
+  
+  return '';
+}
+
+// ------------------------------
+// SEPARATE MAP BILL TO FUNCTION
+// ------------------------------
+// No ship to logic, no fallbacks to ship to, completely independent
+function mapBillToFromRaw(block) {
+  const billTo = {
+    name: '',
+    mailingName: '',
+    address: '',
+    city: '',
+    state: '',
+    country: '',
+    pincode: '',
+    gstin: '',
+    gstRegType: ''
+  };
+  
+  // Name fields - BILL TO ONLY
+  const billToName = gTagVal(block, 'BILLTONAME');
+  if (billToName) billTo.name = billToName;
+  
+  const basicBuyerName = gTagVal(block, 'BASICBUYERNAME');
+  if (!billTo.name && basicBuyerName) billTo.name = basicBuyerName;
+  
+  const buyerName = gTagVal(block, 'BUYERNAME');
+  if (!billTo.name && buyerName) billTo.name = buyerName;
+  
+  const billToLedgerName = gTagVal(block, 'BILLTOLEDGERNAME');
+  if (!billTo.name && billToLedgerName) billTo.name = billToLedgerName;
+  
+  // Mailing name - BILL TO ONLY
+  const billToMailingName = gTagVal(block, 'BILLTOMAILINGNAME');
+  if (billToMailingName) billTo.mailingName = billToMailingName;
+  
+  // Address - BILL TO ONLY
+  billTo.address = extractBillToAddressOnly(block);
+  
+  // City - BILL TO ONLY
+  const billToCity = gTagVal(block, 'BILLTOCITY');
+  if (billToCity) billTo.city = billToCity;
+  
+  // State - BILL TO ONLY
+  const billToState = gTagVal(block, 'BILLTOSTATE');
+  if (billToState) billTo.state = billToState;
+  
+  // Country - BILL TO ONLY
+  const billToCountry = gTagVal(block, 'BILLTOCOUNTRY');
+  if (billToCountry) billTo.country = billToCountry;
+  
+  // Pincode - BILL TO ONLY
+  const billToPincode = gTagVal(block, 'BILLTOPINCODE');
+  if (billToPincode) billTo.pincode = billToPincode;
+  
+  // GSTIN - BILL TO ONLY
+  const billToGstin = gTagVal(block, 'BILLTOGSTIN');
+  if (billToGstin) billTo.gstin = billToGstin;
+  
+  // GST Reg Type - BILL TO ONLY
+  const billToGstRegType = gTagVal(block, 'BILLTOGSTREGISTRATIONTYPE');
+  if (billToGstRegType) billTo.gstRegType = billToGstRegType;
+  
+  return billTo;
+}
+
+// ------------------------------
+// SEPARATE MAP SHIP TO FUNCTION
+// ------------------------------
+// No bill to logic, no fallbacks to bill to, completely independent
+function mapShipToFromRaw(block) {
+  const shipTo = {
+    name: '',
+    mailingName: '',
+    address: '',
+    city: '',
+    state: '',
+    country: '',
+    pincode: '',
+    gstin: ''
+  };
+  
+  // Name fields - SHIP TO ONLY
+  const shipToName = gTagVal(block, 'SHIPTONAME');
+  if (shipToName) shipTo.name = shipToName;
+  
+  const basicShipTo = gTagVal(block, 'BASICSHIPTO');
+  if (!shipTo.name && basicShipTo) shipTo.name = basicShipTo;
+  
+  const consigneeName = gTagVal(block, 'CONSIGNEENAME');
+  if (!shipTo.name && consigneeName) shipTo.name = consigneeName;
+  
+  const deliveryName = gTagVal(block, 'DELIVERYNAME');
+  if (!shipTo.name && deliveryName) shipTo.name = deliveryName;
+  
+  const partyShippingName = gTagVal(block, 'PARTYSHIPPINGNAME');
+  if (!shipTo.name && partyShippingName) shipTo.name = partyShippingName;
+  
+  // Mailing name - SHIP TO ONLY
+  const shipToMailingName = gTagVal(block, 'SHIPTOMAILINGNAME');
+  if (shipToMailingName) shipTo.mailingName = shipToMailingName;
+  
+  const consigneeMailingName = gTagVal(block, 'CONSIGNEEMAILINGNAME');
+  if (!shipTo.mailingName && consigneeMailingName) shipTo.mailingName = consigneeMailingName;
+  
+  // Address - SHIP TO ONLY
+  shipTo.address = extractShipToAddressOnly(block);
+  
+  // City - SHIP TO ONLY
+  const shipToCity = gTagVal(block, 'SHIPTOCITY');
+  if (shipToCity) shipTo.city = shipToCity;
+  
+  const consigneeCity = gTagVal(block, 'CONSIGNEECITY');
+  if (!shipTo.city && consigneeCity) shipTo.city = consigneeCity;
+  
+  // State - SHIP TO ONLY
+  const shipToState = gTagVal(block, 'SHIPTOSTATE');
+  if (shipToState) shipTo.state = shipToState;
+  
+  const consigneeState = gTagVal(block, 'CONSIGNEESTATE');
+  if (!shipTo.state && consigneeState) shipTo.state = consigneeState;
+  
+  // Country - SHIP TO ONLY
+  const shipToCountry = gTagVal(block, 'SHIPTOCOUNTRY');
+  if (shipToCountry) shipTo.country = shipToCountry;
+  
+  const consigneeCountry = gTagVal(block, 'CONSIGNEECOUNTRY');
+  if (!shipTo.country && consigneeCountry) shipTo.country = consigneeCountry;
+  
+  // Pincode - SHIP TO ONLY
+  const shipToPincode = gTagVal(block, 'SHIPTOPINCODE');
+  if (shipToPincode) shipTo.pincode = shipToPincode;
+  
+  const consigneePincode = gTagVal(block, 'CONSIGNEEPINCODE');
+  if (!shipTo.pincode && consigneePincode) shipTo.pincode = consigneePincode;
+  
+  // GSTIN - SHIP TO ONLY
+  const shipToGstin = gTagVal(block, 'SHIPTOGSTIN');
+  if (shipToGstin) shipTo.gstin = shipToGstin;
+  
+  const consigneeGstin = gTagVal(block, 'CONSIGNEEGSTIN');
+  if (!shipTo.gstin && consigneeGstin) shipTo.gstin = consigneeGstin;
+  
+  return shipTo;
+}
+
+// Wrapper function that uses the completely separate mappers
+function extractBillShipFromRaw(block) {
+  const billTo = mapBillToFromRaw(block);
+  const shipTo = mapShipToFromRaw(block);
+  return { billTo, shipTo };
 }
 
 // ── Regex-based raw XML inventory/ledger entry extraction (mirrors tallySyncStream approach) ──
-// Returns a Map keyed by voucherNumber (or GUID) → { inventoryEntries, ledgerEntries }
+// Returns a Map keyed by voucherNumber (or GUID) → { inventoryEntries, ledgerEntries, billTo, shipTo }
 function extractEntriesFromRawXml(xml) {
-  const result = new Map(); // key: guid → { inventoryEntries, ledgerEntries }
+  const result = new Map(); // key: guid → { inventoryEntries, ledgerEntries, billTo, shipTo }
 
   // Split XML into per-voucher blocks.
   // Collection XML structure: <VOUCHER REMOTEID="..." VCHTYPE="..."> (always has attributes)
@@ -1012,6 +1653,14 @@ function extractEntriesFromRawXml(xml) {
     }
   }
   LOG(`[extractEntriesFromRawXml] Extracted ${blocks.length} voucher blocks (nesting-aware)`);
+
+  // Log first 3 voucher blocks for inspection to analyze Bill To/Ship To structure
+  if (blocks.length > 0) {
+    LOG(`[extractEntriesFromRawXml] First ${Math.min(3, blocks.length)} voucher blocks for inspection:`);
+    blocks.slice(0, 3).forEach((block, index) => {
+      LOG(`[Voucher Block ${index + 1}]: ${JSON.stringify(block)}`);
+    });
+  }
 
   for (const block of blocks) {
     const guid = gTagVal(block, 'GUID');
@@ -1068,7 +1717,8 @@ function extractEntriesFromRawXml(xml) {
       ie.push({ stockItemName: sn, qty, rate, amount: amt, taxEntries: itemTaxEntries });
     }
 
-    result.set(key, { inventoryEntries: ie, ledgerEntries: le });
+    const { billTo, shipTo } = extractBillShipFromRaw(block);
+    result.set(key, { inventoryEntries: ie, ledgerEntries: le, billTo, shipTo });
   }
 
   LOG(`[extractEntriesFromRawXml] Extracted entries for ${result.size} voucher blocks`);
@@ -1152,7 +1802,7 @@ function parseVouchers(xml, voucherTypes) {
 
     LOG(`[parseVouchers] Total vouchers fetched from Tally: ${voucherList.length}`);
     if (voucherList.length > 0) {
-      LOG(`[parseVouchers] First parsed record: ${JSON.stringify(voucherList[0]).slice(0, 500)}`);
+      LOG(`[parseVouchers] First parsed record: ${JSON.stringify(voucherList[0], null, 2)}`);
     }
 
     // Log ALL voucher type names coming from Tally — critical for diagnosing custom type names
@@ -1192,6 +1842,71 @@ function parseVouchers(xml, voucherTypes) {
       const narration = getSafeValue(voucher, 'NARRATION');
       const partyGstin = getSafeValue(voucher, 'PARTYGSTIN');
       const placeOfSupply = getSafeValue(voucher, 'PLACEOFSUPPLY');
+
+      // E-invoice fields
+      const irn = getSafeValue(voucher, 'IRN') || getSafeValue(voucher, 'EINVOICEIRN');
+      const ackNo = getSafeValue(voucher, 'ACKNO') || getSafeValue(voucher, 'EINVOICEACKNO');
+      const rawAckDate = getSafeValue(voucher, 'ACKDATE') || getSafeValue(voucher, 'EINVOICEACKDATE');
+      let ackDate = null;
+      if (rawAckDate && rawAckDate.length === 8 && /^\d{8}$/.test(rawAckDate)) {
+        ackDate = new Date(`${rawAckDate.slice(0,4)}-${rawAckDate.slice(4,6)}-${rawAckDate.slice(6,8)}`);
+        if (isNaN(ackDate.getTime())) ackDate = null;
+      }
+
+      // Delivery & reference fields
+      const deliveryNote = getSafeValue(voucher, 'DELIVERYNOTE') || getSafeValue(voucher, 'DELIVERYNOTE');
+      const referenceNo = getSafeValue(voucher, 'REFERENCENO') || getSafeValue(voucher, 'REFERENCE');
+      const rawReferenceDate = getSafeValue(voucher, 'REFERENCEDATE');
+      let referenceDate = null;
+      if (rawReferenceDate && rawReferenceDate.length === 8 && /^\d{8}$/.test(rawReferenceDate)) {
+        referenceDate = new Date(`${rawReferenceDate.slice(0,4)}-${rawReferenceDate.slice(4,6)}-${rawReferenceDate.slice(6,8)}`);
+        if (isNaN(referenceDate.getTime())) referenceDate = null;
+      }
+      const buyersOrderNo = getSafeValue(voucher, 'ORDERNO') || getSafeValue(voucher, 'BUYERORDERNO') || getSafeValue(voucher, 'PURCHASEORDERNO');
+      const rawBuyersOrderDate = getSafeValue(voucher, 'ORDERDATE') || getSafeValue(voucher, 'BUYERORDERDATE') || getSafeValue(voucher, 'PURCHASEORDERDATE');
+      let buyersOrderDate = null;
+      if (rawBuyersOrderDate && rawBuyersOrderDate.length === 8 && /^\d{8}$/.test(rawBuyersOrderDate)) {
+        buyersOrderDate = new Date(`${rawBuyersOrderDate.slice(0,4)}-${rawBuyersOrderDate.slice(4,6)}-${rawBuyersOrderDate.slice(6,8)}`);
+        if (isNaN(buyersOrderDate.getTime())) buyersOrderDate = null;
+      }
+      const dispatchDocNo = getSafeValue(voucher, 'DISPATCHDOCNO') || getSafeValue(voucher, 'DISPATCHDOCUMENTNO') || getSafeValue(voucher, 'LRNO');
+      const dispatchedThrough = getSafeValue(voucher, 'DISPATCHEDTHROUGH') || getSafeValue(voucher, 'TRANSPORT') || getSafeValue(voucher, 'TRANSPORTERNAME');
+      const destination = getSafeValue(voucher, 'DESTINATION');
+      const billOfLadingNo = getSafeValue(voucher, 'BILLOFLADINGNO') || getSafeValue(voucher, 'LRNO');
+      const motorVehicleNo = getSafeValue(voucher, 'VEHICLENO') || getSafeValue(voucher, 'MOTORVEHICLENO');
+      const termsOfDelivery = getSafeValue(voucher, 'TERMSOFDELIVERY') || getSafeValue(voucher, 'DELIVERYTERMS');
+
+      // Log voucher to see all available fields
+      LOG('Parsing voucher with fields:', Object.keys(voucher));
+
+      // ── Get regex-extracted entries FIRST (primary — bypasses fast-xml-parser dot-tag issues) ──
+      const rawData = rawEntryMap.get(guid) || rawEntryMap.get(voucherNumber) || null;
+      
+      // Get Bill To and Ship To from separate map functions - NO CROSS-FALLBACKS
+      const parsedBillTo = mapBillToFromParsed(voucher);
+      const parsedShipTo = mapShipToFromParsed(voucher);
+      
+      // Bill To info: raw-extracted first, else parsed - NO SHIP TO FALLBACK
+      const billToName = rawData?.billTo?.name || parsedBillTo.name;
+      const billToMailingName = rawData?.billTo?.mailingName || parsedBillTo.mailingName;
+      const billToAddress = rawData?.billTo?.address || parsedBillTo.address;
+      const billToCity = rawData?.billTo?.city || parsedBillTo.city;
+      const billToState = rawData?.billTo?.state || parsedBillTo.state;
+      const billToCountry = rawData?.billTo?.country || parsedBillTo.country;
+      const billToPincode = rawData?.billTo?.pincode || parsedBillTo.pincode;
+      const billToGST = rawData?.billTo?.gstin || parsedBillTo.gstin;
+      const billToGstRegType = rawData?.billTo?.gstRegType || parsedBillTo.gstRegType;
+      
+      // Ship To info: raw-extracted first, else parsed - NO BILL TO FALLBACK
+      const shipToName = rawData?.shipTo?.name || parsedShipTo.name;
+      const shipToMailingName = rawData?.shipTo?.mailingName || parsedShipTo.mailingName;
+      const shipToAddress = rawData?.shipTo?.address || parsedShipTo.address;
+      const shipToCity = rawData?.shipTo?.city || parsedShipTo.city;
+      const shipToState = rawData?.shipTo?.state || parsedShipTo.state;
+      const shipToCountry = rawData?.shipTo?.country || parsedShipTo.country;
+      const shipToPincode = rawData?.shipTo?.pincode || parsedShipTo.pincode;
+      const shipToGST = rawData?.shipTo?.gstin || parsedShipTo.gstin;
+      
       // DATE format: YYYYMMDD (e.g. 20260401). Null-safe — skip if date invalid
       let vDate;
       if (rawDate && rawDate.length === 8 && /^\d{8}$/.test(rawDate)) {
@@ -1214,9 +1929,6 @@ function parseVouchers(xml, voucherTypes) {
         const n = parseFloat(s);
         return isNaN(n) ? 0 : Math.abs(n);
       };
-
-      // ── Get regex-extracted entries (primary — bypasses fast-xml-parser dot-tag issues) ──
-      const rawData = rawEntryMap.get(guid) || rawEntryMap.get(voucherNumber) || null;
 
       // ── Parse ALLLEDGERENTRIES.LIST / LEDGERENTRIES.LIST (party + tax lines) ─────────────
       // Prefer regex-extracted data; fall back to XML-parsed data
@@ -1295,21 +2007,35 @@ function parseVouchers(xml, voucherTypes) {
       });
 
       // ── Amount calculation ────────────────────────────────────────────────
-      // Priority 1: inventory items exist → subtotal + tax ledger lines
+      // Priority 1: inventory items exist → subtotal + tax ledger lines + freight/transportation + round-off
       // Priority 2: ledger entries only (payment/receipt/journal)
       // Priority 3: top-level AMOUNT field
       let subtotal = 0;
       let taxTotal = 0;
       let amount   = 0;
 
+      // Identify freight/transportation/delivery/cartage/shipping ledger entries
+      const isFreightEntry = (le) => {
+        const name = le.ledgerName.toLowerCase();
+        return name.includes('freight') || 
+               name.includes('transport') || 
+               name.includes('delivery') || 
+               name.includes('cartage') || 
+               name.includes('shipping');
+      };
+
       if (inventoryEntries.length > 0) {
         subtotal = inventoryEntries.reduce((s, ie) => s + ie.amount, 0);
         taxTotal = taxLines.reduce((s, le) => s + Math.abs(le.amount), 0);
-        // Also catch round-off ledger entry
+        // Catch round-off ledger entry
         const roundOff = ledgerEntries
           .filter(le => le.ledgerName.toLowerCase().includes('round'))
           .reduce((s, le) => s + Math.abs(le.amount), 0);
-        amount = subtotal + taxTotal + roundOff;
+        // Catch freight/transportation charges
+        const freightTotal = ledgerEntries
+          .filter(le => isFreightEntry(le))
+          .reduce((s, le) => s + Math.abs(le.amount), 0);
+        amount = subtotal + taxTotal + roundOff + freightTotal;
       } else if (ledgerEntries.length > 0) {
         amount = Math.max(...ledgerEntries.map(le => Math.abs(le.amount)));
         if (!isFinite(amount)) amount = 0;
@@ -1332,10 +2058,39 @@ function parseVouchers(xml, voucherTypes) {
         partyName,
         partyGstin,
         placeOfSupply,
+        irn,
+        ackNo,
+        ackDate,
+        deliveryNote,
+        referenceNo,
+        referenceDate,
+        buyersOrderNo,
+        buyersOrderDate,
+        dispatchDocNo,
+        dispatchedThrough,
+        destination,
+        billOfLadingNo,
+        motorVehicleNo,
+        termsOfDelivery,
+        billToName,
+        billToMailingName,
+        billToAddress,
+        billToCity,
+        billToState,
+        billToCountry,
+        billToGST,
+        billToGstRegType,
+        shipToName,
+        shipToMailingName,
+        shipToAddress,
+        shipToCity,
+        shipToState,
+        shipToCountry,
+        shipToGST,
         amount,
         subtotal,
         taxTotal,
-        taxLines,              // [{ledgerName, amount}] — CGST/SGST/IGST lines
+        taxLines,            // [{ledgerName, amount}] — CGST/SGST/IGST lines
         narration,
         vDate,
         ledgerEntries,
@@ -1410,7 +2165,7 @@ function vouchersToInvoiceOps(vouchers) {
       .reduce((s, t) => s + Math.abs(t.amount), 0);
 
     // Map inventory entries → invoice items[]
-    const items = (v.inventoryEntries || []).map(ie => {
+    const items = (v.inventoryEntries || []).map((ie, index) => {
       const basic    = ie.amount || (ie.qty * ie.rate);
       // Item-level tax from ACCOUNTINGALLOCATIONS.LIST inside inventory entry
       const itemCgst = (ie.taxEntries || [])
@@ -1423,7 +2178,8 @@ function vouchersToInvoiceOps(vouchers) {
         .filter(t => t.ledgerName.toLowerCase().includes('igst'))
         .reduce((s, t) => s + t.amount, 0);
       const taxAmount = itemCgst + itemSgst + itemIgst;
-      const taxRate   = basic > 0 ? Math.round((taxAmount / basic) * 100) : 0;
+      // Use extractGstRate instead of mathematical calculation!
+      const taxRate = extractGstRate(v, v.inventoryEntries && v.inventoryEntries[index] ? v.inventoryEntries[index] : null, v.taxLines || []);
 
       return {
         description: ie.stockItemName,
@@ -1447,19 +2203,22 @@ function vouchersToInvoiceOps(vouchers) {
     const totalItemTax = items.reduce((s, it) => s + it.taxAmount, 0);
     if (totalItemTax === 0 && (cgstAmt || sgstAmt || igstAmt) && items.length > 0) {
       const voucherTax = cgstAmt + sgstAmt + igstAmt;
-      items.forEach(it => {
+      const voucherGstRate = extractGstRate(v, null, v.taxLines || []);
+      items.forEach((it) => {
         const share = items.length > 0 ? voucherTax / items.length : 0;
         it.cgst = cgstAmt / items.length;
         it.sgst = sgstAmt / items.length;
         it.igst = igstAmt / items.length;
         it.taxAmount = share;
         it.total     = it.basic + share;
-        it.taxRate   = it.basic > 0 ? Math.round((share / it.basic) * 100) : 0;
+        // Use only extracted GST rate, never calculate from amounts
+        it.taxRate   = voucherGstRate;
       });
     }
 
     const subtotal   = v.subtotal || items.reduce((s, it) => s + it.basic, 0);
     const totalTax   = v.taxTotal || cgstAmt + sgstAmt + igstAmt;
+    // Use the full amount from parseVouchers which already includes freight/round-off
     const grandTotal = v.amount   || subtotal + totalTax;
 
     return {
@@ -1467,10 +2226,25 @@ function vouchersToInvoiceOps(vouchers) {
         filter: { tallyGuid: v.guid },
         update: {
           $set: {
-            tallyGuid:    v.guid,
-            tallyAlterId: v.alterId,
-            partyName:    safePartyName,
-            partyGST:     v.partyGstin || '',
+            tallyGuid:            v.guid,
+            tallyAlterId:         v.alterId,
+            partyName:            safePartyName,
+            partyGST:             v.partyGstin || '',
+            billToName:           v.billToName || '',
+            billToMailingName:    v.billToMailingName || '',
+            billToAddress:        v.billToAddress || '',
+            billToCity:           v.billToCity || '',
+            billToState:          v.billToState || '',
+            billToCountry:        v.billToCountry || '',
+            billToGST:            v.billToGST || '',
+            billToGstRegType:     v.billToGstRegType || '',
+            shipToName:           v.shipToName || '',
+            shipToMailingName:    v.shipToMailingName || '',
+            shipToAddress:        v.shipToAddress || '',
+            shipToCity:           v.shipToCity || '',
+            shipToState:          v.shipToState || '',
+            shipToCountry:        v.shipToCountry || '',
+            shipToGST:            v.shipToGST || '',
             grandTotal,
             subtotal,
             totalTax,
@@ -1523,6 +2297,35 @@ function vouchersToTallyVoucherOps(vouchers) {
       partyLedgerName: safePartyName,
       partyGstin:      v.partyGstin  || '',
       placeOfSupply:   v.placeOfSupply || '',
+      irn:             v.irn || '',
+      ackNo:           v.ackNo || '',
+      ackDate:         v.ackDate || null,
+      deliveryNote:    v.deliveryNote || '',
+      referenceNo:     v.referenceNo || '',
+      referenceDate:   v.referenceDate || null,
+      buyersOrderNo:   v.buyersOrderNo || '',
+      buyersOrderDate: v.buyersOrderDate || null,
+      dispatchDocNo:   v.dispatchDocNo || '',
+      dispatchedThrough: v.dispatchedThrough || '',
+      destination:     v.destination || '',
+      billOfLadingNo:  v.billOfLadingNo || '',
+      motorVehicleNo:  v.motorVehicleNo || '',
+      termsOfDelivery: v.termsOfDelivery || '',
+      billToName:      v.billToName || '',
+      billToMailingName: v.billToMailingName || '',
+      billToAddress:   v.billToAddress || '',
+      billToCity:      v.billToCity || '',
+      billToState:     v.billToState || '',
+      billToCountry:   v.billToCountry || '',
+      billToGST:       v.billToGST || '',
+      billToGstRegType: v.billToGstRegType || '',
+      shipToName:      v.shipToName || '',
+      shipToMailingName: v.shipToMailingName || '',
+      shipToAddress:   v.shipToAddress || '',
+      shipToCity:      v.shipToCity || '',
+      shipToState:     v.shipToState || '',
+      shipToCountry:   v.shipToCountry || '',
+      shipToGST:       v.shipToGST || '',
       narration:       v.narration,
       voucherDate:     v.vDate,
       source:          'Tally',

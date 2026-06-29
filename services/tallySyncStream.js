@@ -427,6 +427,11 @@ async function syncVouchers(url, cfg, onProgress) {
       const vDate   = rawDate.length === 8
         ? new Date(`${rawDate.slice(0,4)}-${rawDate.slice(4,6)}-${rawDate.slice(6,8)}`)
         : new Date();
+      
+      // Log all tags present in voucher to debug ship-to missing issue
+      if (vNo && vNo.includes('SCI01087')) {
+        LOG(`Voucher ${vNo} tags:`, block.match(/<([A-Z0-9_.]+)/gi));
+      }
 
       try {
         // Parse ledger entries
@@ -475,6 +480,38 @@ async function syncVouchers(url, cfg, onProgress) {
         }
         const finalAmount = computedAmount > 0 ? computedAmount : Math.abs(parseFloat(gVal(block, 'AMOUNT')) || 0);
 
+        // ── Bill To / Ship To extraction ────────────────────────────────────
+        // Bill To fields
+        const billToName = gVal(block, 'BASICBUYERNAME') || gVal(block, 'BUYERNAME') || gVal(block, 'BILLTOLEDGERNAME') || gVal(block, 'BILLTONAME') || party;
+        const billToMailingName = gVal(block, 'BILLTOMAILINGNAME') || gVal(block, 'BUYERMAILINGNAME') || gVal(block, 'PARTYMAILINGNAME');
+        const billToAddressLines = [...block.matchAll(/<BASICBUYERADDRESS>([\s\S]*?)<\/BASICBUYERADDRESS>/gi), ...block.matchAll(/<BUYERADDRESS>([\s\S]*?)<\/BUYERADDRESS>/gi), ...block.matchAll(/<BILLTOADDRESS>([\s\S]*?)<\/BILLTOADDRESS>/gi)].map(a => decodeXml(a[1].trim())).filter(Boolean);
+        const billToAddress = billToAddressLines.join(', ');
+        const billToCity = gVal(block, 'BILLTOCITY') || gVal(block, 'BUYERCITY');
+        const billToState = gVal(block, 'BILLTOSTATE') || gVal(block, 'BUYERSTATE');
+        const billToCountry = gVal(block, 'BILLTOCOUNTRY') || gVal(block, 'BUYERCOUNTRY');
+        const billToGST = gVal(block, 'BILLTOGSTIN') || gVal(block, 'BUYERGSTIN') || gVal(block, 'PARTYGSTIN');
+        const billToGstRegType = gVal(block, 'BILLTOGSTREGISTRATIONTYPE') || gVal(block, 'BUYERGSTREGISTRATIONTYPE') || gVal(block, 'GSTREGISTRATIONTYPE');
+
+        // Ship To / Consignee fields
+        const shipToName = gVal(block, 'PARTYSHIPPINGNAME') || gVal(block, 'BASICSHIPTO') || gVal(block, 'CONSIGNEENAME') || gVal(block, 'SHIPTONAME') || gVal(block, 'DELIVERYNAME');
+        const shipToMailingName = gVal(block, 'CONSIGNEEMAILINGNAME') || gVal(block, 'SHIPTOMAILINGNAME');
+        const shipToAddressLines = [...block.matchAll(/<PARTYSHIPPINGADDRESS>([\s\S]*?)<\/PARTYSHIPPINGADDRESS>/gi), ...block.matchAll(/<CONSIGNEEADDRESS>([\s\S]*?)<\/CONSIGNEEADDRESS>/gi), ...block.matchAll(/<SHIPTOADDRESS>([\s\S]*?)<\/SHIPTOADDRESS>/gi), ...block.matchAll(/<DELIVERYADDRESS>([\s\S]*?)<\/DELIVERYADDRESS>/gi)].map(a => decodeXml(a[1].trim())).filter(Boolean);
+        const shipToAddress = shipToAddressLines.join(', ');
+        const shipToCity = gVal(block, 'CONSIGNEECITY') || gVal(block, 'SHIPTOCITY');
+        const shipToState = gVal(block, 'CONSIGNEESTATENAME') || gVal(block, 'CONSIGNEESTATE') || gVal(block, 'SHIPTOSTATE');
+        const shipToCountry = gVal(block, 'CONSIGNEECOUNTRYNAME') || gVal(block, 'CONSIGNEECOUNTRY') || gVal(block, 'SHIPTOCOUNTRY');
+        const shipToGST = gVal(block, 'CONSIGNEEGSTIN') || gVal(block, 'SHIPTOGSTIN');
+
+        // Fallback: if no Ship To data, use Bill To
+        const hasAnyShipTo = shipToName || shipToAddress || shipToCity || shipToState || shipToCountry || shipToGST;
+        const finalShipToName = hasAnyShipTo ? shipToName : billToName;
+        const finalShipToMailingName = hasAnyShipTo ? shipToMailingName : billToMailingName;
+        const finalShipToAddress = hasAnyShipTo ? shipToAddress : billToAddress;
+        const finalShipToCity = hasAnyShipTo ? shipToCity : billToCity;
+        const finalShipToState = hasAnyShipTo ? shipToState : billToState;
+        const finalShipToCountry = hasAnyShipTo ? shipToCountry : billToCountry;
+        const finalShipToGST = hasAnyShipTo ? shipToGST : billToGST;
+
         const filter = guid ? { tallyGuid: guid } : (vNo ? { voucherNumber: vNo, voucherType: vtype } : null);
         if (!filter) continue;
 
@@ -493,6 +530,21 @@ async function syncVouchers(url, cfg, onProgress) {
               inventoryEntries: ie,
               source: 'Tally',
               syncedAt: new Date(),
+              billToName,
+              billToMailingName,
+              billToAddress,
+              billToCity,
+              billToState,
+              billToCountry,
+              billToGST,
+              billToGstRegType,
+              shipToName: finalShipToName,
+              shipToMailingName: finalShipToMailingName,
+              shipToAddress: finalShipToAddress,
+              shipToCity: finalShipToCity,
+              shipToState: finalShipToState,
+              shipToCountry: finalShipToCountry,
+              shipToGST: finalShipToGST,
               ...(guid    ? { tallyGuid: guid }      : {}),
               ...(alterId ? { tallyAlterId: alterId } : {}),
             },
@@ -508,6 +560,21 @@ async function syncVouchers(url, cfg, onProgress) {
               $set: {
                 partyName: party,
                 grandTotal: finalAmount,
+                billToName,
+                billToMailingName,
+                billToAddress,
+                billToCity,
+                billToState,
+                billToCountry,
+                billToGST,
+                billToGstRegType,
+                shipToName: finalShipToName,
+                shipToMailingName: finalShipToMailingName,
+                shipToAddress: finalShipToAddress,
+                shipToCity: finalShipToCity,
+                shipToState: finalShipToState,
+                shipToCountry: finalShipToCountry,
+                shipToGST: finalShipToGST,
                 ...(guid    ? { tallyGuid: guid }      : {}),
                 ...(alterId ? { tallyAlterId: alterId } : {}),
               },
@@ -515,7 +582,7 @@ async function syncVouchers(url, cfg, onProgress) {
                 invoiceNo: vNo,
                 partyName: party,
                 invoiceDate: vDate,
-                grandTotal: amount,
+                grandTotal: finalAmount,
                 source: 'Tally',
                 status: 'Sent',
                 invoiceType: 'single',

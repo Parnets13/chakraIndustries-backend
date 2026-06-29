@@ -1,4 +1,5 @@
 import express from 'express';
+import http from 'http';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
@@ -74,6 +75,7 @@ import lossTrackingRoutes from './routes/lossTrackingRoutes.js';
 import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
 import brsRoutes from './routes/brsRoutes.js';
 import financeRoutes from './routes/financeRoutes.js';
+import { initConnectorServer, getConnectorStatuses } from './services/tallyConnectorServer.js';
 
 // Ensure new models are registered
 import './models/Warehouse.js';
@@ -302,8 +304,13 @@ const PORT = process.env.PORT || 5001;
 // Start server immediately, connect to MongoDB in background
 connectDB(); 
 
-app.listen(PORT, () => {
+// Create HTTP server and attach Socket.IO
+const httpServer = http.createServer(app);
+initConnectorServer(httpServer);
+
+httpServer.listen(PORT, () => {
   console.log(`✓ Server running on port ${PORT}`);
+  console.log(`✓ Connector Socket.IO server ready`);
   startTallyScheduler();
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {

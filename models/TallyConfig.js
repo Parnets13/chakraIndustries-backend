@@ -37,6 +37,11 @@ const tallyConfigSchema = new mongoose.Schema({
   lastImportAt:     { type: Date },
   lastExportAt:     { type: Date },
   updatedBy:        { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  
+  // Connector settings
+  useConnector:    { type: Boolean, default: false },
+  connectorId:     { type: String, default: '' },
+  connectorSecret: { type: String, default: '' },
 }, { timestamps: true });
 
 export default mongoose.model('TallyConfig', tallyConfigSchema);

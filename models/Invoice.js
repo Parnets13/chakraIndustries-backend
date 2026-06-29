@@ -34,13 +34,23 @@ const invoiceSchema = new mongoose.Schema({
   partyPhone:   { type: String, default: '' },
 
   // Bill To (explicit — for GRT format where bill-to differs from ship-to)
-  billToName:    { type: String, default: '' },
-  billToAddress: { type: String, default: '' },
-  billToGST:     { type: String, default: '' },
+  billToName:           { type: String, default: '' },
+  billToMailingName:    { type: String, default: '' },
+  billToAddress:        { type: String, default: '' },
+  billToCity:           { type: String, default: '' },
+  billToState:          { type: String, default: '' },
+  billToCountry:        { type: String, default: '' },
+  billToGST:            { type: String, default: '' },
+  billToGstRegType:     { type: String, default: '' },
 
   // Ship To
-  shipToName:    { type: String, default: '' },
-  shipToAddress: { type: String, default: '' },
+  shipToName:           { type: String, default: '' },
+  shipToMailingName:    { type: String, default: '' },
+  shipToAddress:        { type: String, default: '' },
+  shipToCity:           { type: String, default: '' },
+  shipToState:          { type: String, default: '' },
+  shipToCountry:        { type: String, default: '' },
+  shipToGST:            { type: String, default: '' },
 
   // Company (billed from)
   companyName:  { type: String, default: 'Sri Chakra Industries' },

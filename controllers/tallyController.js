@@ -1256,6 +1256,15 @@ export const getSalesInvoices = async (req, res) => {
         .filter(t => t.ledgerName?.toLowerCase().includes('igst'))
         .reduce((s, t) => s + Math.abs(t.amount), 0);
 
+      // Helper to calculate tax rate for items
+      const calculateItemTaxRate = (item) => {
+        if (!item.taxEntries || item.taxEntries.length === 0 || !item.amount || item.amount <= 0) {
+          return null;
+        }
+        const totalItemTax = item.taxEntries.reduce((sum, entry) => sum + entry.amount, 0);
+        return (totalItemTax / item.amount) * 100;
+      };
+
       return {
         id:            v._id,
         voucherNumber: v.voucherNumber,
@@ -1264,11 +1273,16 @@ export const getSalesInvoices = async (req, res) => {
         partyGstin:    v.partyGstin || '',
         placeOfSupply: v.placeOfSupply || '',
         narration:     v.narration || '',
-        items: (v.inventoryEntries || []).map(ie => ({
-          name:   ie.stockItemName,
-          qty:    ie.qty,
-          rate:   ie.rate,
-          amount: ie.amount,
+        billToName:    v.billToName || '',
+        billToAddress: v.billToAddress || '',
+        billToGST:     v.billToGST || '',
+        shipToName:    v.shipToName || '',
+        shipToAddress: v.shipToAddress || '',
+        ledgerEntries: v.ledgerEntries || [],
+        taxLines:      v.taxLines || [],
+        inventoryEntries: (v.inventoryEntries || []).map(ie => ({
+          ...ie,
+          taxRate: calculateItemTaxRate(ie),
         })),
         subtotal,
         cgst,
