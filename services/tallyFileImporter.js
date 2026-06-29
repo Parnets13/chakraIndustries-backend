@@ -8,7 +8,6 @@ import Invoice from '../models/Invoice.js';
 import TallyVoucher from '../models/TallyVoucher.js';
 import TallyConfig from '../models/TallyConfig.js';
 import TallySyncLog from '../models/TallySyncLog.js';
-import chokidar from 'chokidar';
 
 const EXPORT_DIR = 'C:\\TallyExport';
 
@@ -499,13 +498,24 @@ export async function importFromFiles() {
 
 let _watcher = null;
 
-export function startFileWatcher() {
+export async function startFileWatcher() {
   if (_watcher) {
     return;
   }
 
+  const LOG = (msg) => console.log(`[TallyFileWatcher] ${msg}`);
+
   // Ensure directory exists
-  fs.mkdir(EXPORT_DIR, { recursive: true }).catch(() => {});
+  await fs.mkdir(EXPORT_DIR, { recursive: true }).catch(() => {});
+
+  // Dynamically import chokidar only if needed
+  let chokidar;
+  try {
+    chokidar = (await import('chokidar')).default;
+  } catch (err) {
+    LOG('chokidar not available, file watcher not started');
+    return;
+  }
 
   _watcher = chokidar.watch(EXPORT_DIR, {
     ignored: /(^|[\/\\])\../, // ignore dotfiles
@@ -515,8 +525,6 @@ export function startFileWatcher() {
       pollInterval: 100
     }
   });
-
-  const LOG = (msg) => console.log(`[TallyFileWatcher] ${msg}`);
 
   let _debounceTimer = null;
 

@@ -68,12 +68,14 @@ async function syncTransactions() {
 
 export function startTallyScheduler() {
   // Start file watcher for master data (Stock Items, Ledgers)
-  try {
-    startFileWatcher();
-    LOG('Started file watcher for master data exports');
-  } catch (err) {
-    ERR('Failed to start file watcher', err);
-  }
+  (async () => {
+    try {
+      await startFileWatcher();
+      LOG('Started file watcher for master data exports');
+    } catch (err) {
+      ERR('Failed to start file watcher', err);
+    }
+  })();
 
   // Check config every 60 seconds and adjust timer if interval changed
   setInterval(async () => {
