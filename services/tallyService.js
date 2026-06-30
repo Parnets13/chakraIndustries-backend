@@ -31,7 +31,7 @@ const ERR = (...a) => console.error('[Tally ERROR]', ...a);
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 
 async function getConfig() {
-  let cfg = await TallyConfig.findOne();
+  let cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
   if (!cfg) cfg = await TallyConfig.create({});
   return cfg;
 }
@@ -248,7 +248,7 @@ ${stockItemsXml}${extraItemsXml}${systemLedgersXml}${vendorLedgersXml}${customer
 
     await writeLog({ syncId, type:'Item Master', direction:'ERP → Tally', status: result.ok?'Success':'Failed', duration, error:result.error, records, triggeredBy });
     if (result.ok) {
-      await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{upsert:true});
+      await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{sort:{_id:1},upsert:true});
       await AccountsLedger.updateMany({ isActive:true }, { syncedWithTally:true, lastTallySync:new Date() });
       LOG(`Masters synced OK — ${records} records in ${duration}`);
     }
@@ -337,7 +337,7 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type:'Purchase', direction:'ERP → Tally', status:result.ok?'Success':'Failed', duration, error:result.error, records, triggeredBy });
     if (result.ok) {
-      await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{upsert:true});
+      await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{sort:{_id:1},upsert:true});
       await PurchaseOrder.updateMany({ _id:{$in:pos.map(p=>p._id)} }, { tallySync:true, tallySyncAt:new Date() });
     }
     return { ok:result.ok, records, error:result.error };
@@ -413,7 +413,7 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type:'Sales', direction:'ERP → Tally', status:result.ok?'Success':'Failed', duration, error:result.error, records, triggeredBy });
     if (result.ok) {
-      await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{upsert:true});
+      await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{sort:{_id:1},upsert:true});
       await Invoice.updateMany({ _id:{$in:invoices.map(i=>i._id)} }, { tallySync:true, tallySyncAt:new Date() });
     }
     return { ok:result.ok, records, error:result.error };
@@ -624,7 +624,7 @@ export async function pullItemsFromTally(cfg, triggeredBy) {
     if (ops.length) await ItemMaster.bulkWrite(ops, { ordered:false });
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type:'Item Master', direction:'Tally → ERP', status:'Success', duration, records:ops.length, triggeredBy });
-    await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{upsert:true});
+    await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{sort:{_id:1},upsert:true});
     LOG(`Pulled ${ops.length} items in ${duration}`);
     return { ok:true, records:ops.length };
   } catch (err) {
@@ -803,7 +803,7 @@ export async function pullLedgersFromTally(cfg, triggeredBy) {
     const records = ledgerOps.length;
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type:'Ledger', direction:'Tally → ERP', status:'Success', duration, records, triggeredBy });
-    await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{upsert:true});
+    await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{sort:{_id:1},upsert:true});
     LOG(`Pulled ${records} ledgers (${vendorOps.length} vendors, ${clientOps.length} clients) in ${duration}`);
     return { ok:true, records };
   } catch (err) {
@@ -854,7 +854,7 @@ ${exportVars(`<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><VOUCHERTYPENAME>${v
     if (ops.length) await Invoice.bulkWrite(ops, { ordered:false });
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type:logType, direction:'Tally → ERP', status:'Success', duration, records:ops.length, triggeredBy });
-    await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{upsert:true});
+    await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{sort:{_id:1},upsert:true});
     return { ok:true, records:ops.length };
   } catch (err) {
     ERR(`pullVouchersFromTally(${voucherType}):`, err.message);
@@ -944,7 +944,7 @@ ${exportVars(`<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><VOUCHERTYPENAME>${v
     if (ops.length) await TallyVoucher.bulkWrite(ops, { ordered:false });
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type:voucherType, direction:'Tally → ERP', status:'Success', duration, records:ops.length, triggeredBy });
-    await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{upsert:true});
+    await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{sort:{_id:1},upsert:true});
     LOG(`Pulled ${ops.length} ${voucherType} vouchers in ${duration}`);
     return { ok:true, records:ops.length };
   } catch (err) {
@@ -976,10 +976,10 @@ export async function runFullSync(triggeredBy) {
   const check = await checkTallyReachable(cfg);
   if (!check.reachable) {
     ERR('Tally not reachable:', check.error);
-    await TallyConfig.findOneAndUpdate({},{connectionStatus:'Disconnected'},{upsert:true});
+    await TallyConfig.findOneAndUpdate({},{connectionStatus:'Disconnected'},{sort:{_id:1},upsert:true});
     return { ok:false, offline:true, records:0, error:check.error };
   }
-  await TallyConfig.findOneAndUpdate({},{connectionStatus:'Connected'},{upsert:true});
+  await TallyConfig.findOneAndUpdate({},{connectionStatus:'Connected'},{sort:{_id:1},upsert:true});
 
   const direction = cfg.syncDirection || 'Bi-directional';
   const prefs     = cfg.syncPrefs || {};
@@ -1022,10 +1022,10 @@ export async function runTargetedSync(type, triggeredBy) {
   const cfg   = await getConfig();
   const check = await checkTallyReachable(cfg);
   if (!check.reachable) {
-    await TallyConfig.findOneAndUpdate({},{connectionStatus:'Disconnected'},{upsert:true});
+    await TallyConfig.findOneAndUpdate({},{connectionStatus:'Disconnected'},{sort:{_id:1},upsert:true});
     return { ok:false, offline:true, records:0, error:check.error };
   }
-  await TallyConfig.findOneAndUpdate({},{connectionStatus:'Connected'},{upsert:true});
+  await TallyConfig.findOneAndUpdate({},{connectionStatus:'Connected'},{sort:{_id:1},upsert:true});
 
   const direction = cfg.syncDirection || 'Bi-directional';
   const pushOnly  = direction === 'ERP → Tally';

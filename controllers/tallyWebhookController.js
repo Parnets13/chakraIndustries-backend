@@ -51,7 +51,7 @@ export const tallyWebhook = async (req, res) => {
     // ── Auth check ─────────────────────────────────────────────────────────
     // Accepts secret from env (fast, no DB hit) OR DB config (legacy)
     const envSecret = (process.env.TALLY_WEBHOOK_SECRET || '').trim();
-    const cfg = await TallyConfig.findOne();
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
     const dbSecret = (cfg?.authType === 'API Key' && cfg?.apiKey) ? cfg.apiKey : '';
     const expectedSecret = envSecret || dbSecret;
 
@@ -280,7 +280,14 @@ export const tallyWebhook = async (req, res) => {
 
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type, direction:'Tally → ERP', status:'Success', duration, records });
-    await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{upsert:true});
+    await TallyConfig.findOneAndUpdate(
+  {},
+  { lastSyncAt: new Date() },
+  {
+    sort: { _id: 1 },
+    upsert: true
+  }
+);
     res.json({ success:true, message:`Webhook processed — ${records} records updated`, records });
   } catch (err) {
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;

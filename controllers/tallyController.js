@@ -60,7 +60,7 @@ async function authenticateSseRequest(req) {
 // ── Config ────────────────────────────────────────────────────────────────────
 export const getConfig = async (req, res) => {
   try {
-    let config = await TallyConfig.findOne();
+    let config = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
     if (!config) config = await TallyConfig.create({});
     res.json({ success: true, data: config });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -68,7 +68,7 @@ export const getConfig = async (req, res) => {
 
 export const saveConfig = async (req, res) => {
   try {
-    let config = await TallyConfig.findOne();
+    let config = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
     if (!config) config = new TallyConfig();
     Object.assign(config, req.body);
     config.updatedBy = req.user?._id;
@@ -137,7 +137,7 @@ export const getSyncStats = async (req, res) => {
       TallySyncLog.countDocuments({ createdAt: { $gte: today } }),
       TallySyncLog.countDocuments({ createdAt: { $gte: today }, status: 'Success' }),
       TallySyncLog.countDocuments({ createdAt: { $gte: today }, status: 'Failed' }),
-      TallyConfig.findOne(),
+      TallyConfig.findOne({}, null, { sort: { _id: 1 } }),
     ]);
 
     // Auto-probe connection if status is Unknown or last check was >5 min ago
@@ -478,7 +478,7 @@ export const importFromTallyStream = async (req, res) => {
     };
 
     try {
-      const cfg = await TallyConfig.findOne();
+      const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
       // In connector mode, tallyLocalUrl is not required — the connector handles routing.
       // In direct mode, tallyLocalUrl must be set.
       const hasConnection = cfg?.useConnector && cfg?.connectorId
@@ -630,7 +630,7 @@ export const importFromTallyStream = async (req, res) => {
         triggeredBy: user._id,
       }).catch(() => {});
 
-    await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date(), lastImportAt: new Date() }, { upsert: true });
+    await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date(), lastImportAt: new Date() }, { sort: { _id: 1 }, upsert: true });
 
     send({
       event: 'summary',
@@ -748,7 +748,7 @@ export const exportToTallyStream = async (req, res) => {
   };
 
   try {
-    const cfg = await TallyConfig.findOne();
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
     const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
     if (!cfg || !hasConnection) {
       send({ event: 'error', message: cfg?.useConnector
@@ -847,7 +847,7 @@ export const exportToTallyStream = async (req, res) => {
       triggeredBy: user._id,
     }).catch(() => {});
 
-    await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date(), lastExportAt: new Date() }, { upsert: true });
+    await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date(), lastExportAt: new Date() }, { sort: { _id: 1 }, upsert: true });
 
     send({
       event: 'summary',
@@ -896,7 +896,7 @@ export const importFromTally = async (req, res) => {
 export const exportToTally = async (req, res) => {
   try {
     const { type = 'Full' } = req.body;
-    const cfg = await TallyConfig.findOne();
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
     if (!cfg) return res.status(400).json({ success: false, message: 'Tally not configured' });
 
     const results = [];
@@ -928,7 +928,7 @@ export const exportToTally = async (req, res) => {
  */
 export const validateCompany = async (req, res) => {
   try {
-    const cfg = await TallyConfig.findOne();
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
     const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
     if (!cfg || !hasConnection) {
       return res.json({
@@ -970,7 +970,7 @@ export const fullExportToTallyStream = async (req, res) => {
   send({ event: 'start', message: 'Full Export to Tally started (ERP → Tally)', syncId, direction: 'ERP → Tally' });
 
   try {
-    const cfg = await TallyConfig.findOne();
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
     const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
     if (!cfg || !hasConnection) {
       send({ event: 'error', message: cfg?.useConnector
@@ -1041,7 +1041,7 @@ export const selectiveExportStream = async (req, res) => {
   }
 
   try {
-    const cfg = await TallyConfig.findOne();
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
     const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
     if (!cfg || !hasConnection) {
       send({ event: 'error', message: cfg?.useConnector
@@ -1189,7 +1189,7 @@ export const importSalesRegister = async (req, res) => {
       });
     }
 
-    const cfg = await TallyConfig.findOne();
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
     const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
     if (!cfg || !hasConnection) {
       return res.status(400).json({

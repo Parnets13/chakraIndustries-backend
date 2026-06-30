@@ -98,7 +98,7 @@ function releaseLock() {
 
 // === CONFIG HELPERS ===
 async function getCfg() {
-  let cfg = await TallyConfig.findOne();
+  let cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
   if (!cfg) cfg = await TallyConfig.create({});
   return cfg;
 }
@@ -311,11 +311,11 @@ export async function testTallyConnection() {
     const cfg = await getCfg();
     const check = await checkTallyReachable(cfg);
     if (check.reachable) {
-      await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Connected' }, { upsert: true });
+      await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Connected' }, { sort: { _id: 1 }, upsert: true });
       LOG('Health Check Success');
       return { status: 'Connected', error: null };
     } else {
-      await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Disconnected' }, { upsert: true });
+      await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Disconnected' }, { sort: { _id: 1 }, upsert: true });
       LOG('Health Check Failed');
       return { status: 'Disconnected', error: check.error };
     }
@@ -3188,7 +3188,7 @@ export async function pullEntityFromTally(entityType, options = {}) {
       const status = result.ok ? 'Success' : 'Failed';
       const duration = `${((Date.now() - start)/1000).toFixed(1)}s`;
       await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status, duration, error: result.error, records: result.records });
-      await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { upsert: true });
+      await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { sort: { _id: 1 }, upsert: true });
       releaseLock();
       await new Promise(r => setTimeout(r, 1000));
       return { ok: result.ok, records: result.records, usedChunks: false, created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, totalFound: result.totalFound };
@@ -3202,7 +3202,7 @@ export async function pullEntityFromTally(entityType, options = {}) {
       result = await tryFullFetch(cfg, state, entityType, timeout);
       if (result.ok) {
         await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status: 'Success', duration: `${((Date.now() - start)/1000).toFixed(1)}s`, records: result.records });
-        await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { upsert: true });
+        await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { sort: { _id: 1 }, upsert: true });
         releaseLock();
         await new Promise(r => setTimeout(r, 1000));
         return { ok: true, records: result.records, usedChunks: false, created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, totalFound: result.totalFound };
@@ -3214,7 +3214,7 @@ export async function pullEntityFromTally(entityType, options = {}) {
     const status = result.ok ? (result.failedChunks > 0 ? 'Partial' : 'Success') : 'Failed';
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status, duration, error: result.error, records: result.records });
-    await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { upsert: true });
+    await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { sort: { _id: 1 }, upsert: true });
     releaseLock();
     await new Promise(r => setTimeout(r, 1000));
     return { ok: result.ok, records: result.records, usedChunks: true, failedChunks: result.failedChunks, created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, totalFound: result.totalFound };
