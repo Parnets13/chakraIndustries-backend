@@ -136,9 +136,26 @@ export function initConnectorServer(httpServer) {
   return io;
 }
 
+// Wait up to waitMs for the connector to come back online (handles Render restart race)
+async function waitForConnector(connectorId, waitMs = 30000) {
+  const interval = 500;
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    const c = connectedConnectors.get(connectorId);
+    if (c && c.online) return c;
+    await new Promise(r => setTimeout(r, interval));
+  }
+  return null;
+}
+
 // Send XML request to specific connector
 export async function sendTallyRequest(connectorId, xml, timeoutMs = 60000) {
-  const connector = connectedConnectors.get(connectorId);
+  let connector = connectedConnectors.get(connectorId);
+  if (!connector || !connector.online) {
+    // Connector not in Map yet — could be a Render restart. Wait up to 30 s for reconnect.
+    console.warn(`[Connector] ${connectorId} not online — waiting up to 30s for reconnect...`);
+    connector = await waitForConnector(connectorId, 30000);
+  }
   if (!connector || !connector.online) {
     throw new Error(`Connector ${connectorId} is not online`);
   }
@@ -180,5 +197,5 @@ export function getConnectorStatuses() {
 // Check if connector is online
 export function isConnectorOnline(connectorId) {
   const connector = connectedConnectors.get(connectorId);
-  return connector && connector.online;
+  return !!(connector && connector.online);
 }

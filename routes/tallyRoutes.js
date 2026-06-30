@@ -104,6 +104,18 @@ router.get('/connectors/status',     protect, async (req, res) => {
 
 router.post('/connectors/generate-credentials', protect, async (req, res) => {
   try {
+    // If a connector is already registered via /api/connector/register, do NOT overwrite
+    // its connectorId/connectorSecret — doing so would break the existing connector's
+    // Socket.IO authentication on the next reconnect attempt.
+    const existing = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    if (existing?.connectorId && existing?.connectorSecret) {
+      return res.json({
+        success: true,
+        credentials: { connectorId: existing.connectorId, connectorSecret: existing.connectorSecret },
+        message: 'Returning existing connector credentials (connector already registered)',
+      });
+    }
+
     const connectorId = crypto.randomUUID();
     const connectorSecret = crypto.randomBytes(32).toString('hex');
     
@@ -111,7 +123,7 @@ router.post('/connectors/generate-credentials', protect, async (req, res) => {
     await TallyConfig.findOneAndUpdate(
       {},
       { connectorId, connectorSecret, useConnector: true },
-      { upsert: true, new: true }
+      { sort: { _id: 1 }, upsert: true, new: true }
     );
     
     res.json({
