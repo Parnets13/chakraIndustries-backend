@@ -479,8 +479,15 @@ export const importFromTallyStream = async (req, res) => {
 
     try {
       const cfg = await TallyConfig.findOne();
-      if (!cfg?.tallyLocalUrl) {
-        send({ event: 'error', message: 'Tally Local URL is not configured. Go to Configuration tab and set the Tally machine URL.' });
+      // In connector mode, tallyLocalUrl is not required — the connector handles routing.
+      // In direct mode, tallyLocalUrl must be set.
+      const hasConnection = cfg?.useConnector && cfg?.connectorId
+        ? true
+        : !!(cfg?.tallyLocalUrl);
+      if (!cfg || !hasConnection) {
+        send({ event: 'error', message: cfg?.useConnector
+          ? `Connector is enabled but connectorId is missing. Re-register the SriChakra Connector.`
+          : 'Tally Local URL is not configured. Go to Configuration tab and set the Tally machine URL, or enable Connector mode.' });
         return res.end();
       }
 
@@ -742,8 +749,11 @@ export const exportToTallyStream = async (req, res) => {
 
   try {
     const cfg = await TallyConfig.findOne();
-    if (!cfg?.tallyLocalUrl) {
-      send({ event: 'error', message: 'Tally Local URL is not configured. Go to Configuration tab first.' });
+    const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
+    if (!cfg || !hasConnection) {
+      send({ event: 'error', message: cfg?.useConnector
+        ? `Connector is enabled but connectorId is missing. Re-register the SriChakra Connector.`
+        : 'Tally Local URL is not configured. Go to Configuration tab first.' });
       return res.end();
     }
 
@@ -919,14 +929,17 @@ export const exportToTally = async (req, res) => {
 export const validateCompany = async (req, res) => {
   try {
     const cfg = await TallyConfig.findOne();
-    if (!cfg || !cfg.tallyLocalUrl) {
+    const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
+    if (!cfg || !hasConnection) {
       return res.json({
         success: true,
         data: {
           reachable: false,
           openCompany: null,
           companyMatch: false,
-          error: 'Tally Local URL is not configured. Go to Settings tab and set the Tally machine URL (e.g. http://localhost or http://192.168.1.10).',
+          error: cfg?.useConnector
+            ? `Connector is enabled but connectorId is missing. Re-register the SriChakra Connector.`
+            : 'Tally Local URL is not configured. Go to Settings tab and set the Tally machine URL (e.g. http://localhost or http://192.168.1.10).',
         },
       });
     }
@@ -958,8 +971,11 @@ export const fullExportToTallyStream = async (req, res) => {
 
   try {
     const cfg = await TallyConfig.findOne();
-    if (!cfg || !cfg.tallyLocalUrl) {
-      send({ event: 'error', message: 'Tally Local URL is not configured. Go to Settings tab first.' });
+    const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
+    if (!cfg || !hasConnection) {
+      send({ event: 'error', message: cfg?.useConnector
+        ? `Connector is enabled but connectorId is missing. Re-register the SriChakra Connector.`
+        : 'Tally Local URL is not configured. Go to Settings tab first.' });
       return res.end();
     }
 
@@ -1026,8 +1042,11 @@ export const selectiveExportStream = async (req, res) => {
 
   try {
     const cfg = await TallyConfig.findOne();
-    if (!cfg || !cfg.tallyLocalUrl) {
-      send({ event: 'error', message: 'Tally Local URL not configured' });
+    const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
+    if (!cfg || !hasConnection) {
+      send({ event: 'error', message: cfg?.useConnector
+        ? `Connector is enabled but connectorId is missing. Re-register the SriChakra Connector.`
+        : 'Tally Local URL not configured' });
       return res.end();
     }
 
@@ -1171,7 +1190,8 @@ export const importSalesRegister = async (req, res) => {
     }
 
     const cfg = await TallyConfig.findOne();
-    if (!cfg?.tallyLocalUrl) {
+    const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
+    if (!cfg || !hasConnection) {
       return res.status(400).json({
         success: false,
         message: 'Tally Local URL is not configured. Go to Tally Settings first.',

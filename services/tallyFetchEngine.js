@@ -112,12 +112,18 @@ function tallyBaseUrl(cfg) {
     return `${local.replace(/\/$/, '')}:${port}`;
   }
   const server = (cfg.serverUrl || '').trim();
-  if (server) {
+  // Never use the cloud ERP URL as a Tally endpoint
+  if (server && !server.includes('erp.majesticmall.net')) {
     if (server.startsWith('https://')) return server.replace(/\/$/, '');
     if (server.match(/:\d+$/)) return server.replace(/\/$/, '');
     return `${server.replace(/\/$/, '')}:${port}`;
   }
-  return `http://localhost:${port}`;
+  // ── SAFETY: never silently fall back to localhost on a remote server ────────
+  // If we are here it means no URL is configured. Throw instead of returning
+  // localhost — on Render this would silently fail with ECONNREFUSED.
+  throw new Error(
+    'Tally URL not configured. Set tallyLocalUrl in Tally Settings, or enable Connector mode.'
+  );
 }
 
 function buildHeaders(cfg) {
@@ -220,7 +226,30 @@ async function writeSyncLog({ syncId, type, direction, status, duration, error, 
 
 // === HEALTH CHECK ===
 export async function checkTallyReachable(cfg) {
-  const url = tallyBaseUrl(cfg);
+  // ── Connector mode: ping via Socket.IO, not direct HTTP ─────────────────────
+  if (cfg.useConnector && cfg.connectorId) {
+    const online = isConnectorOnline(cfg.connectorId);
+    console.log(`[TallyRoute] checkTallyReachable → connector ${cfg.connectorId} online=${online}`);
+    if (!online) {
+      return { reachable: false, error: `Connector ${cfg.connectorId} is not connected. Ensure the SriChakra Connector is running on the client PC.` };
+    }
+    // Send a lightweight ping XML through the connector
+    const pingXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>List of Companies</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></DESC></BODY></ENVELOPE>`;
+    try {
+      const body = await sendTallyRequest(cfg.connectorId, pingXml, HEALTH_CHECK_TIMEOUT);
+      return { reachable: body.length > 0, status: 200, body: body.slice(0, 200) };
+    } catch (err) {
+      return { reachable: false, error: err.message };
+    }
+  }
+
+  // ── Direct mode ──────────────────────────────────────────────────────────────
+  let url;
+  try {
+    url = tallyBaseUrl(cfg);
+  } catch (e) {
+    return { reachable: false, error: e.message };
+  }
   const pingXml = `<ENVELOPE>
   <HEADER>
    <TALLYREQUEST>Export</TALLYREQUEST>
@@ -297,26 +326,47 @@ export async function testTallyConnection() {
 
 // === HTTP POST WITH RETRIES AND TIMEOUT ===
 async function postXml(cfg, xml, timeoutMs) {
+  // ── Diagnostic: always log the routing decision ─────────────────────────────
+  const diagUrl = (() => {
+    try { return tallyBaseUrl(cfg); } catch (e) { return `(not set — ${e.message})`; }
+  })();
+  console.log('[TallyRoute]', {
+    useConnector: cfg.useConnector,
+    connectorId:  cfg.connectorId || '(empty)',
+    connectorOnline: cfg.useConnector && cfg.connectorId ? isConnectorOnline(cfg.connectorId) : 'n/a',
+    tallyLocalUrl: cfg.tallyLocalUrl || '(empty)',
+    resolvedDirectUrl: diagUrl,
+    selectedPath: (cfg.useConnector && cfg.connectorId) ? 'CONNECTOR → Socket.IO' : 'DIRECT → HTTP',
+  });
+
+  // ── PATH A: Connector mode ───────────────────────────────────────────────────
   if (cfg.useConnector && cfg.connectorId) {
     if (!validateXml(xml)) {
       throw new Error('Invalid XML format');
     }
     LOG(`POST via connector ${cfg.connectorId} bytes=${xml.length} timeout=${timeoutMs}ms`);
     const body = await sendTallyRequest(cfg.connectorId, xml, timeoutMs);
-    console.log("RAW TALLY RESPONSE (via connector):", body); // Raw XML log
     LOG(`  → Received bytes=${body.length}`);
-    
-    if (body.includes("<LINEERROR>")) {
+    if (body.includes('<LINEERROR>')) {
       throw new Error(`Tally returned LINEERROR: ${body}`);
     }
-    if (body.includes("<STATUS>0</STATUS>")) {
-      return ""; // Empty collection
+    if (body.includes('<STATUS>0</STATUS>')) {
+      return '';
     }
     return body;
   }
-  
-  // Fallback to direct Tally connection
-  const url = tallyBaseUrl(cfg);
+
+  // ── PATH B: Direct mode ─────────────────────────────────────────────────────
+  // Safety guard: if connector is registered but useConnector is somehow false,
+  // refuse to fall through to a direct connection — Render cannot reach localhost.
+  if (cfg.connectorId) {
+    throw new Error(
+      `Connector is registered (${cfg.connectorId}) but useConnector=false. ` +
+      `Enable "Use Connector" in Tally Settings to route requests through the SriChakra Connector.`
+    );
+  }
+
+  const url = tallyBaseUrl(cfg); // throws if URL is not configured
   if (!validateXml(xml)) {
     throw new Error('Invalid XML format');
   }
@@ -326,20 +376,17 @@ async function postXml(cfg, xml, timeoutMs) {
     headers: buildHeaders(cfg),
   });
   const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
-  console.log("RAW TALLY RESPONSE:", body); // Raw XML log
   LOG(`  → HTTP ${resp.status} bytes=${body.length}`);
-  
-  // Detect real Tally errors
-  if (body.includes("<LINEERROR>")) {
+  if (body.includes('<LINEERROR>')) {
     throw new Error(`Tally returned LINEERROR: ${body}`);
   }
-  if (body.includes("<STATUS>0</STATUS>")) {
-    return ""; // Empty collection
+  if (body.includes('<STATUS>0</STATUS>')) {
+    return '';
   }
   return body;
 }
 
-async function postXmlWithRetry(cfg, xml, timeoutMs, attempts = MAX_CHUNK_RETRIES) {
+export async function postXmlWithRetry(cfg, xml, timeoutMs, attempts = MAX_CHUNK_RETRIES) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {

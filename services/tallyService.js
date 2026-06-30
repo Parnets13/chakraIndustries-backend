@@ -9,7 +9,6 @@
  *  • Manual and scheduled sync support
  */
 
-import axios from 'axios';
 import TallyConfig    from '../models/TallyConfig.js';
 import TallySyncLog   from '../models/TallySyncLog.js';
 import TallyVoucher   from '../models/TallyVoucher.js';
@@ -20,7 +19,11 @@ import CorporateClient from '../models/CorporateClient.js';
 import AccountsLedger from '../models/AccountsLedger.js';
 import PurchaseOrder  from '../models/PurchaseOrder.js';
 import Invoice        from '../models/Invoice.js';
-import { testTallyConnection as fetchEngineTestConnection } from './tallyFetchEngine.js';
+import {
+  testTallyConnection as fetchEngineTestConnection,
+  checkTallyReachable,
+  postXmlWithRetry,
+} from './tallyFetchEngine.js';
 
 const LOG = (...a) => console.log('[Tally]', ...a);
 const ERR = (...a) => console.error('[Tally ERROR]', ...a);
@@ -31,150 +34,6 @@ async function getConfig() {
   let cfg = await TallyConfig.findOne();
   if (!cfg) cfg = await TallyConfig.create({});
   return cfg;
-}
-
-function tallyUrl(cfg) {
-  const port = cfg.port || '9000';
-
-  // ── Priority 1: tallyLocalUrl (local machine address set in Settings) ──────
-  const local = (cfg.tallyLocalUrl || '').trim();
-  if (local) {
-    if (local.match(/:\d+$/) || local.startsWith('https://')) {
-      console.log('[Tally] tallyUrl → local URL (with port/https):', local.replace(/\/$/, ''));
-      return local.replace(/\/$/, '');
-    }
-    const resolved = `${local.replace(/\/$/, '')}:${port}`;
-    console.log('[Tally] tallyUrl → local URL:', resolved);
-    return resolved;
-  }
-
-  // ── Priority 2: serverUrl (legacy / cloud tunnel) ───
-  const server = (cfg.serverUrl || '').trim();
-  if (server) {
-    const resolved = server.match(/:\d+$/) || server.startsWith('https://')
-      ? server.replace(/\/$/, '')
-      : `${server.replace(/\/$/, '')}:${port}`;
-    console.log('[Tally] tallyUrl → serverUrl:', resolved);
-    return resolved;
-  }
-
-  // ── Fallback: localhost ────────────────────────────────────────────────────
-  const fallback = `http://localhost:${port}`;
-  console.log('[Tally] tallyUrl → fallback localhost:', fallback);
-  return fallback;
-}
-
-// ─── HTTP ─────────────────────────────────────────────────────────────────────
-
-async function postToTally(cfg, xml, timeoutMs = 30000) {
-  const url = tallyUrl(cfg);
-  const headers = { 'Content-Type': 'text/xml', 'Accept': '*/*' };
-  if (cfg.authType === 'Basic Auth' && cfg.apiKey)
-    headers['Authorization'] = `Basic ${Buffer.from(cfg.apiKey).toString('base64')}`;
-  else if (cfg.authType === 'API Key' && cfg.apiKey)
-    headers['Authorization'] = `Bearer ${cfg.apiKey}`;
-
-  console.log(`[Tally] POST ${url}  body=${xml.length} bytes  timeout=${timeoutMs}ms`);
-
-  try {
-    const resp = await axios({
-      method : 'POST',
-      url,
-      data   : xml,
-      headers,
-      timeout: timeoutMs,
-      responseType  : 'text',
-      validateStatus: () => true,
-      maxRedirects  : 5,
-    });
-    const body = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-    console.log(`[Tally] Response HTTP ${resp.status} — ${body.length} bytes — preview: ${body.slice(0, 300)}`);
-    return body;
-  } catch (err) {
-    console.error(`[Tally] postToTally ERROR — ${err.message} (code: ${err.code})`);
-    if (err.response) {
-      console.error(`[Tally] err.response.status: ${err.response.status}`);
-      console.error(`[Tally] err.response.data  : ${String(err.response.data||'').slice(0,300)}`);
-    }
-    throw err;
-  }
-}
-
-// ─── TALLY XML REQUEST BODY used for connection test ─────────────────────────
-// Tally's HTTP server expects a POST with Content-Type: text/xml.
-// This is the smallest valid request — asks Tally to list its open companies.
-// Response will be an XML ENVELOPE containing COMPANY elements.
-const PING_XML = `<ENVELOPE>\n  <HEADER>\n    <TALLYREQUEST>Export Data</TALLYREQUEST>\n  </HEADER>\n  <BODY>\n    <EXPORTDATA>\n      <REQUESTDESC>\n        <REPORTNAME>List of Accounts</REPORTNAME>\n        <STATICVARIABLES>\n          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>\n        </STATICVARIABLES>\n      </REQUESTDESC>\n    </EXPORTDATA>\n  </BODY>\n</ENVELOPE>`;
-
-async function checkReachable(cfg) {
-  const url = tallyUrl(cfg);
-
-  console.log('[Tally] ══════════════════════════════════════════════');
-  console.log('[Tally] checkReachable called');
-  console.log('[Tally]   URL          :', url);
-  console.log('[Tally]   Method       : POST');
-  console.log('[Tally]   Content-Type : text/xml');
-  console.log('[Tally]   Timeout      : 30000 ms');
-  console.log('[Tally]   Request body :');
-  console.log(PING_XML);
-  console.log('[Tally] ══════════════════════════════════════════════');
-
-  try {
-    const resp = await axios({
-      method : 'POST',
-      url,
-      data   : PING_XML,
-      headers: { 'Content-Type': 'text/xml', 'Accept': '*/*' },
-      timeout: 30000,              // 30 s — Cloudflare + Tally can be slow
-      responseType  : 'text',
-      validateStatus: () => true,  // never throw on HTTP 4xx/5xx
-      maxRedirects  : 5,
-    });
-
-    const status = resp.status;
-    const body   = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-
-    console.log('[Tally] HTTP status      :', status);
-    console.log('[Tally] Response headers :', JSON.stringify(resp.headers, null, 2));
-    console.log('[Tally] Response body    :', body.slice(0, 800));
-
-    // Any HTTP response from the tunnel/Tally means the server is reachable.
-    // We don't require a valid XML response — Tally may return a banner page
-    // on GET, or an error XML on POST — all of these mean it's up.
-    return { reachable: true, status, body: body.slice(0, 200) };
-
-  } catch (err) {
-    // Log the full error for diagnostics
-    console.error('[Tally] checkReachable ERROR');
-    console.error('[Tally]   err.message  :', err.message);
-    console.error('[Tally]   err.code     :', err.code);
-    console.error('[Tally]   err.stack    :', err.stack);
-    if (err.response) {
-      console.error('[Tally]   err.response.status  :', err.response.status);
-      console.error('[Tally]   err.response.data     :', String(err.response.data || '').slice(0, 300));
-    }
-
-    const code = err.code || '';
-    // ECONNRESET / context canceled = tunnel is up but Tally closed the socket.
-    // Treat as "reachable but Tally not ready" so we give a clear message.
-    if (code === 'ECONNRESET' || err.message?.includes('socket hang up') || err.message?.includes('context canceled')) {
-      return {
-        reachable: false,
-        error: `Tally closed the connection before responding (${err.message}). This usually means Tally is running but its HTTP Server is not fully enabled. In Tally Prime: F12 → Configure → Advanced Configuration → Enable ODBC/HTTP Server: Yes, Port: 9000.`,
-      };
-    }
-    if (code === 'ECONNREFUSED')
-      return { reachable: false, error: `Connection refused at ${url}. Tally HTTP Server is not running on that port.` };
-    if (code === 'ETIMEDOUT' || code === 'ECONNABORTED')
-      return { reachable: false, error: `Request timed out after 30s at ${url}. Tunnel is reachable but Tally is not responding to XML requests.` };
-    if (code === 'ENOTFOUND')
-      return { reachable: false, error: `Cannot resolve host "${cfg.serverUrl}". Check the URL.` };
-    if (err.response) {
-      // Got an HTTP response (even error) — server is there
-      return { reachable: true, status: err.response.status };
-    }
-    return { reachable: false, error: `${err.message} (code: ${code})` };
-  }
 }
 
 // ─── XML HELPERS ──────────────────────────────────────────────────────────────
@@ -382,7 +241,7 @@ ${stockItemsXml}${extraItemsXml}${systemLedgersXml}${vendorLedgersXml}${customer
 </IMPORTDATA></BODY>
 </ENVELOPE>`;
 
-    const resp    = await postToTally(cfg, xml, 35000);
+    const resp    = await postXmlWithRetry(cfg, xml, 35000);
     const result  = parseTallyResponse(resp, 'All Masters');
     const records = items.length + vendors.length + allClients.length + ledgers.length;
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
@@ -472,7 +331,7 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${vouchersXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
 
-    const resp    = await postToTally(cfg, xml, 30000);
+    const resp    = await postXmlWithRetry(cfg, xml, 30000);
     const result  = parseTallyResponse(resp, 'Purchase Vouchers');
     const records = pos.length;
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
@@ -548,7 +407,7 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${vouchersXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
 
-    const resp    = await postToTally(cfg, xml, 30000);
+    const resp    = await postXmlWithRetry(cfg, xml, 30000);
     const result  = parseTallyResponse(resp, 'Sales Vouchers');
     const records = invoices.length;
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
@@ -608,7 +467,7 @@ export async function pushPaymentVouchersToTally(cfg, triggeredBy) {
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${vouchersXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
 
-    const resp    = await postToTally(cfg, xml, 25000);
+    const resp    = await postXmlWithRetry(cfg, xml, 25000);
     const result  = parseTallyResponse(resp, 'Payment Vouchers');
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type:'Payment', direction:'ERP → Tally', status:result.ok?'Success':'Failed', duration, error:result.error, records:payments.length, triggeredBy });
@@ -661,7 +520,7 @@ export async function pushReceiptVouchersToTally(cfg, triggeredBy) {
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${vouchersXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
 
-    const resp    = await postToTally(cfg, xml, 25000);
+    const resp    = await postXmlWithRetry(cfg, xml, 25000);
     const result  = parseTallyResponse(resp, 'Receipt Vouchers');
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type:'Receipt', direction:'ERP → Tally', status:result.ok?'Success':'Failed', duration, error:result.error, records:receipts.length, triggeredBy });
@@ -712,10 +571,10 @@ export async function pullItemsFromTally(cfg, triggeredBy) {
 </ENVELOPE>`;
     };
     // Use dynamic TDL collection first, avoid hardcoded report names
-    let resp = await postToTally(cfg, buildDynamicCollectionXml('StockItem', 'DynamicInventory'));
+    let resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('StockItem', 'DynamicInventory'), 60000);
     if (!resp || !resp.includes('<STOCKITEM')) {
       LOG('Dynamic TDL failed, trying fallback dynamic collection...');
-      resp = await postToTally(cfg, buildDynamicCollectionXml('StockItem', 'StockItems'));
+      resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('StockItem', 'StockItems'), 60000);
     }
     if (!resp || !resp.includes('<STOCKITEM')) {
       await writeLog({ syncId, type:'Item Master', direction:'Tally → ERP', status:'Success', records:0, triggeredBy });
@@ -814,10 +673,10 @@ export async function pullLedgersFromTally(cfg, triggeredBy) {
 </ENVELOPE>`;
     };
     // Use dynamic TDL collection first, avoid hardcoded report names
-    let resp = await postToTally(cfg, buildDynamicCollectionXml('Ledger', 'DynamicLedger'));
+    let resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('Ledger', 'DynamicLedger'), 60000);
     if (!resp || !resp.includes('<LEDGER')) {
       LOG('Dynamic TDL failed, trying fallback dynamic collection...');
-      resp = await postToTally(cfg, buildDynamicCollectionXml('Ledger', 'Ledgers'));
+      resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('Ledger', 'Ledgers'), 60000);
     }
     if (!resp || !resp.includes('<LEDGER')) {
       await writeLog({ syncId, type:'Ledger', direction:'Tally → ERP', status:'Success', records:0, triggeredBy });
@@ -966,7 +825,7 @@ export async function pullVouchersFromTally(cfg, voucherType, triggeredBy) {
     const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
 <BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Day Book</REPORTNAME>
 ${exportVars(`<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><VOUCHERTYPENAME>${voucherType}</VOUCHERTYPENAME>`)}</REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-    const resp = await postToTally(cfg, xml);
+    const resp = await postXmlWithRetry(cfg, xml, 30000);
     if (!resp || !resp.includes('<VOUCHER') || resp.includes('<TALLYREQUEST>Import Data')) {
       await writeLog({ syncId, type:logType, direction:'Tally → ERP', status:'Success', records:0, triggeredBy });
       return { ok:true, records:0 };
@@ -1016,7 +875,7 @@ export async function pullPaymentReceiptFromTally(cfg, voucherType, triggeredBy)
     const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
 <BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Day Book</REPORTNAME>
 ${exportVars(`<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><VOUCHERTYPENAME>${voucherType}</VOUCHERTYPENAME>`)}</REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-    const resp = await postToTally(cfg, xml);
+    const resp = await postXmlWithRetry(cfg, xml, 30000);
     if (!resp || !resp.includes('<VOUCHER')) {
       await writeLog({ syncId, type:voucherType, direction:'Tally → ERP', status:'Success', records:0, triggeredBy });
       return { ok:true, records:0 };
@@ -1114,7 +973,7 @@ function mergeResults(results) {
 export async function runFullSync(triggeredBy) {
   LOG('========== runFullSync START ==========');
   const cfg   = await getConfig();
-  const check = await checkReachable(cfg);
+  const check = await checkTallyReachable(cfg);
   if (!check.reachable) {
     ERR('Tally not reachable:', check.error);
     await TallyConfig.findOneAndUpdate({},{connectionStatus:'Disconnected'},{upsert:true});
@@ -1161,7 +1020,7 @@ export async function runFullSync(triggeredBy) {
 export async function runTargetedSync(type, triggeredBy) {
   LOG(`runTargetedSync type="${type}"`);
   const cfg   = await getConfig();
-  const check = await checkReachable(cfg);
+  const check = await checkTallyReachable(cfg);
   if (!check.reachable) {
     await TallyConfig.findOneAndUpdate({},{connectionStatus:'Disconnected'},{upsert:true});
     return { ok:false, offline:true, records:0, error:check.error };

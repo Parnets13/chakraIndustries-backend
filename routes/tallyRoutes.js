@@ -107,10 +107,10 @@ router.post('/connectors/generate-credentials', protect, async (req, res) => {
     const connectorId = crypto.randomUUID();
     const connectorSecret = crypto.randomBytes(32).toString('hex');
     
-    // Update or create TallyConfig with credentials
+    // Update or create TallyConfig with credentials and enable connector mode
     await TallyConfig.findOneAndUpdate(
       {},
-      { connectorId, connectorSecret },
+      { connectorId, connectorSecret, useConnector: true },
       { upsert: true, new: true }
     );
     

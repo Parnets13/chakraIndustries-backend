@@ -2,6 +2,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import ConnectorRegistration from '../models/ConnectorRegistration.js';
+import TallyConfig from '../models/TallyConfig.js';
 
 const router = express.Router();
 
@@ -50,10 +51,12 @@ router.post('/register', async (req, res) => {
 
     // Find existing or create new registration
     let registration = await ConnectorRegistration.findOne({ machineId });
+    let connectorSecret;
 
     if (!registration) {
-      // New connector — generate a unique connectorId
+      // New connector — generate a unique connectorId and connectorSecret
       const connectorId = `conn_${crypto.randomBytes(8).toString('hex')}`;
+      connectorSecret = crypto.randomBytes(32).toString('hex');
       registration = await ConnectorRegistration.create({
         machineId,
         computerName:    computerName    || '',
@@ -64,6 +67,18 @@ router.post('/register', async (req, res) => {
         connectorId,
         syncInterval: 300,
       });
+
+      // Update TallyConfig with new connector details — also enable connector mode
+      await TallyConfig.findOneAndUpdate(
+        {},
+        { 
+          connectorId, 
+          connectorSecret, 
+          useConnector: true,
+          connectionStatus: 'Disconnected' 
+        },
+        { upsert: true }
+      );
     } else {
       // Existing connector — update system info and refresh lastSeen
       registration.computerName    = computerName    || registration.computerName;
@@ -73,6 +88,28 @@ router.post('/register', async (req, res) => {
       registration.tallyVersion    = tallyVersion    || registration.tallyVersion;
       registration.lastSeenAt      = new Date();
       await registration.save();
+
+      // Get existing connectorSecret from TallyConfig
+      const cfg = await TallyConfig.findOne({ connectorId: registration.connectorId });
+      connectorSecret = cfg ? cfg.connectorSecret : crypto.randomBytes(32).toString('hex');
+      if (!cfg) {
+        await TallyConfig.findOneAndUpdate(
+          {},
+          { 
+            connectorId: registration.connectorId, 
+            connectorSecret,
+            useConnector: true,
+            connectionStatus: 'Disconnected' 
+          },
+          { upsert: true }
+        );
+      } else if (!cfg.useConnector) {
+        // Connector already registered but useConnector was somehow false — fix it
+        await TallyConfig.findOneAndUpdate(
+          { connectorId: registration.connectorId },
+          { useConnector: true }
+        );
+      }
     }
 
     // Issue a long-lived JWT (30 days)
@@ -86,6 +123,7 @@ router.post('/register', async (req, res) => {
       success: true,
       token,
       connectorId:  registration.connectorId,
+      connectorSecret: connectorSecret,
       syncInterval: registration.syncInterval,
       tunnelToken:  process.env.CLOUDFLARE_TUNNEL_TOKEN || null,
       message: 'Connector registered successfully',
