@@ -9,7 +9,7 @@ dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 async function main() {
   console.log('Connecting to DB...');
-  await mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/chakraIndustries');
+  await mongoose.connect(process.env.MONGO_URI);
   console.log('Connected!');
 
   const configData = {

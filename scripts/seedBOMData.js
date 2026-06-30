@@ -8,10 +8,8 @@ dotenv.config();
 
 const seedData = async () => {
   try {
-    const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/chakra_industries';
     console.log('Connecting to MongoDB...');
-    
-    await mongoose.connect(mongoUri);
+    await mongoose.connect(process.env.MONGO_URI);
     console.log('Connected to MongoDB');
 
     // Clear existing data

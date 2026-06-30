@@ -9,7 +9,7 @@ dotenv.config();
 
 async function check() {
   try {
-    await mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/chakraindustries');
+    await mongoose.connect(process.env.MONGO_URI);
     
     const config = await TallyConfig.findOne();
     console.log('=== TallyConfig ===');

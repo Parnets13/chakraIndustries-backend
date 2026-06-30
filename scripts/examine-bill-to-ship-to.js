@@ -15,7 +15,7 @@ import mongoose from 'mongoose';
 
 async function main() {
   // Connect to MongoDB first to get Tally config
-  await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/chakraindustries');
+  await mongoose.connect(process.env.MONGO_URI);
   const config = await TallyConfig.findOne().sort({ updatedAt: -1 });
   const url = (config?.tallyLocalUrl || 'http://localhost') + (config?.tallyLocalUrl?.includes(':') ? '' : ':9000');
   const company = config?.companyName || 'SRI CHAKRA INDUSTRIES';

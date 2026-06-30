@@ -7,7 +7,7 @@ dotenv.config();
 
 async function checkConfig() {
   try {
-    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/chakraIndustries');
+    await mongoose.connect(process.env.MONGO_URI);
     console.log('Connected to MongoDB');
 
     const config = await TallyConfig.findOne();
