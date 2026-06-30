@@ -152,9 +152,9 @@ async function waitForConnector(connectorId, waitMs = 30000) {
 export async function sendTallyRequest(connectorId, xml, timeoutMs = 60000) {
   let connector = connectedConnectors.get(connectorId);
   if (!connector || !connector.online) {
-    // Connector not in Map yet — could be a Render restart. Wait up to 30 s for reconnect.
-    console.warn(`[Connector] ${connectorId} not online — waiting up to 30s for reconnect...`);
-    connector = await waitForConnector(connectorId, 30000);
+    // Connector not in Map yet — could be a Render restart. Wait up to 60 s for reconnect.
+    console.warn(`[Connector] ${connectorId} not online — waiting up to 60s for reconnect...`);
+    connector = await waitForConnector(connectorId, 60000);
   }
   if (!connector || !connector.online) {
     throw new Error(`Connector ${connectorId} is not online`);

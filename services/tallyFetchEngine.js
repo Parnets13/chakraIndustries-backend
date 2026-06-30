@@ -19,17 +19,19 @@ const MAX_CHUNK_RETRIES = 3;
 const MIN_RESPONSE_BYTES = 200;
 
 // === ENTITY-SPECIFIC DYNAMIC TIMEOUTS (ms) ===
+// Increased for connector mode — requests go internet → connector → Tally → back
+// Tally can be slow on large datasets; give it enough time.
 const ENTITY_TIMEOUTS = {
-  Ledgers:     60000,
-  Items:      120000,
-  Purchase:   300000,  // 5 min — Collection returns all vouchers (~14MB)
-  Sales:      300000,
-  Payment:    300000,
-  Receipt:    300000,
-  Journal:    300000,
-  Contra:     300000,
+  Ledgers:     300000,  // 5 min  — ledger list can be large
+  Items:       300000,  // 5 min  — stock items collection
+  Purchase:    600000,  // 10 min — all purchase vouchers
+  Sales:       600000,  // 10 min — all sales vouchers
+  Payment:     600000,  // 10 min
+  Receipt:     600000,  // 10 min
+  Journal:     600000,  // 10 min
+  Contra:      600000,  // 10 min
 };
-const HEALTH_CHECK_TIMEOUT = 10000;
+const HEALTH_CHECK_TIMEOUT = 30000;  // 30s — allow for slow connector round-trip
 
 // === GLOBAL STATE ===
 let _tallyRequestLock = false;
