@@ -45,6 +45,8 @@ router.post('/register', async (req, res) => {
       tallyVersion,
     } = req.body;
 
+    console.log('[ConnectorRegister] Received registration request', { machineId, computerName });
+
     if (!machineId) {
       return res.status(400).json({ success: false, message: 'machineId is required' });
     }
@@ -57,6 +59,9 @@ router.post('/register', async (req, res) => {
       // New connector — generate a unique connectorId and connectorSecret
       const connectorId = `conn_${crypto.randomBytes(8).toString('hex')}`;
       connectorSecret = crypto.randomBytes(32).toString('hex');
+
+      console.log('[ConnectorRegister] New connector — creating registration', { connectorId });
+
       registration = await ConnectorRegistration.create({
         machineId,
         computerName:    computerName    || '',
@@ -68,8 +73,18 @@ router.post('/register', async (req, res) => {
         syncInterval: 300,
       });
 
-      // Update TallyConfig with new connector details — also enable connector mode
-      await TallyConfig.findOneAndUpdate(
+      // Always update the SAME TallyConfig document that getCfg() will read.
+      // findOne() and findOneAndUpdate({}) both use natural order (oldest _id first),
+      // so sort: { _id: 1 } ensures we hit the same document every time.
+      const beforeUpdate = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+      console.log('[ConnectorRegister] TallyConfig BEFORE update', {
+        _id: beforeUpdate?._id,
+        useConnector: beforeUpdate?.useConnector,
+        connectorId: beforeUpdate?.connectorId || '(empty)',
+        connectionStatus: beforeUpdate?.connectionStatus,
+      });
+
+      const updated = await TallyConfig.findOneAndUpdate(
         {},
         { 
           connectorId, 
@@ -77,10 +92,20 @@ router.post('/register', async (req, res) => {
           useConnector: true,
           connectionStatus: 'Disconnected' 
         },
-        { upsert: true }
+        { sort: { _id: 1 }, upsert: true, new: true }
       );
+
+      console.log('[ConnectorRegister] TallyConfig AFTER update', {
+        _id: updated?._id,
+        useConnector: updated?.useConnector,
+        connectorId: updated?.connectorId,
+        connectionStatus: updated?.connectionStatus,
+      });
+
     } else {
       // Existing connector — update system info and refresh lastSeen
+      console.log('[ConnectorRegister] Existing connector found', { connectorId: registration.connectorId });
+
       registration.computerName    = computerName    || registration.computerName;
       registration.windowsUsername = windowsUsername || registration.windowsUsername;
       registration.operatingSystem = operatingSystem || registration.operatingSystem;
@@ -89,27 +114,38 @@ router.post('/register', async (req, res) => {
       registration.lastSeenAt      = new Date();
       await registration.save();
 
-      // Get existing connectorSecret from TallyConfig
-      const cfg = await TallyConfig.findOne({ connectorId: registration.connectorId });
-      connectorSecret = cfg ? cfg.connectorSecret : crypto.randomBytes(32).toString('hex');
-      if (!cfg) {
-        await TallyConfig.findOneAndUpdate(
-          {},
-          { 
-            connectorId: registration.connectorId, 
-            connectorSecret,
-            useConnector: true,
-            connectionStatus: 'Disconnected' 
-          },
-          { upsert: true }
-        );
-      } else if (!cfg.useConnector) {
-        // Connector already registered but useConnector was somehow false — fix it
-        await TallyConfig.findOneAndUpdate(
-          { connectorId: registration.connectorId },
-          { useConnector: true }
-        );
-      }
+      // Look up the canonical TallyConfig (the one getCfg() uses — oldest by _id).
+      // Do NOT search by connectorId since the canonical doc may not have it yet.
+      const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+      connectorSecret = cfg?.connectorSecret || crypto.randomBytes(32).toString('hex');
+
+      console.log('[ConnectorRegister] TallyConfig BEFORE update (existing connector)', {
+        _id: cfg?._id,
+        useConnector: cfg?.useConnector,
+        connectorId: cfg?.connectorId || '(empty)',
+        hasConnectorSecret: !!(cfg?.connectorSecret),
+        connectionStatus: cfg?.connectionStatus,
+      });
+
+      // Always write connector fields to the canonical (oldest) document so
+      // getCfg() picks them up correctly on the next request.
+      const updated = await TallyConfig.findOneAndUpdate(
+        {},
+        {
+          connectorId: registration.connectorId,
+          connectorSecret,
+          useConnector: true,
+          connectionStatus: cfg?.connectionStatus === 'Connected' ? 'Connected' : 'Disconnected',
+        },
+        { sort: { _id: 1 }, upsert: true, new: true }
+      );
+
+      console.log('[ConnectorRegister] TallyConfig AFTER update (existing connector)', {
+        _id: updated?._id,
+        useConnector: updated?.useConnector,
+        connectorId: updated?.connectorId,
+        connectionStatus: updated?.connectionStatus,
+      });
     }
 
     // Issue a long-lived JWT (30 days)

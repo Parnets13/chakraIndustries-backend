@@ -43,7 +43,7 @@ export function initConnectorServer(httpServer) {
 
   // Handle connections
   io.on('connection', async (socket) => {
-    console.log(`[Connector] Connected: ${socket.connectorId}`);
+    console.log(`[Connector] Socket.IO connected: ${socket.connectorId}`);
     
     // Track connector
     connectedConnectors.set(socket.connectorId, {
@@ -52,11 +52,38 @@ export function initConnectorServer(httpServer) {
       online: true
     });
 
-    // Update TallyConfig connection status
-    await TallyConfig.findOneAndUpdate(
+    // Update TallyConfig connection status — use sort to hit the canonical document
+    const beforeConn = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    console.log('[Connector] TallyConfig BEFORE connectionStatus update (connect)', {
+      _id: beforeConn?._id,
+      connectorId: beforeConn?.connectorId,
+      useConnector: beforeConn?.useConnector,
+      connectionStatus: beforeConn?.connectionStatus,
+    });
+
+    const afterConn = await TallyConfig.findOneAndUpdate(
       { connectorId: socket.connectorId },
-      { connectionStatus: 'Connected' }
+      { connectionStatus: 'Connected' },
+      { new: true }
     );
+
+    if (!afterConn) {
+      // Fallback: the canonical doc may not have connectorId yet — patch it directly
+      console.warn(`[Connector] findOneAndUpdate by connectorId matched nothing — falling back to sort-based update`);
+      await TallyConfig.findOneAndUpdate(
+        {},
+        { connectionStatus: 'Connected', connectorId: socket.connectorId },
+        { sort: { _id: 1 } }
+      );
+    }
+
+    const verify = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    console.log('[Connector] TallyConfig AFTER connectionStatus update (connect)', {
+      _id: verify?._id,
+      connectorId: verify?.connectorId,
+      useConnector: verify?.useConnector,
+      connectionStatus: verify?.connectionStatus,
+    });
 
     // Handle tally-response from connector
     socket.on('tally-response', (response) => {
@@ -75,18 +102,34 @@ export function initConnectorServer(httpServer) {
       }
     });
 
-    socket.on('disconnect', async () => {
-      console.log(`[Connector] Disconnected: ${socket.connectorId}`);
+    socket.on('disconnect', async (reason) => {
+      console.log(`[Connector] Socket.IO disconnected: ${socket.connectorId} — reason: ${reason}`);
       
       // Update connector status
       if (connectedConnectors.has(socket.connectorId)) {
         connectedConnectors.get(socket.connectorId).online = false;
       }
 
-      await TallyConfig.findOneAndUpdate(
+      const afterDisconn = await TallyConfig.findOneAndUpdate(
         { connectorId: socket.connectorId },
-        { connectionStatus: 'Disconnected' }
+        { connectionStatus: 'Disconnected' },
+        { new: true }
       );
+
+      if (!afterDisconn) {
+        console.warn(`[Connector] Disconnect update by connectorId matched nothing — falling back to sort-based update`);
+        await TallyConfig.findOneAndUpdate(
+          {},
+          { connectionStatus: 'Disconnected' },
+          { sort: { _id: 1 } }
+        );
+      }
+
+      console.log('[Connector] TallyConfig after disconnect update', {
+        _id: afterDisconn?._id,
+        connectorId: afterDisconn?.connectorId,
+        connectionStatus: afterDisconn?.connectionStatus,
+      });
     });
   });
 

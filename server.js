@@ -319,6 +319,48 @@ httpServer.listen(PORT, async () => {
   console.log(`✓ Connector Socket.IO server ready`);
   startTallyScheduler();
 
+  // ── TallyConfig deduplication — merge multiple documents into one ────────────
+  // If connector registration ever created a second TallyConfig document, merge
+  // it back into the canonical (oldest) one so getCfg() always reads the right doc.
+  try {
+    const configs = await (await import('./models/TallyConfig.js')).default.find({}).sort({ _id: 1 });
+    if (configs.length > 1) {
+      console.log(`[Startup] Found ${configs.length} TallyConfig documents — merging into one`);
+      const canonical = configs[0];
+      // Merge fields from all extra documents into the canonical one (older doc wins for non-connector fields)
+      for (let i = 1; i < configs.length; i++) {
+        const extra = configs[i];
+        // Copy connector fields from extra docs if canonical is missing them
+        if (!canonical.connectorId && extra.connectorId) canonical.connectorId = extra.connectorId;
+        if (!canonical.connectorSecret && extra.connectorSecret) canonical.connectorSecret = extra.connectorSecret;
+        if (!canonical.useConnector && extra.useConnector) canonical.useConnector = extra.useConnector;
+        if (extra.connectionStatus === 'Connected') canonical.connectionStatus = 'Connected';
+        // Delete the duplicate
+        await extra.deleteOne();
+        console.log(`[Startup] Deleted duplicate TallyConfig _id=${extra._id}`);
+      }
+      await canonical.save();
+      console.log('[Startup] TallyConfig merged — canonical doc:', {
+        _id: canonical._id,
+        useConnector: canonical.useConnector,
+        connectorId: canonical.connectorId || '(empty)',
+        connectionStatus: canonical.connectionStatus,
+        tallyLocalUrl: canonical.tallyLocalUrl || '(empty)',
+      });
+    } else if (configs.length === 1) {
+      console.log('[Startup] TallyConfig status:', {
+        _id: configs[0]._id,
+        useConnector: configs[0].useConnector,
+        connectorId: configs[0].connectorId || '(empty)',
+        connectionStatus: configs[0].connectionStatus,
+        tallyLocalUrl: configs[0].tallyLocalUrl || '(empty)',
+      });
+    }
+  } catch (mergeErr) {
+    console.warn('[Startup] TallyConfig deduplication error (non-fatal):', mergeErr.message);
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   // ── SMTP startup verification ────────────────────────────────────────────
   try {
     const { verifyTransporter } = await import('./utils/emailService.js');
