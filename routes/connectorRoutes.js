@@ -87,6 +87,7 @@ router.post('/register', async (req, res) => {
       token,
       connectorId:  registration.connectorId,
       syncInterval: registration.syncInterval,
+      tunnelToken:  process.env.CLOUDFLARE_TUNNEL_TOKEN || null,
       message: 'Connector registered successfully',
     });
   } catch (error) {
@@ -118,6 +119,7 @@ router.get('/verify', protectConnector, async (req, res) => {
     success: true,
     connectorId:  req.connector.connectorId,
     syncInterval: req.connector.syncInterval,
+    tunnelToken:  process.env.CLOUDFLARE_TUNNEL_TOKEN || null,
   });
 });
 
