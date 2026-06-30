@@ -16,7 +16,10 @@ export function initConnectorServer(httpServer) {
     cors: {
       origin: '*',
       methods: ['GET', 'POST']
-    }
+    },
+    // Allow long-running Tally requests (large datasets can take minutes)
+    pingTimeout:  600000,  // 10 minutes — how long to wait for a pong before disconnecting
+    pingInterval:  25000,  // 25 seconds — how often to send a ping
   });
 
   // Middleware for authentication
