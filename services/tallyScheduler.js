@@ -40,9 +40,23 @@ async function syncTransactions() {
     const cfg = await TallyConfig.findOne();
     if (!cfg?.autoSync) return;
 
-    if (!cfg.tallyLocalUrl || cfg.tallyLocalUrl.trim() === '') {
-      LOG('tallyLocalUrl not configured — skipping transaction sync');
+    // Support both direct mode (tallyLocalUrl) and connector mode (useConnector + connectorId)
+    const hasDirectUrl = cfg.tallyLocalUrl && cfg.tallyLocalUrl.trim() !== '';
+    const hasConnector = cfg.useConnector && cfg.connectorId && cfg.connectorId.trim() !== '';
+
+    if (!hasDirectUrl && !hasConnector) {
+      LOG('Neither tallyLocalUrl nor connector is configured — skipping transaction sync');
       return;
+    }
+
+    // In connector mode, only run if the connector is actually online right now.
+    // Avoids queueing up a flood of requests during reconnect windows.
+    if (hasConnector && !hasDirectUrl) {
+      const { isConnectorOnline } = await import('./tallyConnectorServer.js');
+      if (!isConnectorOnline(cfg.connectorId)) {
+        LOG(`Connector ${cfg.connectorId} is offline — skipping scheduled sync (will retry next interval)`);
+        return;
+      }
     }
 
     LOG('Starting transaction sync...');

@@ -230,8 +230,18 @@ async function writeSyncLog({ syncId, type, direction, status, duration, error, 
 export async function checkTallyReachable(cfg) {
   // ── Connector mode: ping via Socket.IO, not direct HTTP ─────────────────────
   if (cfg.useConnector && cfg.connectorId) {
-    const online = isConnectorOnline(cfg.connectorId);
+    let online = isConnectorOnline(cfg.connectorId);
     console.log(`[TallyRoute] checkTallyReachable → connector ${cfg.connectorId} online=${online}`);
+    if (!online) {
+      // Connector may be mid-reconnect (e.g. just after a backend restart).
+      // Wait up to 15 s before giving up — sendTallyRequest already waits 60 s
+      // but we want a faster feedback loop for the health-check endpoint.
+      console.log(`[TallyRoute] Connector not yet online — waiting up to 15s for reconnect…`);
+      const { waitForConnector } = await import('./tallyConnectorServer.js');
+      const c = await waitForConnector(cfg.connectorId, 15000);
+      online = !!(c && c.online);
+      console.log(`[TallyRoute] After wait, connector online=${online}`);
+    }
     if (!online) {
       return { reachable: false, error: `Connector ${cfg.connectorId} is not connected. Ensure the SriChakra Connector is running on the client PC.` };
     }

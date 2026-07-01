@@ -140,7 +140,7 @@ export function initConnectorServer(httpServer) {
 }
 
 // Wait up to waitMs for the connector to come back online (handles Render restart race)
-async function waitForConnector(connectorId, waitMs = 30000) {
+export async function waitForConnector(connectorId, waitMs = 30000) {
   const interval = 500;
   const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
