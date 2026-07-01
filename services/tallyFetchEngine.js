@@ -18,6 +18,12 @@ const CHUNK_DAYS = 30;  // Fetch 30 days per chunk (Tally honours short date ran
 const MAX_CHUNK_RETRIES = 3;
 const MIN_RESPONSE_BYTES = 200;
 
+// === HISTORICAL DATA START DATE ===
+// All voucher and date-based entity syncs begin from this date.
+// Set to April 1, 2024 (start of FY 2024-25) to capture complete historical data.
+// Change this constant (not scattered year logic) if the baseline ever needs to shift.
+const HISTORY_START_DATE = new Date(2024, 3, 1); // 2024-04-01 (month index 3 = April)
+
 // === ENTITY-SPECIFIC DYNAMIC TIMEOUTS (ms) ===
 // Increased for connector mode — requests go internet → connector → Tally → back
 // Tally can be slow on large datasets; give it enough time.
@@ -492,9 +498,8 @@ function buildAllVouchersCollectionXml(cfg, fromDate = null, toDate = null) {
   let effectiveTo   = toDate;
   if (!effectiveFrom && !effectiveTo) {
     effectiveTo   = new Date();
-    effectiveFrom = new Date();
-    effectiveFrom.setFullYear(effectiveFrom.getFullYear() - 2);
-    LOG(`[AllVouchers] No date range — defaulting to 2-year window: ${td(effectiveFrom)} → ${td(effectiveTo)}`);
+    effectiveFrom = new Date(HISTORY_START_DATE); // April 1, 2024 — full history baseline
+    LOG(`[AllVouchers] No date range — defaulting to full history window: ${td(effectiveFrom)} → ${td(effectiveTo)}`);
   }
 
   const fromTd = effectiveFrom ? td(effectiveFrom) : '';
@@ -2976,11 +2981,15 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
 }
 
 // === FULL FETCH ===
-async function tryFullFetch(cfg, state, entityType, timeoutMs) {
+async function tryFullFetch(cfg, state, entityType, timeoutMs, startDate = null, endDate = null) {
   LOG(`Entity Started: ${entityType}`);
   LOG(`Trying full fetch for ${entityType}`);
+  // Use HISTORY_START_DATE as the baseline if no startDate provided
+  const effectiveFrom = startDate || new Date(HISTORY_START_DATE);
+  const effectiveTo   = endDate   || new Date();
+  LOG(`${entityType} full fetch date range: ${td(effectiveFrom)} → ${td(effectiveTo)}`);
   try {
-    const { records, created, updated, skipped, failed, totalFound } = await fetchAndSave(cfg, entityType, null, null, timeoutMs);
+    const { records, created, updated, skipped, failed, totalFound } = await fetchAndSave(cfg, entityType, effectiveFrom, effectiveTo, timeoutMs);
     state.usedFullFetch = true;
     state.syncStatus = 'completed';
     state.totalRecords = records;
@@ -3204,25 +3213,15 @@ export async function pullEntityFromTally(entityType, options = {}) {
         startDate.setDate(startDate.getDate() + 1);
         LOG(`${entityType} incremental sync from ${td(startDate)}`);
       } else {
-        // For voucher entities, default to the Tally financial year start
-        // (stored in TallyConfig.financialYearStart, e.g. 1-Apr-2026).
-        // If not configured, auto-detect: April 1 of the current fiscal year
-        // (Indian FY: Apr–Mar). Fall back to 2 years for non-voucher entities.
-        if (isVoucherEntity || cfg.financialYearStart) {
-          if (cfg.financialYearStart) {
-            startDate = new Date(cfg.financialYearStart);
-            LOG(`${entityType} using configured financial year start: ${td(startDate)}`);
-          } else {
-            // Auto-detect Indian fiscal year start (April 1)
-            const now = new Date();
-            const fyYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-            startDate = new Date(fyYear, 3, 1); // April = month index 3
-            LOG(`${entityType} auto-detected FY start: ${td(startDate)}`);
-          }
+        // Always start from April 1, 2024 (HISTORY_START_DATE) to ensure
+        // complete historical data is fetched across all FY periods.
+        // cfg.financialYearStart can override this if explicitly set.
+        if (cfg.financialYearStart) {
+          startDate = new Date(cfg.financialYearStart);
+          LOG(`${entityType} using configured financial year start: ${td(startDate)}`);
         } else {
-          startDate = new Date();
-          startDate.setFullYear(startDate.getFullYear() - 2);
-          LOG(`${entityType} full history sync from ${td(startDate)}`);
+          startDate = new Date(HISTORY_START_DATE);
+          LOG(`${entityType} using history baseline start: ${td(startDate)}`);
         }
       }
     }
@@ -3230,7 +3229,7 @@ export async function pullEntityFromTally(entityType, options = {}) {
     
     if (entityType === 'Items') {
       // Special handling for Items: only use tryFullFetch, no chunks!
-      result = await tryFullFetch(cfg, state, entityType, timeout);
+      result = await tryFullFetch(cfg, state, entityType, timeout, startDate, endDate);
       const status = result.ok ? 'Success' : 'Failed';
       const duration = `${((Date.now() - start)/1000).toFixed(1)}s`;
       await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status, duration, error: result.error, records: result.records });
@@ -3245,7 +3244,7 @@ export async function pullEntityFromTally(entityType, options = {}) {
     // The _chunkXmlCache ensures the 14MB response is fetched only once per sync run
     // and shared across all voucher entity types (Sales, Purchase, Payment, etc.)
     if (!options.forceChunk) {
-      result = await tryFullFetch(cfg, state, entityType, timeout);
+      result = await tryFullFetch(cfg, state, entityType, timeout, startDate, endDate);
       if (result.ok) {
         await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status: 'Success', duration: `${((Date.now() - start)/1000).toFixed(1)}s`, records: result.records });
         await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { sort: { _id: 1 }, upsert: true });
@@ -3255,7 +3254,7 @@ export async function pullEntityFromTally(entityType, options = {}) {
       }
       LOG(`${entityType} full fetch not viable (${result.reason}), switching to chunks`);
     }
-    const windowStart = isTimeless ? (() => { let d = new Date(); d.setFullYear(d.getFullYear()-5); return d; })() : startDate;
+    const windowStart = isTimeless ? (() => { let d = new Date(HISTORY_START_DATE); return d; })() : startDate;
     result = await runChunkSync(cfg, state, entityType, windowStart, endDate, timeout);
     const status = result.ok ? (result.failedChunks > 0 ? 'Partial' : 'Success') : 'Failed';
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
