@@ -410,7 +410,9 @@ export async function postXmlWithRetry(cfg, xml, timeoutMs, attempts = MAX_CHUNK
       ERR(`Attempt ${i+1}/${attempts} failed: ${err.message}`);
     }
     if (i < attempts - 1) {
-      const isDisconnect = lastErr?.message?.includes('disconnected') || lastErr?.message?.includes('not online');
+      const isDisconnect = lastErr?.message?.includes('disconnected') || 
+                           lastErr?.message?.includes('not online') ||
+                           lastErr?.message?.includes('reconnected mid-request');
       const isTallyNotRunning = lastErr?.message?.includes('not running') || lastErr?.message?.includes('TallyPrime');
 
       if (isDisconnect || isTallyNotRunning) {
@@ -2722,8 +2724,14 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
   const hasMatchingTag = resp && config.tagPattern.test(resp);
   LOG(`[${entityType}] contains expected tag: ${hasMatchingTag}`);
 
-  if (!resp || !config.tagPattern.test(resp)) {
-    LOG(`No ${entityType} data found in response`);
+  if (!resp) {
+    // Empty string response (Tally returned STATUS=0 or blank) — treat as a real error
+    // so the caller can retry rather than silently marking 0 records as "success".
+    throw new Error(`Tally returned an empty response for ${entityType} — Tally may be busy or the company is not open`);
+  }
+
+  if (!config.tagPattern.test(resp)) {
+    LOG(`No ${entityType} data found in response (${resp.length} bytes, no matching tag). Treating as empty dataset.`);
     return { records: 0, complete: true, created: 0, updated: 0, skipped: 0, failed: 0, totalFound: 0 };
   }
 

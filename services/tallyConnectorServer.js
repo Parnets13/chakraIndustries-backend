@@ -1,12 +1,11 @@
 import { Server } from 'socket.io';
-import crypto from 'crypto';
 import TallyConfig from '../models/TallyConfig.js';
+// HTTP-poll job queue — actual Tally data requests go through this, not Socket.IO.
+// Socket.IO is kept only for connector online/offline status tracking.
+import { enqueueConnectorJob } from '../routes/connectorRoutes.js';
 
-// In-memory store for connected connectors
-const connectedConnectors = new Map(); // key: connectorId, value: { socket, lastSeen }
-
-// Pending requests map for async responses
-const pendingRequests = new Map(); // key: requestId, value: { resolve, reject, timeout, connectorId, xml, acked }
+// In-memory store for connected connectors (status tracking only — data goes via HTTP poll)
+const connectedConnectors = new Map(); // key: connectorId, value: { socket, lastSeen, online }
 
 let io = null;
 
@@ -51,8 +50,8 @@ export function initConnectorServer(httpServer) {
   // Handle connections
   io.on('connection', async (socket) => {
     console.log(`[Connector] Socket.IO connected: ${socket.connectorId}`);
-    
-    // Track connector
+
+    // Track connector (update socket reference to the new one)
     connectedConnectors.set(socket.connectorId, {
       socket,
       lastSeen: new Date(),
@@ -92,63 +91,18 @@ export function initConnectorServer(httpServer) {
       connectionStatus: verify?.connectionStatus,
     });
 
-    // Handle tally-response from connector
+    // Handle tally-response from connector (legacy Socket.IO path — kept for backward compat
+    // with older connector builds, but new connectors use HTTP poll/result instead)
     socket.on('tally-response', (response) => {
-      const { id, success, data, error, ack } = response;
-      
-      if (pendingRequests.has(id)) {
-        const pending = pendingRequests.get(id);
-
-        // This is just an acknowledgement that the connector received the request
-        // and is processing it — keep the promise alive, don't resolve/reject yet.
-        if (ack) {
-          console.log(`[Connector] Request ${id} acknowledged by connector — waiting for Tally response`);
-          pending.acked = true;
-          return;
-        }
-
-        const { resolve, reject, timeout } = pending;
-        clearTimeout(timeout);
-        pendingRequests.delete(id);
-        if (success) {
-          resolve(data);
-        } else {
-          reject(new Error(error || 'Connector error'));
-        }
-      } else {
-        console.warn(`[Connector] Received tally-response for unknown requestId ${id} — ignoring`);
-      }
+      console.warn(`[Connector] Received legacy tally-response via Socket.IO for ${response?.id} — ignored (use HTTP poll)`);
     });
 
     socket.on('disconnect', async (reason) => {
       console.log(`[Connector] Socket.IO disconnected: ${socket.connectorId} — reason: ${reason}`);
       
-      // Update connector status
+      // Update connector status — data requests are unaffected (they use HTTP polling)
       if (connectedConnectors.has(socket.connectorId)) {
         connectedConnectors.get(socket.connectorId).online = false;
-      }
-
-      // ── Fail pending requests that have NOT yet been acknowledged ─────────
-      // If the connector acknowledged (acked=true) the request, it means Tally
-      // is already processing it. The connector will send the response when done
-      // via the reconnected socket — so we keep those promises alive.
-      // Only fail requests that were never acknowledged (connector dropped before
-      // it even received the request), as those genuinely need a retry.
-      for (const [reqId, pending] of pendingRequests.entries()) {
-        if (pending.connectorId === socket.connectorId) {
-          if (pending.acked) {
-            // Connector is mid-Tally-call — leave the promise alive.
-            // The connector will reconnect and emit the tally-response on the new socket.
-            console.log(`[Connector] Request ${reqId} is acknowledged/in-progress — keeping alive through reconnect`);
-          } else {
-            // Never acknowledged — connector dropped before receiving it. Fail fast so
-            // postXmlWithRetry can retry on the new socket.
-            console.warn(`[Connector] Failing unacknowledged inflight request ${reqId} due to disconnect — will be retried`);
-            clearTimeout(pending.timeout);
-            pendingRequests.delete(reqId);
-            pending.reject(new Error(`Connector disconnected (${reason}) — request will retry`));
-          }
-        }
       }
 
       const afterDisconn = await TallyConfig.findOneAndUpdate(
@@ -189,39 +143,22 @@ export async function waitForConnector(connectorId, waitMs = 30000) {
   return null;
 }
 
-// Send XML request to specific connector
+// Send XML request to specific connector via HTTP polling (no Socket.IO dependency)
+// The connector polls GET /api/connector/poll-job and POSTs the result back.
+// This is completely immune to Socket.IO disconnects on large payloads.
 export async function sendTallyRequest(connectorId, xml, timeoutMs = 60000) {
-  let connector = connectedConnectors.get(connectorId);
+  // Verify the connector is registered and online before queuing
+  const connector = connectedConnectors.get(connectorId);
   if (!connector || !connector.online) {
-    // Connector not in Map yet — could be a Render restart. Wait up to 60 s for reconnect.
+    // Wait up to 60s for it to come online (handles Render cold-start)
     console.warn(`[Connector] ${connectorId} not online — waiting up to 60s for reconnect...`);
-    connector = await waitForConnector(connectorId, 60000);
+    const c = await waitForConnector(connectorId, 60000);
+    if (!c || !c.online) {
+      throw new Error(`Connector ${connectorId} is not online`);
+    }
   }
-  if (!connector || !connector.online) {
-    throw new Error(`Connector ${connectorId} is not online`);
-  }
-
-  const requestId = crypto.randomUUID();
-  
-  return new Promise((resolve, reject) => {
-    // Set timeout
-    const timeout = setTimeout(() => {
-      if (pendingRequests.has(requestId)) {
-        pendingRequests.delete(requestId);
-        reject(new Error('Request timed out'));
-      }
-    }, timeoutMs);
-
-    // Store connectorId + xml so the disconnect handler can fail fast and
-    // postXmlWithRetry can retry with the same XML on the new socket.
-    pendingRequests.set(requestId, { resolve, reject, timeout, connectorId, xml });
-
-    // Send request to connector
-    connector.socket.emit('tally-request', {
-      id: requestId,
-      xml
-    });
-  });
+  // Enqueue the job — connector will pick it up via HTTP poll and POST result back
+  return enqueueConnectorJob(connectorId, xml, timeoutMs);
 }
 
 // Get status of all connectors

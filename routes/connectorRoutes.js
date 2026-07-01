@@ -6,6 +6,33 @@ import TallyConfig from '../models/TallyConfig.js';
 
 const router = express.Router();
 
+// ── In-memory HTTP-poll job queue ────────────────────────────────────────────
+// Jobs are placed here by sendTallyRequestHttp() and picked up by the connector
+// via GET /api/connector/poll-job. Results come back via POST /api/connector/job-result.
+//
+// Structure: Map<jobId, { xml, resolve, reject, timeout, connectorId, createdAt }>
+const httpJobQueue   = new Map();   // pending (not yet picked up)
+const httpJobResults = new Map();   // finished (waiting for server to consume)
+
+export function enqueueConnectorJob(connectorId, xml, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const jobId = crypto.randomUUID();
+    const timeout = setTimeout(() => {
+      if (httpJobQueue.has(jobId)) {
+        httpJobQueue.delete(jobId);
+        reject(new Error(`Connector HTTP job timed out after ${timeoutMs}ms — Tally may be slow or the connector is offline`));
+      } else if (httpJobResults.has(jobId)) {
+        httpJobResults.delete(jobId);
+        reject(new Error(`Connector HTTP job timed out after ${timeoutMs}ms — connector picked up the job but did not return a result`));
+      }
+    }, timeoutMs);
+
+    // Store the full job (including resolve/reject) in queue
+    httpJobQueue.set(jobId, { xml, resolve, reject, timeout, connectorId, createdAt: Date.now() });
+    console.log(`[ConnectorHTTP] Enqueued job ${jobId} for connector ${connectorId} (queue size: ${httpJobQueue.size})`);
+  });
+}
+
 // Middleware to verify connector JWT
 export const protectConnector = async (req, res, next) => {
   try {
@@ -196,5 +223,85 @@ router.get('/verify', protectConnector, async (req, res) => {
     tunnelToken:  process.env.CLOUDFLARE_TUNNEL_TOKEN || null,
   });
 });
+
+/**
+ * GET /api/connector/poll-job
+ * Connector calls this every 2s to check for pending Tally jobs.
+ * Returns the next job for this connector, or { job: null } if the queue is empty.
+ * Uses long-polling: holds the request open for up to 20s waiting for a job.
+ */
+router.get('/poll-job', protectConnector, async (req, res) => {
+  const connectorId = req.connector.connectorId;
+  const LONG_POLL_MS = 20000;  // hold connection up to 20s
+  const CHECK_INTERVAL = 300;  // check queue every 300ms
+
+  let waited = 0;
+  let done = false;
+
+  const check = () => {
+    if (done) return;
+
+    // Find the oldest pending job for this connector
+    for (const [jobId, job] of httpJobQueue.entries()) {
+      if (job.connectorId === connectorId) {
+        // Move to httpJobResults so job-result handler can resolve the promise
+        httpJobQueue.delete(jobId);
+        httpJobResults.set(jobId, { resolve: job.resolve, reject: job.reject, timeout: job.timeout });
+        console.log(`[ConnectorHTTP] Job ${jobId} dispatched to connector ${connectorId}`);
+        done = true;
+        return res.json({ job: { id: jobId, xml: job.xml } });
+      }
+    }
+
+    waited += CHECK_INTERVAL;
+    if (waited >= LONG_POLL_MS) {
+      done = true;
+      return res.json({ job: null });
+    }
+    setTimeout(check, CHECK_INTERVAL);
+  };
+
+  // Cleanup if client disconnects before we respond
+  res.on('close', () => { done = true; });
+  check();
+});
+
+/**
+ * POST /api/connector/job-result
+ * Connector posts the Tally XML response for a completed job.
+ * Body: { jobId, success, data, error }
+ */
+router.post('/job-result', protectConnector, async (req, res) => {
+  const { jobId, success, data, error } = req.body;
+
+  if (!jobId) return res.status(400).json({ success: false, message: 'jobId required' });
+
+  // The job might still be in the queue (shouldn't happen, but guard it)
+  if (httpJobQueue.has(jobId)) {
+    httpJobQueue.delete(jobId);
+  }
+
+  // Resolve / reject the promise that sendTallyRequestHttp() is awaiting
+  const job = httpJobResults.get(jobId);
+  if (job) {
+    httpJobResults.delete(jobId);
+    clearTimeout(job.timeout);
+    if (success) {
+      console.log(`[ConnectorHTTP] Job ${jobId} succeeded — ${(data || '').length} bytes`);
+      job.resolve(data || '');
+    } else {
+      console.error(`[ConnectorHTTP] Job ${jobId} failed — ${error}`);
+      job.reject(new Error(error || 'Connector reported failure'));
+    }
+  } else {
+    // Already timed out — log but don't error, connector did its job
+    console.warn(`[ConnectorHTTP] Job ${jobId} result received but promise already resolved/timed out — discarding`);
+  }
+
+  return res.json({ success: true });
+});
+
+// Re-export maps so tallyConnectorServer can import them if needed
+export { httpJobQueue, httpJobResults };
 
 export default router;
