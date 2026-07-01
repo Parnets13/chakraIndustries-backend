@@ -17,6 +17,10 @@ export function initConnectorServer(httpServer) {
       origin: '*',
       methods: ['GET', 'POST']
     },
+    // Force polling transport — Render's load balancer drops WebSocket connections
+    // mid-payload when large XML data flows through. HTTP long-polling is reliable
+    // on Render because each message is a standard HTTP POST (no persistent TCP upgrade).
+    transports: ['polling'],
     // Allow long-running Tally requests (large datasets can take minutes)
     pingTimeout:  600000,  // 10 minutes — how long to wait for a pong before disconnecting
     pingInterval:  25000,  // 25 seconds — how often to send a ping
