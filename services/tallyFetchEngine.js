@@ -409,7 +409,10 @@ export async function postXmlWithRetry(cfg, xml, timeoutMs, attempts = MAX_CHUNK
       ERR(`Attempt ${i+1}/${attempts} failed: ${err.message}`);
     }
     if (i < attempts - 1) {
-      const delay = 2000 * Math.pow(2, i);
+      // If the connector disconnected mid-request, wait longer so it has time
+      // to reconnect before we retry — connector typically reconnects in 1–5s.
+      const isDisconnect = lastErr?.message?.includes('disconnected') || lastErr?.message?.includes('not online');
+      const delay = isDisconnect ? 8000 : 2000 * Math.pow(2, i);
       LOG(`  Retrying in ${delay}ms...`);
       await new Promise(r => setTimeout(r, delay));
     }

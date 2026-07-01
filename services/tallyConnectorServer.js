@@ -6,7 +6,7 @@ import TallyConfig from '../models/TallyConfig.js';
 const connectedConnectors = new Map(); // key: connectorId, value: { socket, lastSeen }
 
 // Pending requests map for async responses
-const pendingRequests = new Map(); // key: requestId, value: { resolve, reject, timeout }
+const pendingRequests = new Map(); // key: requestId, value: { resolve, reject, timeout, connectorId, xml }
 
 let io = null;
 
@@ -113,6 +113,18 @@ export function initConnectorServer(httpServer) {
         connectedConnectors.get(socket.connectorId).online = false;
       }
 
+      // ── Fail all pending requests for this connector immediately ──────────
+      // Without this, inflight requests hang until their timeout fires (up to 10 min).
+      // postXmlWithRetry will catch the error and retry on the new socket after reconnect.
+      for (const [reqId, pending] of pendingRequests.entries()) {
+        if (pending.connectorId === socket.connectorId) {
+          console.warn(`[Connector] Failing inflight request ${reqId} due to disconnect — will be retried`);
+          clearTimeout(pending.timeout);
+          pendingRequests.delete(reqId);
+          pending.reject(new Error(`Connector disconnected (${reason}) — request will retry`));
+        }
+      }
+
       const afterDisconn = await TallyConfig.findOneAndUpdate(
         { connectorId: socket.connectorId },
         { connectionStatus: 'Disconnected' },
@@ -174,7 +186,9 @@ export async function sendTallyRequest(connectorId, xml, timeoutMs = 60000) {
       }
     }, timeoutMs);
 
-    pendingRequests.set(requestId, { resolve, reject, timeout });
+    // Store connectorId + xml so the disconnect handler can fail fast and
+    // postXmlWithRetry can retry with the same XML on the new socket.
+    pendingRequests.set(requestId, { resolve, reject, timeout, connectorId, xml });
 
     // Send request to connector
     connector.socket.emit('tally-request', {
