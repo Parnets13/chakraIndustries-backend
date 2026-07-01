@@ -403,6 +403,7 @@ export async function postXmlWithRetry(cfg, xml, timeoutMs, attempts = MAX_CHUNK
   for (let i = 0; i < attempts; i++) {
     try {
       const body = await postXml(cfg, xml, timeoutMs);
+      if (i > 0) LOG(`  ✅ Succeeded on attempt ${i+1}/${attempts} after previous disconnect`);
       return body; // Return any valid response (no length check)
     } catch (err) {
       lastErr = err;
@@ -417,6 +418,7 @@ export async function postXmlWithRetry(cfg, xml, timeoutMs, attempts = MAX_CHUNK
       await new Promise(r => setTimeout(r, delay));
     }
   }
+  ERR(`All ${attempts} attempts failed. Last error: ${lastErr?.message}`);
   throw lastErr;
 }
 
