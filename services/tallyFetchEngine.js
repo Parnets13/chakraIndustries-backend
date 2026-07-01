@@ -889,17 +889,37 @@ function mapBillToFromParsed(voucher) {
   };
   
   // Name - BILL TO ONLY
+  // IMPORTANT: BASICBUYERNAME / BUYERNAME intentionally skipped — Tally puts the
+  // CONSIGNEE name in those fields for inter-state invoices.
   const billToName = getSafeValue(voucher, 'BILLTONAME');
   if (billToName) billTo.name = billToName;
-  
-  const basicBuyerName = getSafeValue(voucher, 'BASICBUYERNAME');
-  if (!billTo.name && basicBuyerName) billTo.name = basicBuyerName;
-  
-  const buyerName = getSafeValue(voucher, 'BUYERNAME');
-  if (!billTo.name && buyerName) billTo.name = buyerName;
-  
+
   const billToLedgerName = getSafeValue(voucher, 'BILLTOLEDGERNAME');
   if (!billTo.name && billToLedgerName) billTo.name = billToLedgerName;
+
+  // ── KEY FIX: Tally TDL Collection format does NOT populate BILLTONAME / BASICBUYERNAME.
+  // The actual buyer (Bill To) is the first ALLLEDGERENTRIES.LIST entry with ISDEEMEDPOSITIVE=Yes.
+  // Also: BASICBUYERNAME/BUYERNAME sometimes contain the consignee name — skip those if they
+  // match a known ship-to name.
+  if (!billTo.name) {
+    // Pre-read ship-to names to avoid using them as bill-to
+    const knownShipNames = new Set(
+      [getSafeValue(voucher, 'CONSIGNEENAME'), getSafeValue(voucher, 'SHIPTONAME')]
+        .filter(Boolean).map(s => s.trim().toLowerCase())
+    );
+    const ledgerList = voucher['ALLLEDGERENTRIES.LIST'] || voucher['LEDGERENTRIES.LIST'] || [];
+    const ledgerArr = Array.isArray(ledgerList) ? ledgerList : [ledgerList];
+    for (const le of ledgerArr) {
+      const isDeemedPositive = getSafeValue(le, 'ISDEEMEDPOSITIVE');
+      if (isDeemedPositive === 'Yes') {
+        const ledgerName = getSafeValue(le, 'LEDGERNAME');
+        if (ledgerName && !knownShipNames.has(ledgerName.trim().toLowerCase())) {
+          billTo.name = ledgerName;
+          break;
+        }
+      }
+    }
+  }
   
   // Mailing name - BILL TO ONLY
   const billToMailingName = getSafeValue(voucher, 'BILLTOMAILINGNAME');
@@ -1583,19 +1603,41 @@ function mapBillToFromRaw(block) {
     gstin: '',
     gstRegType: ''
   };
-  
+
+  // Pre-read ship-to names (used to detect when CONSIGNEENAME accidentally appears in bill-to tags)
+  const consigneeName  = gTagVal(block, 'CONSIGNEENAME');
+  const shipToName     = gTagVal(block, 'SHIPTONAME');
+  const knownShipNames = new Set(
+    [consigneeName, shipToName].filter(Boolean).map(s => s.trim().toLowerCase())
+  );
+
   // Name fields - BILL TO ONLY
-  const billToName = gTagVal(block, 'BILLTONAME');
-  if (billToName) billTo.name = billToName;
-  
-  const basicBuyerName = gTagVal(block, 'BASICBUYERNAME');
-  if (!billTo.name && basicBuyerName) billTo.name = basicBuyerName;
-  
-  const buyerName = gTagVal(block, 'BUYERNAME');
-  if (!billTo.name && buyerName) billTo.name = buyerName;
-  
+  // IMPORTANT: BASICBUYERNAME and BUYERNAME are intentionally NOT used here.
+  // Tally puts the CONSIGNEE (ship-to/delivery party) name in those fields for
+  // inter-state invoices — using them would show the wrong party as Bill To.
+  // Only use explicit BILLTONAME and BILLTOLEDGERNAME tags.
+  const billToNameTag = gTagVal(block, 'BILLTONAME');
+  if (billToNameTag) billTo.name = billToNameTag;
+
   const billToLedgerName = gTagVal(block, 'BILLTOLEDGERNAME');
   if (!billTo.name && billToLedgerName) billTo.name = billToLedgerName;
+
+  // ── Fallback: first ALLLEDGERENTRIES.LIST with ISDEEMEDPOSITIVE=Yes is the buyer ledger ──
+  // This is reliable even when explicit BILLTONAME is absent (common in TDL Collection).
+  // Skip the entry if its ledger name is the known ship-to party.
+  if (!billTo.name) {
+    const allLedgerPattern = /<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/gi;
+    for (const m of block.matchAll(allLedgerPattern)) {
+      const lb = m[1];
+      if (gTagVal(lb, 'ISDEEMEDPOSITIVE') === 'Yes') {
+        const ledgerName = gTagVal(lb, 'LEDGERNAME');
+        if (ledgerName && !knownShipNames.has(ledgerName.trim().toLowerCase())) {
+          billTo.name = ledgerName;
+          break;
+        }
+      }
+    }
+  }
   
   // Mailing name - BILL TO ONLY
   const billToMailingName = gTagVal(block, 'BILLTOMAILINGNAME');
@@ -1967,7 +2009,11 @@ function parseVouchers(xml, voucherTypes) {
       const placeOfSupply = getSafeValue(voucher, 'PLACEOFSUPPLY');
 
       // E-invoice fields
-      const irn = getSafeValue(voucher, 'IRN') || getSafeValue(voucher, 'EINVOICEIRN');
+      // Validate IRN: a genuine GST e-invoice IRN is exactly 64 hex characters.
+      // Tally sometimes returns the voucher GUID (a UUID-like value with hyphens/slashes)
+      // in the IRN field when no real IRN exists — discard those.
+      const rawIrn = getSafeValue(voucher, 'IRN') || getSafeValue(voucher, 'EINVOICEIRN');
+      const irn = (rawIrn && /^[0-9a-fA-F]{64}$/.test(rawIrn.trim())) ? rawIrn.trim() : '';
       const ackNo = getSafeValue(voucher, 'ACKNO') || getSafeValue(voucher, 'EINVOICEACKNO');
       const rawAckDate = getSafeValue(voucher, 'ACKDATE') || getSafeValue(voucher, 'EINVOICEACKDATE');
       let ackDate = null;
@@ -2005,18 +2051,20 @@ function parseVouchers(xml, voucherTypes) {
       // ── Get regex-extracted entries FIRST (primary — bypasses fast-xml-parser dot-tag issues) ──
       const rawData = rawEntryMap.get(guid) || rawEntryMap.get(voucherNumber) || null;
       
-      // Get Bill To and Ship To from separate map functions - NO CROSS-FALLBACKS
+      // Bill To info:
+      // Priority order for Bill To name:
+      //   1. Explicit BILLTONAME tag (most reliable)
+      //   2. BILLTOLEDGERNAME tag
+      //   3. partyName (PARTYLEDGERNAME) — Tally's debtor ledger = always the buyer
+      //
+      // We deliberately skip BASICBUYERNAME / BUYERNAME — Tally puts the CONSIGNEE
+      // name in those fields for inter-state invoices, which caused wrong bill-to.
       const parsedBillTo = mapBillToFromParsed(voucher);
       const parsedShipTo = mapShipToFromParsed(voucher);
-      
-      // Bill To info: raw-extracted first, else parsed - NO SHIP TO FALLBACK
-      // In Tally, PARTYLEDGERNAME is usually the debtor (bill-to buyer).
-      // When BILLTONAME / BASICBUYERNAME are absent (common in TDL Collection),
-      // fall back to partyName as the buyer name.
+
       const rawBillToName = rawData?.billTo?.name || parsedBillTo.name;
       const rawShipToName = rawData?.shipTo?.name || parsedShipTo.name;
-      // Use partyName as billToName fallback ONLY when there's no explicit bill-to name.
-      // partyName = PARTYLEDGERNAME which is always the buyer (debtors ledger) in Tally.
+      // Use partyName as the bill-to name fallback — PARTYLEDGERNAME is always the buyer.
       const billToName = rawBillToName || partyName;
       const billToMailingName = rawData?.billTo?.mailingName || parsedBillTo.mailingName;
       // Strip literal TDL formula strings that Tally sometimes emits unexpanded
