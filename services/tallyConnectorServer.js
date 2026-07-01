@@ -6,7 +6,7 @@ import TallyConfig from '../models/TallyConfig.js';
 const connectedConnectors = new Map(); // key: connectorId, value: { socket, lastSeen }
 
 // Pending requests map for async responses
-const pendingRequests = new Map(); // key: requestId, value: { resolve, reject, timeout, connectorId, xml }
+const pendingRequests = new Map(); // key: requestId, value: { resolve, reject, timeout, connectorId, xml, acked }
 
 let io = null;
 
@@ -94,10 +94,20 @@ export function initConnectorServer(httpServer) {
 
     // Handle tally-response from connector
     socket.on('tally-response', (response) => {
-      const { id, success, data, error } = response;
+      const { id, success, data, error, ack } = response;
       
       if (pendingRequests.has(id)) {
-        const { resolve, reject, timeout } = pendingRequests.get(id);
+        const pending = pendingRequests.get(id);
+
+        // This is just an acknowledgement that the connector received the request
+        // and is processing it — keep the promise alive, don't resolve/reject yet.
+        if (ack) {
+          console.log(`[Connector] Request ${id} acknowledged by connector — waiting for Tally response`);
+          pending.acked = true;
+          return;
+        }
+
+        const { resolve, reject, timeout } = pending;
         clearTimeout(timeout);
         pendingRequests.delete(id);
         if (success) {
@@ -118,15 +128,26 @@ export function initConnectorServer(httpServer) {
         connectedConnectors.get(socket.connectorId).online = false;
       }
 
-      // ── Fail all pending requests for this connector immediately ──────────
-      // Without this, inflight requests hang until their timeout fires (up to 10 min).
-      // postXmlWithRetry will catch the error and retry on the new socket after reconnect.
+      // ── Fail pending requests that have NOT yet been acknowledged ─────────
+      // If the connector acknowledged (acked=true) the request, it means Tally
+      // is already processing it. The connector will send the response when done
+      // via the reconnected socket — so we keep those promises alive.
+      // Only fail requests that were never acknowledged (connector dropped before
+      // it even received the request), as those genuinely need a retry.
       for (const [reqId, pending] of pendingRequests.entries()) {
         if (pending.connectorId === socket.connectorId) {
-          console.warn(`[Connector] Failing inflight request ${reqId} due to disconnect — will be retried`);
-          clearTimeout(pending.timeout);
-          pendingRequests.delete(reqId);
-          pending.reject(new Error(`Connector disconnected (${reason}) — request will retry`));
+          if (pending.acked) {
+            // Connector is mid-Tally-call — leave the promise alive.
+            // The connector will reconnect and emit the tally-response on the new socket.
+            console.log(`[Connector] Request ${reqId} is acknowledged/in-progress — keeping alive through reconnect`);
+          } else {
+            // Never acknowledged — connector dropped before receiving it. Fail fast so
+            // postXmlWithRetry can retry on the new socket.
+            console.warn(`[Connector] Failing unacknowledged inflight request ${reqId} due to disconnect — will be retried`);
+            clearTimeout(pending.timeout);
+            pendingRequests.delete(reqId);
+            pending.reject(new Error(`Connector disconnected (${reason}) — request will retry`));
+          }
         }
       }
 
