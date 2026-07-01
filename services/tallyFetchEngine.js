@@ -2962,7 +2962,7 @@ async function tryFullFetch(cfg, state, entityType, timeoutMs) {
     return { ok: true, records, created, updated, skipped, failed, totalFound };
   } catch (err) {
     ERR(`Entity Failed: ${entityType}`, err);
-    return { ok: false, records: 0, created: 0, updated: 0, skipped: 0, failed: 0, totalFound: 0, reason: err.message };
+    return { ok: false, records: 0, created: 0, updated: 0, skipped: 0, failed: 0, totalFound: 0, reason: err.message, error: err.message };
   }
 }
 
@@ -3206,7 +3206,7 @@ export async function pullEntityFromTally(entityType, options = {}) {
       await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { sort: { _id: 1 }, upsert: true });
       releaseLock();
       await new Promise(r => setTimeout(r, 1000));
-      return { ok: result.ok, records: result.records, usedChunks: false, created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, totalFound: result.totalFound };
+      return { ok: result.ok, records: result.records, usedChunks: false, error: result.error || result.reason, created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, totalFound: result.totalFound };
     }
 
     // Regular handling for other entities

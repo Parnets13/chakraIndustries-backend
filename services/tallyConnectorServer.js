@@ -96,12 +96,13 @@ export function initConnectorServer(httpServer) {
         const { resolve, reject, timeout } = pendingRequests.get(id);
         clearTimeout(timeout);
         pendingRequests.delete(id);
-        
         if (success) {
           resolve(data);
         } else {
           reject(new Error(error || 'Connector error'));
         }
+      } else {
+        console.warn(`[Connector] Received tally-response for unknown requestId ${id} — ignoring`);
       }
     });
 
