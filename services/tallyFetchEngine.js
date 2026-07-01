@@ -410,12 +410,33 @@ export async function postXmlWithRetry(cfg, xml, timeoutMs, attempts = MAX_CHUNK
       ERR(`Attempt ${i+1}/${attempts} failed: ${err.message}`);
     }
     if (i < attempts - 1) {
-      // If the connector disconnected mid-request, wait longer so it has time
-      // to reconnect before we retry — connector typically reconnects in 1–5s.
       const isDisconnect = lastErr?.message?.includes('disconnected') || lastErr?.message?.includes('not online');
-      const delay = isDisconnect ? 8000 : 2000 * Math.pow(2, i);
-      LOG(`  Retrying in ${delay}ms...`);
-      await new Promise(r => setTimeout(r, delay));
+      const isTallyNotRunning = lastErr?.message?.includes('not running') || lastErr?.message?.includes('TallyPrime');
+
+      if (isDisconnect || isTallyNotRunning) {
+        // Connector dropped or Tally pre-check failed on connector side.
+        // Wait for the connector to fully reconnect and stabilise before retrying.
+        // The connector needs time to: reconnect socket + re-register listeners + verify Tally.
+        LOG(`  Waiting for connector to stabilise before retry...`);
+        if (cfg.connectorId) {
+          const { waitForConnector } = await import('./tallyConnectorServer.js');
+          const connected = await waitForConnector(cfg.connectorId, 15000);
+          if (!connected) {
+            LOG(`  Connector still offline after 15s — retrying anyway`);
+          } else {
+            // Give the connector an extra 3s after socket reconnects so its
+            // internal tally-request listener is fully registered on the new socket.
+            await new Promise(r => setTimeout(r, 3000));
+            LOG(`  Connector back online — retrying now`);
+          }
+        } else {
+          await new Promise(r => setTimeout(r, 8000));
+        }
+      } else {
+        const delay = 2000 * Math.pow(2, i);
+        LOG(`  Retrying in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
   }
   ERR(`All ${attempts} attempts failed. Last error: ${lastErr?.message}`);
