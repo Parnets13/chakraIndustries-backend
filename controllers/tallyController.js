@@ -400,25 +400,50 @@ export const resetVoucherSyncStates = async (req, res) => {
 // and populate empty billToName from partyName ─────────────────────────────────
 export const fixBillToData = async (req, res) => {
   try {
-    // Fix Invoice collection
-    const invoices = await Invoice.find({
-      $or: [
-        { billToAddress: /^</ },           // address starts with < (TDL tag)
-        { billToName: '' },                 // empty bill-to name
-        { billToAddress: /<[A-Z]/ },        // contains XML-like tag in address
-      ]
-    }).lean();
+    // Helper: reject dot-only Tally TDL placeholders (".", "..", "...")
+    const cleanVal = (v) => {
+      if (!v) return '';
+      const t = String(v).trim();
+      return /^\.+$/.test(t) ? '' : t.replace(/<[^>]+>/g, '').trim();
+    };
+    const isDirty = (v) => !v || /^\.+$/.test(String(v).trim()) || /<[A-Za-z]/.test(String(v));
 
+    // ── Build ledger lookup map from AccountsLedger + Client ──
+    const [ledgerDocs, clientDocs] = await Promise.all([
+      AccountsLedger.find({}, { ledgerName: 1, address: 1, city: 1, state: 1, country: 1, gstin: 1, gstNumber: 1 }).lean(),
+      Client.find({}, { name: 1, address: 1, city: 1, state: 1, country: 1, gstin: 1 }).lean(),
+    ]);
+    const ledgerMap = new Map();
+    for (const l of ledgerDocs) {
+      const key = (l.ledgerName || '').trim().toLowerCase();
+      if (key) ledgerMap.set(key, { address: l.address || '', city: l.city || '', state: l.state || '', country: l.country || '', gstin: l.gstin || l.gstNumber || '' });
+    }
+    for (const c of clientDocs) {
+      const key = (c.name || '').trim().toLowerCase();
+      if (key && !ledgerMap.has(key)) ledgerMap.set(key, { address: c.address || '', city: c.city || '', state: c.state || '', country: c.country || '', gstin: c.gstin || '' });
+    }
+
+    // ── Fix Invoice collection ──
+    const invoices = await Invoice.find({}).lean();
     let invoiceFixed = 0;
     for (const inv of invoices) {
       const updates = {};
-      // Strip TDL formula tags from address
-      if (inv.billToAddress && /<[A-Za-z]/.test(inv.billToAddress)) {
-        updates.billToAddress = inv.billToAddress.replace(/<[^>]+>/g, '').trim();
-      }
-      // Populate empty billToName from partyName
-      if (!inv.billToName && inv.partyName) {
-        updates.billToName = inv.partyName;
+      // Clean dirty fields
+      if (isDirty(inv.billToAddress))     updates.billToAddress     = cleanVal(inv.billToAddress);
+      if (isDirty(inv.billToName))        updates.billToName        = inv.partyName || '';
+      if (isDirty(inv.billToGST))         updates.billToGST         = '';
+      if (isDirty(inv.shipToName))        updates.shipToName        = '';
+      if (isDirty(inv.shipToAddress))     updates.shipToAddress     = '';
+      if (isDirty(inv.shipToGST))         updates.shipToGST         = '';
+      // Backfill from ledger if still missing
+      const partyKey = ((updates.billToName || inv.billToName || inv.partyName) || '').trim().toLowerCase();
+      const ledger = ledgerMap.get(partyKey);
+      if (ledger) {
+        if (!updates.billToAddress && !cleanVal(inv.billToAddress)) updates.billToAddress = ledger.address;
+        if (!inv.billToCity)    updates.billToCity    = ledger.city;
+        if (!inv.billToState)   updates.billToState   = ledger.state;
+        if (!inv.billToCountry) updates.billToCountry = ledger.country;
+        if (!cleanVal(inv.billToGST) && ledger.gstin) updates.billToGST = ledger.gstin;
       }
       if (Object.keys(updates).length > 0) {
         await Invoice.updateOne({ _id: inv._id }, { $set: updates });
@@ -426,23 +451,25 @@ export const fixBillToData = async (req, res) => {
       }
     }
 
-    // Fix TallyVoucher collection
-    const vouchers = await TallyVoucher.find({
-      $or: [
-        { billToAddress: /^</ },
-        { billToName: '' },
-        { billToAddress: /<[A-Z]/ },
-      ]
-    }).lean();
-
+    // ── Fix TallyVoucher collection ──
+    const vouchers = await TallyVoucher.find({}).lean();
     let voucherFixed = 0;
     for (const v of vouchers) {
       const updates = {};
-      if (v.billToAddress && /<[A-Za-z]/.test(v.billToAddress)) {
-        updates.billToAddress = v.billToAddress.replace(/<[^>]+>/g, '').trim();
-      }
-      if (!v.billToName && v.partyName) {
-        updates.billToName = v.partyName;
+      if (isDirty(v.billToAddress))   updates.billToAddress   = cleanVal(v.billToAddress);
+      if (isDirty(v.billToName))      updates.billToName      = v.partyName || '';
+      if (isDirty(v.billToGST))       updates.billToGST       = '';
+      if (isDirty(v.shipToName))      updates.shipToName      = '';
+      if (isDirty(v.shipToAddress))   updates.shipToAddress   = '';
+      if (isDirty(v.shipToGST))       updates.shipToGST       = '';
+      const partyKey = ((updates.billToName || v.billToName || v.partyName) || '').trim().toLowerCase();
+      const ledger = ledgerMap.get(partyKey);
+      if (ledger) {
+        if (!updates.billToAddress && !cleanVal(v.billToAddress)) updates.billToAddress = ledger.address;
+        if (!v.billToCity)    updates.billToCity    = ledger.city;
+        if (!v.billToState)   updates.billToState   = ledger.state;
+        if (!v.billToCountry) updates.billToCountry = ledger.country;
+        if (!cleanVal(v.billToGST) && ledger.gstin) updates.billToGST = ledger.gstin;
       }
       if (Object.keys(updates).length > 0) {
         await TallyVoucher.updateOne({ _id: v._id }, { $set: updates });

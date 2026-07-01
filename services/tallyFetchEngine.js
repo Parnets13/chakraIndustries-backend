@@ -664,8 +664,10 @@ function getSafeValue(obj, key, defaultValue = '') {
     value = value['#text'] ?? value['_text'] ?? value['$t'] ?? '';
   }
   if (value === '' || value === null || value === undefined) return defaultValue;
-  // Replace any newlines/carriage returns with single spaces to fix split names, preserve all other whitespace
-  return String(value).replace(/[\r\n]+/g, ' ');
+  const str = String(value).replace(/[\r\n]+/g, ' ');
+  // Reject Tally unexpanded TDL placeholders: ".", "..", "...", or any dot-only string
+  if (/^\.+$/.test(str.trim())) return defaultValue;
+  return str;
 }
 
 // Helper to recursively search an object for any of the given keys (case-insensitive)
@@ -1449,7 +1451,11 @@ function ledgersToOps(ledgers) {
 // ── Regex-based helper to extract a single tag value from a raw XML block ──
 function gTagVal(block, tag) {
   const m = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
-  return m ? decodeXmlEntities(m[1].trim()) : '';
+  if (!m) return '';
+  const val = decodeXmlEntities(m[1].trim());
+  // Reject Tally unexpanded TDL placeholders: ".", "..", "...", or any dot-only string
+  if (/^\.+$/.test(val)) return '';
+  return val;
 }
 
 // Helper to extract address for BILL TO ONLY - no ship to logic here
@@ -2017,7 +2023,10 @@ function parseVouchers(xml, voucherTypes) {
       const cleanAddr = (addr) => {
         if (!addr) return '';
         // Remove any TDL formula references like <BASICBUYERADDRESS>, <$SomeFormula> etc.
-        return addr.replace(/<[^>]+>/g, '').trim();
+        const cleaned = addr.replace(/<[^>]+>/g, '').trim();
+        // Also reject dot-only placeholders like ".", "...", "..." from unexpanded TDL
+        if (/^\.+$/.test(cleaned)) return '';
+        return cleaned;
       };
       const billToAddress = cleanAddr(rawData?.billTo?.address || parsedBillTo.address);
       const billToCity = rawData?.billTo?.city || parsedBillTo.city;
@@ -2521,6 +2530,69 @@ async function writeLedgersToDb({ ledgerOps, vendorOps, clientOps }) {
   return results.reduce((s, r) => s + (r ? (r.upsertedCount || 0) + (r.modifiedCount || 0) : 0), 0);
 }
 
+// ── Backfill bill-to address/GSTIN from Ledger master when voucher XML didn't carry them ──
+// Tally's Collection/Day Book XML often omits BILLTONAME / BILLTOADDRESS / BILLTOGSTIN
+// even though the ledger master has full address data. This post-processing step
+// looks up the party ledger by name and fills in any blank bill-to fields.
+// Ship-to fields are only backfilled if they are also blank (ship-to = bill-to is the common case).
+async function backfillBillToFromLedger(vouchers) {
+  // Collect unique party names that have missing bill-to data
+  const missingNames = new Set();
+  for (const v of vouchers) {
+    if (!v.billToAddress || !v.billToGST) {
+      const name = (v.billToName || v.partyName || '').trim();
+      if (name) missingNames.add(name);
+    }
+  }
+  if (missingNames.size === 0) return;
+
+  LOG(`[backfillBillTo] Looking up ledger data for ${missingNames.size} parties with missing bill-to info`);
+
+  // Try AccountsLedger first, then Client
+  const ledgerDocs = await AccountsLedger.find(
+    { ledgerName: { $in: Array.from(missingNames) } },
+    { ledgerName: 1, address: 1, city: 1, state: 1, country: 1, pincode: 1, gstin: 1, gstNumber: 1 }
+  ).lean();
+  const clientDocs = await Client.find(
+    { name: { $in: Array.from(missingNames) } },
+    { name: 1, address: 1, city: 1, state: 1, country: 1, pincode: 1, gstin: 1 }
+  ).lean();
+
+  // Build lookup map: partyName (lower) → {address, city, state, country, gstin}
+  const ledgerMap = new Map();
+  for (const l of ledgerDocs) {
+    const key = (l.ledgerName || '').trim().toLowerCase();
+    if (key) ledgerMap.set(key, { address: l.address || '', city: l.city || '', state: l.state || '', country: l.country || '', gstin: l.gstin || l.gstNumber || '' });
+  }
+  for (const c of clientDocs) {
+    const key = (c.name || '').trim().toLowerCase();
+    if (key && !ledgerMap.has(key)) ledgerMap.set(key, { address: c.address || '', city: c.city || '', state: c.state || '', country: c.country || '', gstin: c.gstin || '' });
+  }
+
+  let filled = 0;
+  for (const v of vouchers) {
+    if (!v.billToAddress || !v.billToGST) {
+      const key = (v.billToName || v.partyName || '').trim().toLowerCase();
+      const ledger = ledgerMap.get(key);
+      if (ledger) {
+        if (!v.billToAddress && ledger.address) { v.billToAddress = ledger.address; filled++; }
+        if (!v.billToCity    && ledger.city)    v.billToCity = ledger.city;
+        if (!v.billToState   && ledger.state)   v.billToState = ledger.state;
+        if (!v.billToCountry && ledger.country) v.billToCountry = ledger.country;
+        if (!v.billToGST     && ledger.gstin)   v.billToGST = ledger.gstin;
+        // If ship-to is also blank, set it equal to bill-to (same party)
+        if (!v.shipToName    && v.billToName)   v.shipToName = v.billToName;
+        if (!v.shipToAddress && v.billToAddress) v.shipToAddress = v.billToAddress;
+        if (!v.shipToCity    && v.billToCity)   v.shipToCity = v.billToCity;
+        if (!v.shipToState   && v.billToState)  v.shipToState = v.billToState;
+        if (!v.shipToCountry && v.billToCountry) v.shipToCountry = v.billToCountry;
+        if (!v.shipToGST     && v.billToGST)    v.shipToGST = v.billToGST;
+      }
+    }
+  }
+  LOG(`[backfillBillTo] Backfilled address/GST data for ${filled} vouchers from ledger master`);
+}
+
 async function autoCreateMissingLedgers(vouchers) {
   // Collect all unique ledger names from vouchers
   const ledgerNames = new Set();
@@ -2902,6 +2974,7 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
     skipped = 0;                 // "mismatched" are handled by other entity passes — not truly skipped
     failed = failedCount;        // only XML-parse failures count as failed initially
     await autoCreateMissingLedgers(parsed);
+    await backfillBillToFromLedger(parsed);
 
     // Save to Invoice model (for ERP invoice management)
     const invoiceOps = vouchersToInvoiceOps(parsed);
@@ -2950,6 +3023,7 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
     skipped = 0;                  // "mismatched" are handled by other entity passes — not truly skipped
     failed = failedCount;
     await autoCreateMissingLedgers(parsed);
+    await backfillBillToFromLedger(parsed);
     const ops = vouchersToTallyVoucherOps(parsed);
     LOG(`[${entityType}] Created ${ops.length} tally voucher ops`);
     
@@ -2976,6 +3050,7 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
     skipped = 0;   // in the catch-all Vouchers pass there are no "other-type" skips
     failed = failedCount;
     await autoCreateMissingLedgers(parsed);
+    await backfillBillToFromLedger(parsed);
     const salesPur = parsed.filter(v => ['Sales', 'Purchase'].some(t => normaliseVoucherType(v.voucherType) === t));
     const payRec   = parsed.filter(v => ['Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'].some(t => normaliseVoucherType(v.voucherType) === t));
 
