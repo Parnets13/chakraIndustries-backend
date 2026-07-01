@@ -529,7 +529,7 @@ function buildAllVouchersCollectionXml(cfg, fromDate = null, toDate = null) {
     <TDL><TDLMESSAGE>
       <COLLECTION NAME="AllVouchers">
         <TYPE>Voucher</TYPE>
-        <FETCH>GUID, VoucherNumber, Date, PartyLedgerName, Amount, VoucherTypeName, Narration, ALLLEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST, BILLTOLEDGERNAME, BILLTOADDRESS, BILLTOSTATE, BILLTOCOUNTRY, BILLTOPINCODE, BILLTOGSTIN, BILLTONAME, BILLTOMAILINGNAME, BILLTOCITY, BILLTOGSTREGISTRATIONTYPE, BASICBUYERNAME, BUYERNAME, BUYERADDRESS, BUYERCITY, BUYERSTATE, BUYERCOUNTRY, BUYERPINCODE, BUYERGSTIN, CONSIGNEENAME, CONSIGNEEADDRESS, CONSIGNEESTATE, CONSIGNEECOUNTRY, CONSIGNEEPINCODE, CONSIGNEEGSTIN, CONSIGNEEMAILINGNAME, CONSIGNEECITY, BASICSHIPTO, SHIPTONAME, SHIPTOADDRESS, SHIPTOSTATE, SHIPTOCOUNTRY, SHIPTOPINCODE, SHIPTOGSTIN, SHIPTOMAILINGNAME, SHIPTOCITY, DELIVERYNAME, DELIVERYADDRESS, DELIVERYADDRESS.LIST, PARTYSHIPPINGNAME, PARTYSHIPPINGADDRESS, $BillToAddress, $BillToAddress.LIST, $ShipToAddress, $ShipToAddress.LIST, $ConsigneeAddress, $ConsigneeAddress.LIST</FETCH>
+        <FETCH>GUID, VoucherNumber, Date, PartyLedgerName, Amount, VoucherTypeName, Narration, ALLLEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST, BILLTOLEDGERNAME, BILLTOADDRESS, BILLTOSTATE, BILLTOCOUNTRY, BILLTOPINCODE, BILLTOGSTIN, BILLTONAME, BILLTOMAILINGNAME, BILLTOCITY, BILLTOGSTREGISTRATIONTYPE, BASICBUYERNAME, BASICBUYERADDRESS, BASICBUYERADDRESS.LIST, BUYERNAME, BUYERADDRESS, BUYERCITY, BUYERSTATE, BUYERCOUNTRY, BUYERPINCODE, BUYERGSTIN, CONSIGNEENAME, CONSIGNEEADDRESS, CONSIGNEESTATE, CONSIGNEECOUNTRY, CONSIGNEEPINCODE, CONSIGNEEGSTIN, CONSIGNEEMAILINGNAME, CONSIGNEECITY, BASICSHIPTO, SHIPTONAME, SHIPTOADDRESS, SHIPTOSTATE, SHIPTOCOUNTRY, SHIPTOPINCODE, SHIPTOGSTIN, SHIPTOMAILINGNAME, SHIPTOCITY, DELIVERYNAME, DELIVERYADDRESS, DELIVERYADDRESS.LIST, PARTYSHIPPINGNAME, PARTYSHIPPINGADDRESS, $BillToAddress, $BillToAddress.LIST, $ShipToAddress, $ShipToAddress.LIST, $ConsigneeAddress, $ConsigneeAddress.LIST, PlaceOfSupply, PartyGSTIN, IRN, AckNo, AckDate, ReferenceNo, DeliveryNote, BuyersOrderNo, DispatchDocNo, DispatchedThrough, Destination, BillOfLadingNo, MotorVehicleNo, TermsOfDelivery</FETCH>
       </COLLECTION>
     </TDLMESSAGE></TDL>
   </DESC>
@@ -704,7 +704,20 @@ function findFirstValue(obj, keys, defaultValue = '') {
 function extractBillToAddressFromParsed(obj) {
   const lines = [];
   
-  // Try $BillToAddress.LIST first
+  // Try BASICBUYERADDRESS.LIST first (most reliable buyer address in Tally)
+  const basicBuyerAddrList = obj['BASICBUYERADDRESS.LIST'];
+  if (basicBuyerAddrList) {
+    const items = Array.isArray(basicBuyerAddrList) ? basicBuyerAddrList : [basicBuyerAddrList];
+    items.forEach(item => {
+      const line = getSafeValue(item, 'ADDRESS');
+      if (line && !line.startsWith('<') && !line.startsWith('$')) {
+        lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      }
+    });
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try $BillToAddress.LIST
   const dollarBillToList = obj['$BillToAddress.LIST'];
   if (dollarBillToList) {
     if (Array.isArray(dollarBillToList)) {
@@ -758,9 +771,9 @@ function extractBillToAddressFromParsed(obj) {
   const billToAddr = getSafeValue(obj, 'BILLTOADDRESS');
   if (billToAddr) return decodeXmlEntities(billToAddr);
   
-  // Try single BASICBUYERADDRESS
+  // Try single BASICBUYERADDRESS — only if it's actual text, not a TDL formula
   const basicBuyerAddr = getSafeValue(obj, 'BASICBUYERADDRESS');
-  if (basicBuyerAddr) return decodeXmlEntities(basicBuyerAddr);
+  if (basicBuyerAddr && !basicBuyerAddr.startsWith('<') && !basicBuyerAddr.startsWith('$')) return decodeXmlEntities(basicBuyerAddr);
   
   return '';
 }
@@ -1443,6 +1456,18 @@ function gTagVal(block, tag) {
 function extractBillToAddressOnly(block) {
   const lines = [];
   
+  // Try BASICBUYERADDRESS.LIST first (most reliable for buyer address)
+  const basicBuyerAddrListPattern = /<BASICBUYERADDRESS\.LIST[^>]*>([\s\S]*?)<\/BASICBUYERADDRESS\.LIST>/gi;
+  for (const match of [...block.matchAll(basicBuyerAddrListPattern)]) {
+    const listContent = match[1];
+    const addressMatches = [...listContent.matchAll(/<ADDRESS[^>]*>([\s\S]*?)<\/ADDRESS>/gi)];
+    for (const addrMatch of addressMatches) {
+      const line = decodeXmlEntities(addrMatch[1].trim());
+      if (line && !line.startsWith('<') && !line.startsWith('$')) lines.push(line);
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
   // Try $BillToAddress.LIST
   const billToListPattern = /<\$BillToAddress\.LIST[^>]*>([\s\S]*?)<\/\$BillToAddress\.LIST>/gi;
   for (const match of [...block.matchAll(billToListPattern)]) {
@@ -1473,9 +1498,9 @@ function extractBillToAddressOnly(block) {
   const singleBillToAddress = gTagVal(block, 'BILLTOADDRESS');
   if (singleBillToAddress) return singleBillToAddress;
   
-  // Try single BASICBUYERADDRESS
+  // Try single BASICBUYERADDRESS — but only if it's real text, not a TDL formula reference
   const basicBuyerAddress = gTagVal(block, 'BASICBUYERADDRESS');
-  if (basicBuyerAddress) return basicBuyerAddress;
+  if (basicBuyerAddress && !basicBuyerAddress.startsWith('<') && !basicBuyerAddress.startsWith('$')) return basicBuyerAddress;
   
   return '';
 }
@@ -1979,9 +2004,22 @@ function parseVouchers(xml, voucherTypes) {
       const parsedShipTo = mapShipToFromParsed(voucher);
       
       // Bill To info: raw-extracted first, else parsed - NO SHIP TO FALLBACK
-      const billToName = rawData?.billTo?.name || parsedBillTo.name;
+      // In Tally, PARTYLEDGERNAME is usually the debtor (bill-to buyer).
+      // When BILLTONAME / BASICBUYERNAME are absent (common in TDL Collection),
+      // fall back to partyName as the buyer name.
+      const rawBillToName = rawData?.billTo?.name || parsedBillTo.name;
+      const rawShipToName = rawData?.shipTo?.name || parsedShipTo.name;
+      // Use partyName as billToName fallback ONLY when there's no explicit bill-to name.
+      // partyName = PARTYLEDGERNAME which is always the buyer (debtors ledger) in Tally.
+      const billToName = rawBillToName || partyName;
       const billToMailingName = rawData?.billTo?.mailingName || parsedBillTo.mailingName;
-      const billToAddress = rawData?.billTo?.address || parsedBillTo.address;
+      // Strip literal TDL formula strings that Tally sometimes emits unexpanded
+      const cleanAddr = (addr) => {
+        if (!addr) return '';
+        // Remove any TDL formula references like <BASICBUYERADDRESS>, <$SomeFormula> etc.
+        return addr.replace(/<[^>]+>/g, '').trim();
+      };
+      const billToAddress = cleanAddr(rawData?.billTo?.address || parsedBillTo.address);
       const billToCity = rawData?.billTo?.city || parsedBillTo.city;
       const billToState = rawData?.billTo?.state || parsedBillTo.state;
       const billToCountry = rawData?.billTo?.country || parsedBillTo.country;
@@ -1992,7 +2030,7 @@ function parseVouchers(xml, voucherTypes) {
       // Ship To info: raw-extracted first, else parsed - NO BILL TO FALLBACK
       const shipToName = rawData?.shipTo?.name || parsedShipTo.name;
       const shipToMailingName = rawData?.shipTo?.mailingName || parsedShipTo.mailingName;
-      const shipToAddress = rawData?.shipTo?.address || parsedShipTo.address;
+      const shipToAddress = cleanAddr(rawData?.shipTo?.address || parsedShipTo.address);
       const shipToCity = rawData?.shipTo?.city || parsedShipTo.city;
       const shipToState = rawData?.shipTo?.state || parsedShipTo.state;
       const shipToCountry = rawData?.shipTo?.country || parsedShipTo.country;

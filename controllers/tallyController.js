@@ -396,6 +396,68 @@ export const resetVoucherSyncStates = async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 
+// ── Fix bill-to data on existing records: strip literal TDL tags from addresses
+// and populate empty billToName from partyName ─────────────────────────────────
+export const fixBillToData = async (req, res) => {
+  try {
+    // Fix Invoice collection
+    const invoices = await Invoice.find({
+      $or: [
+        { billToAddress: /^</ },           // address starts with < (TDL tag)
+        { billToName: '' },                 // empty bill-to name
+        { billToAddress: /<[A-Z]/ },        // contains XML-like tag in address
+      ]
+    }).lean();
+
+    let invoiceFixed = 0;
+    for (const inv of invoices) {
+      const updates = {};
+      // Strip TDL formula tags from address
+      if (inv.billToAddress && /<[A-Za-z]/.test(inv.billToAddress)) {
+        updates.billToAddress = inv.billToAddress.replace(/<[^>]+>/g, '').trim();
+      }
+      // Populate empty billToName from partyName
+      if (!inv.billToName && inv.partyName) {
+        updates.billToName = inv.partyName;
+      }
+      if (Object.keys(updates).length > 0) {
+        await Invoice.updateOne({ _id: inv._id }, { $set: updates });
+        invoiceFixed++;
+      }
+    }
+
+    // Fix TallyVoucher collection
+    const vouchers = await TallyVoucher.find({
+      $or: [
+        { billToAddress: /^</ },
+        { billToName: '' },
+        { billToAddress: /<[A-Z]/ },
+      ]
+    }).lean();
+
+    let voucherFixed = 0;
+    for (const v of vouchers) {
+      const updates = {};
+      if (v.billToAddress && /<[A-Za-z]/.test(v.billToAddress)) {
+        updates.billToAddress = v.billToAddress.replace(/<[^>]+>/g, '').trim();
+      }
+      if (!v.billToName && v.partyName) {
+        updates.billToName = v.partyName;
+      }
+      if (Object.keys(updates).length > 0) {
+        await TallyVoucher.updateOne({ _id: v._id }, { $set: updates });
+        voucherFixed++;
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Fixed ${invoiceFixed} invoices and ${voucherFixed} vouchers`,
+      data: { invoiceFixed, voucherFixed },
+    });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
 export const createVoucher = async (req, res) => {
   try {
     const voucher = await TallyVoucher.create({ ...req.body, source: 'ERP' });

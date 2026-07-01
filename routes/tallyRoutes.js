@@ -5,6 +5,7 @@ import {
   getMasterDataStatus, getTransactionStatus,
   triggerSync, retrySync,
   getVouchers, getVoucherById, resetVoucherSyncStates, createVoucher, deleteVoucher,
+  fixBillToData,
   getGuidStatus,
   // Directional streams (legacy)
   importFromTallyStream,
@@ -79,6 +80,7 @@ router.get('/vouchers/:id',                protect, getVoucherById);
 router.post('/vouchers',                   protect, createVoucher);
 router.delete('/vouchers/:id',             protect, deleteVoucher);
 router.post('/reset-voucher-sync-states',  protect, resetVoucherSyncStates);
+router.post('/fix-bill-to-data',           protect, fixBillToData);
 
 // ── GUID / AlterID sync status ────────────────────────────────────────────────
 router.get('/guid-status',           protect, getGuidStatus);
