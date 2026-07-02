@@ -111,9 +111,13 @@ const tallyUnit = (u) => UNIT_MAP[(u || '').toLowerCase().trim()] || 'Nos';
 
 /** Build <STATICVARIABLES> tag targeting the configured company */
 function staticVars(cfg, extra = '') {
-  // Tally stores company names as UPPERCASE internally — always send uppercase
-  const co = (cfg.companyName || '').trim().toUpperCase();
-  return `<STATICVARIABLES>${co ? `<SVCURRENTCOMPANY>${esc(co)}</SVCURRENTCOMPANY>` : ''}${extra}</STATICVARIABLES>`;
+  // Tally stores company names as UPPERCASE internally — always send uppercase.
+  // Fall back to the known company name so exports work even if companyName was
+  // never saved to TallyConfig.
+  const co = (cfg.companyName || 'SRI CHAKRA INDUSTRIES').trim().toUpperCase();
+  // SVSHOWERRORLIST=Yes forces Tally to include LINEERROR tags in EVERY response
+  // so we can see the exact rejection reason instead of just EXCEPTIONS count.
+  return `<STATICVARIABLES>${co ? `<SVCURRENTCOMPANY>${esc(co)}</SVCURRENTCOMPANY>` : ''}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST>${extra}</STATICVARIABLES>`;
 }
 
 /** Wrap XML payload in Tally Import envelope */
@@ -150,7 +154,7 @@ function parseResponse(xml, label = '') {
   const s = String(xml);
 
   // Log the full raw response for debugging — critical for diagnosing Tally issues
-  LOG(`${label} RAW RESPONSE (first 1000 chars):\n${s.slice(0, 1000)}`);
+  LOG(`${label} RAW RESPONSE (first 3000 chars):\n${s.slice(0, 3000)}`);
 
   // Collect all line errors — log each one in full so we can see exactly what Tally says
   const errors = [];
@@ -202,18 +206,26 @@ function parseResponse(xml, label = '') {
 
 // ─── CONNECTION VALIDATION ────────────────────────────────────────────────────
 
+// "List of Companies" report is NOT available in Tally Prime Gold (causes LINEERROR).
+// Use a TDL Collection on the Company type instead — works across all Tally editions.
 const PING_XML = `<ENVELOPE>
-  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
-  <BODY><EXPORTDATA><REQUESTDESC>
-    <REPORTNAME>List of Companies</REPORTNAME>
-    <STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
-  </REQUESTDESC></EXPORTDATA></BODY>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>OpenCompanyList</ID></HEADER>
+<BODY><DESC>
+  <STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="OpenCompanyList" ISMODIFY="No">
+      <TYPE>Company</TYPE>
+      <FETCH>Name</FETCH>
+    </COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
 </ENVELOPE>`;
 
 /**
  * validateTallyConnection
  * Returns { reachable, openCompany, companyMatch, error }
  * Uses connector routing (if useConnector=true) — same path as postXml.
+ * Auto-saves the detected company name to TallyConfig when companyName is not yet set.
  */
 export async function validateTallyConnection(cfg) {
   LOG('validateTallyConnection — connector:', cfg.useConnector, 'id:', cfg.connectorId || '(none)');
@@ -222,18 +234,26 @@ export async function validateTallyConnection(cfg) {
     const body = await postXmlWithRetry(cfg, PING_XML, 20000);
     LOG('Ping response:', body.slice(0, 400));
 
-    const coMatch =
-      body.match(/<COMPANYNAME>(.*?)<\/COMPANYNAME>/i) ||
-      body.match(/<NAME>(.*?)<\/NAME>/i) ||
-      body.match(/COMPANY NAME\s*[:=]\s*([^\n<]+)/i);
+    // TDL Company collection returns <NAME> tags
+    const nameMatches = [...body.matchAll(/<NAME>(.*?)<\/NAME>/gi)].map(m => m[1].trim()).filter(Boolean);
+    // Also try COMPANYNAME tag as fallback
+    const coMatchFallback = body.match(/<COMPANYNAME>(.*?)<\/COMPANYNAME>/i);
+    const openCompany = nameMatches[0] || (coMatchFallback ? coMatchFallback[1].trim() : null);
 
-    const openCompany = coMatch ? coMatch[1].trim() : null;
-    const expected    = (cfg.companyName || '').trim();
+    const expected = (cfg.companyName || '').trim();
 
     const companyMatch = !expected || !openCompany ||
       openCompany.toLowerCase().replace(/\s+/g, '') === expected.toLowerCase().replace(/\s+/g, '');
 
-    await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Connected' }, { upsert: true });
+    // ── Auto-save detected company name if not yet configured ────────────────
+    // This ensures all subsequent exports use the correct SVCURRENTCOMPANY tag.
+    const updatePayload = { connectionStatus: 'Connected' };
+    if (openCompany && !expected) {
+      updatePayload.companyName = openCompany;
+      LOG(`Auto-saved companyName from Tally: "${openCompany}"`);
+    }
+    await TallyConfig.findOneAndUpdate({}, updatePayload, { upsert: true, sort: { _id: 1 } });
+
     return { reachable: true, openCompany, companyMatch, error: null };
 
   } catch (err) {
@@ -630,7 +650,7 @@ export async function exportSystemLedgers(cfg, triggeredBy) {
 // Uses postXmlWithRetry so it works in both connector mode and direct mode.
 async function fetchTallyPOMap(cfg) {
   try {
-    const company = (cfg.companyName || '').trim().toUpperCase();
+    const company = (cfg.companyName || 'SRI CHAKRA INDUSTRIES').trim().toUpperCase();
     const coTag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
     const xml = `<ENVELOPE>
 <HEADER>
