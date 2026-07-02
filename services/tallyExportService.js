@@ -1094,48 +1094,15 @@ export async function exportJournalVouchers(cfg, triggeredBy) {
 
 /**
  * runFullExportToTally
- * Exports ALL ERP data to Tally in the correct dependency order.
- * Each task is independent — failures are logged but do not abort subsequent tasks.
- *
- * Order:
- *   1. Units of Measure         (prerequisite for stock items)
- *   2. Stock Groups/Categories  (prerequisite for stock items)
- *   3. Godowns / Warehouses     (prerequisite for inventory)
- *   4. System + Account Ledgers (prerequisite for vouchers)
- *   5. Vendor Ledgers           (prerequisite for purchase vouchers)
- *   6. Customer Ledgers         (prerequisite for sales vouchers)
- *   7. Stock Items + Opening Stock + GST
- *   8. Sales Invoices
- *   9. Purchase Invoices
- *  10. Credit Notes
- *  11. Debit Notes
- *  12. Payment Vouchers
- *  13. Receipt Vouchers
- *  14. Journal Vouchers
- *
- * @param {object}   cfg          - TallyConfig document
- * @param {*}        triggeredBy  - User ID for logs
- * @param {Function} onProgress   - SSE callback fn(taskResult)
- * @returns {object} summary
+ * Exports ERP vouchers to Tally: Sales Invoices + Purchase Invoices only.
+ * Master data (Ledgers, Stock Items, Units, Groups, etc.) is NOT exported.
  */
 export async function runFullExportToTally(cfg, triggeredBy, onProgress = () => {}) {
   const startTime = Date.now();
 
   const TASKS = [
-    { key: 'units',             label: 'Units of Measure',       fn: () => exportUnits(cfg, triggeredBy) },
-    { key: 'stockGroups',       label: 'Stock Groups',           fn: () => exportStockGroups(cfg, triggeredBy) },
-    { key: 'godowns',           label: 'Godowns / Warehouses',   fn: () => exportGodowns(cfg, triggeredBy) },
-    { key: 'systemLedgers',     label: 'Ledger Masters',         fn: () => exportSystemLedgers(cfg, triggeredBy) },
-    { key: 'vendorLedgers',     label: 'Vendor / Supplier Masters', fn: () => exportVendorLedgers(cfg, triggeredBy) },
-    { key: 'customerLedgers',   label: 'Customer Masters',       fn: () => exportCustomerLedgers(cfg, triggeredBy) },
-    { key: 'stockItems',        label: 'Stock Items + Opening Stock + GST', fn: () => exportStockItems(cfg, triggeredBy) },
-    { key: 'salesInvoices',     label: 'Sales Invoices',         fn: () => exportSalesInvoices(cfg, triggeredBy) },
-    { key: 'purchaseInvoices',  label: 'Purchase Invoices',      fn: () => exportPurchaseInvoices(cfg, triggeredBy) },
-    { key: 'creditNotes',       label: 'Credit Notes',           fn: () => exportCreditNotes(cfg, triggeredBy) },
-    { key: 'debitNotes',        label: 'Debit Notes',            fn: () => exportDebitNotes(cfg, triggeredBy) },
-    { key: 'paymentVouchers',   label: 'Payment Vouchers',       fn: () => exportPaymentVouchers(cfg, triggeredBy) },
-    { key: 'receiptVouchers',   label: 'Receipt Vouchers',       fn: () => exportReceiptVouchers(cfg, triggeredBy) },
-    { key: 'journalVouchers',   label: 'Journal Vouchers',       fn: () => exportJournalVouchers(cfg, triggeredBy) },
+    { key: 'salesInvoices',    label: 'Sales Invoices',    fn: () => exportSalesInvoices(cfg, triggeredBy) },
+    { key: 'purchaseInvoices', label: 'Purchase Invoices', fn: () => exportPurchaseInvoices(cfg, triggeredBy) },
   ];
 
   const results = [];

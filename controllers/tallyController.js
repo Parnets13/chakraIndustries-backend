@@ -877,9 +877,6 @@ export const exportToTallyStream = async (req, res) => {
     const exportTasks = [];
     const typeNorm = type.toLowerCase();
 
-    if (typeNorm === 'full' || typeNorm === 'masters' || typeNorm === 'master') {
-      exportTasks.push({ label: 'Masters (Items + Ledgers + Vendors + Clients)', fn: () => pushMastersToTally(cfg, user._id) });
-    }
     if (typeNorm === 'full' || typeNorm === 'purchase' || typeNorm === 'purchase vouchers') {
       exportTasks.push({ label: 'Purchase Vouchers', fn: () => pushPurchaseVouchersToTally(cfg, user._id) });
     }
@@ -1018,8 +1015,6 @@ export const exportToTally = async (req, res) => {
     const results = [];
     const typeNorm = type.toLowerCase();
 
-    if (typeNorm === 'full' || typeNorm === 'masters' || typeNorm === 'master')
-      results.push(await pushMastersToTally(cfg, req.user?._id));
     if (typeNorm === 'full' || typeNorm === 'purchase')
       results.push(await pushPurchaseVouchersToTally(cfg, req.user?._id));
     if (typeNorm === 'full' || typeNorm === 'sales')

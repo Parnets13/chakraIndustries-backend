@@ -1163,8 +1163,8 @@ export async function runFullSync(triggeredBy) {
   const results   = [];
 
   // ── ERP → Tally ────────────────────────────────────────────────────────────
+  // Masters (Ledgers, Stock Items, etc.) are NOT exported — vouchers only.
   if (direction !== 'Tally → ERP') {
-    if (prefs.masterData !== false)       results.push(await pushMastersToTally(cfg, triggeredBy));
     if (prefs.purchaseVouchers !== false) results.push(await pushPurchaseVouchersToTally(cfg, triggeredBy));
     if (prefs.salesVouchers !== false)    results.push(await pushSalesVouchersToTally(cfg, triggeredBy));
     if (prefs.paymentVouchers !== false)  results.push(await pushPaymentVouchersToTally(cfg, triggeredBy));
@@ -1214,8 +1214,8 @@ export async function runTargetedSync(type, triggeredBy) {
     case 'Items':
     case 'Ledger':
     case 'Ledgers': {
+      // Master export to Tally is disabled — only pull from Tally is allowed.
       const results = [];
-      if (!pullOnly) results.push(await pushMastersToTally(cfg, triggeredBy));
       if (!pushOnly) {
         results.push(await pullItemsFromTally(cfg, triggeredBy));
         results.push(await pullLedgersFromTally(cfg, triggeredBy));
@@ -1226,20 +1226,14 @@ export async function runTargetedSync(type, triggeredBy) {
     case 'Purchase':
     case 'Purchase Vouchers': {
       const results = [];
-      if (!pullOnly) {
-        results.push(await pushMastersToTally(cfg, triggeredBy));
-        results.push(await pushPurchaseVouchersToTally(cfg, triggeredBy));
-      }
+      if (!pullOnly) results.push(await pushPurchaseVouchersToTally(cfg, triggeredBy));
       if (!pushOnly) results.push(await pullVouchersFromTally(cfg,'Purchase',triggeredBy));
       return mergeResults(results);
     }
     case 'Sales':
     case 'Sales Vouchers': {
       const results = [];
-      if (!pullOnly) {
-        results.push(await pushMastersToTally(cfg, triggeredBy));
-        results.push(await pushSalesVouchersToTally(cfg, triggeredBy));
-      }
+      if (!pullOnly) results.push(await pushSalesVouchersToTally(cfg, triggeredBy));
       if (!pushOnly) results.push(await pullVouchersFromTally(cfg,'Sales',triggeredBy));
       return mergeResults(results);
     }
