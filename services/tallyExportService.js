@@ -793,6 +793,9 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             : +(itemsSubtotal > 0 ? (item.amt / itemsSubtotal) * salesBase : salesBase / itemLines.length).toFixed(2);
           allocated = +(allocated + lineAlloc).toFixed(2);
 
+          // Sales voucher sign convention for inventory entries:
+          //   ALLINVENTORYENTRIES: stock goes OUT → ISDEEMEDPOSITIVE=Yes, AMOUNT=negative
+          //   ACCOUNTINGALLOCATIONS (Sales Accounts): credit entry → ISDEEMEDPOSITIVE=No, AMOUNT=negative
           return `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${esc(item.name)}</STOCKITEMNAME>
@@ -803,7 +806,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <BILLEDQTY>${item.qty} ${item.unit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>Sales Accounts</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
     <AMOUNT>-${lineAlloc.toFixed(2)}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
