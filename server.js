@@ -361,7 +361,44 @@ httpServer.listen(PORT, async () => {
   }
   // ────────────────────────────────────────────────────────────────────────────
 
-  // ── SMTP startup verification ────────────────────────────────────────────
+  // ── ConnectorRegistration migration — back-fill connectorSecret from TallyConfig ─
+  // Old registrations were created before connectorSecret was stored per-device.
+  // Copy the secret from TallyConfig into any registration that is missing it.
+  try {
+    const ConnectorRegistration = (await import('./models/ConnectorRegistration.js')).default;
+    const cfg = await (await import('./models/TallyConfig.js')).default.findOne({}, null, { sort: { _id: 1 } });
+    const missingSecret = await ConnectorRegistration.find({ $or: [{ connectorSecret: { $exists: false } }, { connectorSecret: '' }] });
+    for (const reg of missingSecret) {
+      // If this registration's connectorId matches what TallyConfig has, use that secret
+      if (cfg?.connectorSecret && cfg?.connectorId === reg.connectorId) {
+        reg.connectorSecret = cfg.connectorSecret;
+      } else if (cfg?.connectorSecret) {
+        reg.connectorSecret = cfg.connectorSecret;
+      }
+      // Mark as default if it matches TallyConfig's connectorId (legacy single-connector setup)
+      if (cfg?.connectorId === reg.connectorId && !reg.isDefault) {
+        reg.isDefault = true;
+      }
+      await reg.save();
+    }
+    if (missingSecret.length > 0) {
+      console.log(`[Startup] Back-filled connectorSecret for ${missingSecret.length} existing connector registration(s)`);
+    }
+    // If no registration is marked as default, promote the oldest one
+    const defaultCount = await ConnectorRegistration.countDocuments({ isDefault: true });
+    if (defaultCount === 0) {
+      const oldest = await ConnectorRegistration.findOne({}).sort({ createdAt: 1 });
+      if (oldest) {
+        oldest.isDefault = true;
+        await oldest.save();
+        console.log(`[Startup] Auto-promoted oldest connector as default: ${oldest.connectorId}`);
+      }
+    }
+  } catch (migErr) {
+    console.warn('[Startup] ConnectorRegistration migration error (non-fatal):', migErr.message);
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   try {
     const { verifyTransporter } = await import('./utils/emailService.js');
     await verifyTransporter();
