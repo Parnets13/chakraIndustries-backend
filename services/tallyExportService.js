@@ -814,6 +814,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   ${guidTag}
   <DATE>${date}</DATE>
   <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+  <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
   <VOUCHERNUMBER>${esc(inv.invoiceNo)}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(inv.partyName)}</PARTYLEDGERNAME>
   <BUYERSORDERNO>${esc(inv.buyersOrderNo || '')}</BUYERSORDERNO>
@@ -974,6 +975,7 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
   ${guidTag}
   <DATE>${voucherDate}</DATE>
   <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+  <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
   <VOUCHERNUMBER>${esc(po.poId)}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(vendorName)}</PARTYLEDGERNAME>
   <BUYERSORDERNO>${esc(po.poId)}</BUYERSORDERNO>
