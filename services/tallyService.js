@@ -121,7 +121,7 @@ function parseTallyResponse(xml, label = '') {
   // duplicate number, etc.). These are NOT in <ERRORS> and NOT in <LINEERROR>.
   // Tally silently discards exceptioned vouchers — they will never appear in Tally.
   if (exceptions > 0) {
-    const msg = `Tally rejected ${exceptions} record(s) with EXCEPTIONS (ledger missing, imbalanced voucher, or duplicate number). Run master sync first, then retry.`;
+    const msg = `Tally rejected ${exceptions} record(s) with EXCEPTIONS — possible causes: party ledger name mismatch, imbalanced voucher amounts, or duplicate voucher number. Check server logs for RAW RESPONSE details.`;
     ERR(`${label} EXCEPTIONS count: ${exceptions}`);
     errors.push(msg);
   }

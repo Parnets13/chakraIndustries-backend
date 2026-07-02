@@ -191,6 +191,19 @@ function parseResponse(xml, label = '') {
     ERR(`${label} ERRORS count: ${errCount}`);
   }
 
+  // <EXCEPTIONS> = Tally business-logic rejections (party ledger not found,
+  // imbalanced voucher, duplicate voucher number, etc.).
+  // Tally silently discards excepted vouchers — they never appear in Tally.
+  // Do NOT tell user to "run master sync" — the actual cause is usually a name
+  // mismatch between ERP partyName and the ledger name in Tally.
+  const excTag = s.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i);
+  const excCount = excTag ? parseInt(excTag[1], 10) : 0;
+  if (excCount > 0) {
+    const msg = `Tally rejected ${excCount} record(s) — possible causes: party ledger name mismatch, imbalanced voucher amounts, or duplicate voucher number. Check server logs for details.`;
+    errors.push(msg);
+    ERR(`${label} EXCEPTIONS count: ${excCount}`);
+  }
+
   const created = parseInt(s.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
   const altered = parseInt(s.match(/<ALTERED>(\d+)<\/ALTERED>/i)?.[1] || '0');
   const skipped = parseInt(s.match(/<SKIPPED>(\d+)<\/SKIPPED>/i)?.[1] || '0');
@@ -703,6 +716,36 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     LOG(`exportSalesInvoices: ${invoices.length} invoices to export`);
     LOG(`First invoice: no=${invoices[0].invoiceNo} source=${invoices[0].source} PO=${invoices[0].buyersOrderNo || 'none'}`);
 
+    // ── Step 1: Auto-create required ledgers & stock items BEFORE vouchers ───
+    // Collect unique party names and stock item names from all invoices.
+    // ACTION="Create" — Tally silently skips records that already exist.
+    const partyNames = [...new Set(invoices.map(inv => inv.partyName).filter(Boolean))];
+    const stockNames = [...new Set(
+      invoices.flatMap(inv => (inv.items || []).map(i => (i.description || i.name || '').trim())).filter(Boolean)
+    )];
+
+    const autoLedgerXml = [
+      `<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT></LEDGER>`,
+      `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
+      ...partyNames.map(name =>
+        `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sundry Debtors</PARENT></LEDGER>`
+      ),
+    ].join('');
+
+    const autoStockXml = stockNames.map(name =>
+      `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS></STOCKITEM>`
+    ).join('');
+
+    LOG(`Sales: auto-creating ${partyNames.length} party ledgers + ${stockNames.length} stock items before vouchers`);
+    const mastersEnvelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${autoLedgerXml}${autoStockXml}</TALLYMESSAGE></REQUESTDATA>
+</IMPORTDATA></BODY></ENVELOPE>`;
+    const mastersResp = await postXml(cfg, mastersEnvelope, 60000);
+    parseResponse(mastersResp, 'Sales Auto-Masters'); // log result, don't abort
+
     // ── Fetch existing Tally vouchers indexed by BuyersOrderNo ───────────────
     // PO Number is the ONLY match key. No Party Name / Invoice Number matching.
     const tallyPOMap = await fetchTallyPOMap(cfg);
@@ -801,6 +844,35 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
     }).populate('vendor').lean();
 
     if (!pos.length) return { ok: true, records: 0 };
+
+    // ── Step 1: Auto-create required ledgers & stock items BEFORE vouchers ───
+    // ACTION="Create" — Tally silently skips records that already exist.
+    const vendorNames = [...new Set(pos.map(po => po.vendor?.companyName).filter(Boolean))];
+    const poStockNames = [...new Set(
+      pos.flatMap(po => (po.items || []).map(i => (i.name || '').trim())).filter(Boolean)
+    )];
+
+    const purAutoLedgerXml = [
+      `<LEDGER NAME="Purchase Accounts" ACTION="Create"><NAME>Purchase Accounts</NAME><PARENT>Purchase Accounts</PARENT></LEDGER>`,
+      `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
+      ...vendorNames.map(name =>
+        `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sundry Creditors</PARENT></LEDGER>`
+      ),
+    ].join('');
+
+    const purAutoStockXml = poStockNames.map(name =>
+      `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS></STOCKITEM>`
+    ).join('');
+
+    LOG(`Purchase: auto-creating ${vendorNames.length} vendor ledgers + ${poStockNames.length} stock items before vouchers`);
+    const purMastersEnvelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${purAutoLedgerXml}${purAutoStockXml}</TALLYMESSAGE></REQUESTDATA>
+</IMPORTDATA></BODY></ENVELOPE>`;
+    const purMastersResp = await postXml(cfg, purMastersEnvelope, 60000);
+    parseResponse(purMastersResp, 'Purchase Auto-Masters'); // log result, don't abort
 
     // ── Fetch existing Tally vouchers indexed by BuyersOrderNo ───────────────
     // PO Number is the ONLY match key.
