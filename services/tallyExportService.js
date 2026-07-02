@@ -795,7 +795,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <STOCKITEMNAME>${esc(item.name)}</STOCKITEMNAME>
   <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
   <RATE>${item.rate.toFixed(2)} /1 ${item.unit}</RATE>
-  <AMOUNT>-${item.amt.toFixed(2)}</AMOUNT>
+  <AMOUNT>-${lineAlloc.toFixed(2)}</AMOUNT>
   <ACTUALQTY>${item.qty} ${item.unit}</ACTUALQTY>
   <BILLEDQTY>${item.qty} ${item.unit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
@@ -954,7 +954,7 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
   <STOCKITEMNAME>${esc(item.name || 'Item')}</STOCKITEMNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
   <RATE>${rate.toFixed(2)} /1 ${unit}</RATE>
-  <AMOUNT>-${total.toFixed(2)}</AMOUNT>
+  <AMOUNT>-${lineAlloc.toFixed(2)}</AMOUNT>
   <ACTUALQTY>${qty} ${unit}</ACTUALQTY>
   <BILLEDQTY>${qty} ${unit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
@@ -978,8 +978,8 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
   <ISINVOICE>Yes</ISINVOICE>
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(vendorName)}</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-    <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
   ${inventoryLines}
 </VOUCHER>`;
