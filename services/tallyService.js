@@ -126,6 +126,79 @@ function parseTallyResponse(xml, label = '') {
   return { ok: true, created, altered };
 }
 
+// ─── PO NUMBER LOOKUP: Fetch existing Tally vouchers indexed by BuyersOrderNo ─
+// Used by ERP → Tally push functions to decide Create vs Alter.
+//
+// Returns an object with TWO maps:
+//   byPO       → Map<BuyersOrderNo (uppercase) → { guid, voucherNumber }>
+//   byVchNo    → Map<VoucherNumber (uppercase)  → { guid, voucherNumber }>
+//
+// Why two maps?
+//   - Vouchers pushed BEFORE the PO-number change won't have BuyersOrderNo set in Tally.
+//     Matching by VoucherNumber (= invoiceNo / poId) catches those and prevents duplicates.
+//   - Vouchers pushed AFTER will match by BuyersOrderNo (the primary key going forward).
+async function fetchTallyPOMap(cfg) {
+  try {
+    const company = (cfg.companyName || '').trim().toUpperCase();
+    const coTag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+
+    const xml = `<ENVELOPE>
+<HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>ERPVoucherPOLookup</ID>
+</HEADER>
+<BODY>
+  <DESC>
+    <STATICVARIABLES>
+      ${coTag}
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="ERPVoucherPOLookup">
+        <TYPE>Voucher</TYPE>
+        <FETCH>GUID, VoucherNumber, VoucherTypeName, BuyersOrderNo</FETCH>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC>
+</BODY>
+</ENVELOPE>`;
+
+    const resp = await postXmlWithRetry(cfg, xml, 60000);
+    if (!resp) return { byPO: new Map(), byVchNo: new Map() };
+
+    const byPO    = new Map();
+    const byVchNo = new Map();
+
+    for (const m of resp.matchAll(/<VOUCHER[^>]*>([\s\S]*?)<\/VOUCHER>/gi)) {
+      const block = m[1];
+      const guid          = (block.match(/<GUID>(.*?)<\/GUID>/i)?.[1]                 || '').trim();
+      const voucherNumber = (block.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/i)?.[1] || '').trim();
+      const buyersOrderNo = (block.match(/<BUYERSORDERNO>(.*?)<\/BUYERSORDERNO>/i)?.[1] || '').trim();
+      if (!guid) continue;
+
+      const entry = { guid, voucherNumber };
+
+      // Primary: index by BuyersOrderNo (the PO number going forward)
+      if (buyersOrderNo) {
+        byPO.set(buyersOrderNo.toUpperCase().trim(), entry);
+      }
+      // Fallback: index by VoucherNumber (= invoiceNo / poId from the ERP)
+      // This catches vouchers that were pushed before BuyersOrderNo was added.
+      if (voucherNumber) {
+        byVchNo.set(voucherNumber.toUpperCase().trim(), entry);
+      }
+    }
+
+    LOG(`fetchTallyPOMap: byPO=${byPO.size} entries, byVchNo=${byVchNo.size} entries`);
+    return { byPO, byVchNo };
+  } catch (err) {
+    ERR('fetchTallyPOMap failed (non-fatal, will default to Create):', err.message);
+    return { byPO: new Map(), byVchNo: new Map() }; // Safe fallback → Create
+  }
+}
+
 // ─── SYNC LOG ─────────────────────────────────────────────────────────────────
 
 async function writeLog({ syncId, type, entity, direction, status, duration, error, records, triggeredBy }) {
@@ -344,13 +417,17 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
     const pos = await PurchaseOrder.find({
       status: { $in:['Approved','Received'] },
       dataSource: { $ne: 'Tally' },
-      $or: [{ tallySync: { $ne:true } }, { tallyGuid: { $exists:false } }],
     }).populate('vendor').lean();
 
     if (!pos.length) {
       await writeLog({ syncId, type:'Purchase', direction:'ERP → Tally', status:'Success', records:0, triggeredBy });
       return { ok:true, records:0 };
     }
+
+    // ── Step 1: Fetch existing Tally vouchers indexed by PO Number ──────────
+    // This lets us decide Create vs Alter per voucher, regardless of tallySync flag.
+    const { byPO: tallyPOMap, byVchNo: tallyVchMap } = await fetchTallyPOMap(cfg);
+    LOG(`pushPurchaseVouchersToTally: ${pos.length} POs to process, byPO=${tallyPOMap.size} byVchNo=${tallyVchMap.size}`);
 
     const today = tallyDate(new Date());
     const vouchersXml = pos.map(po => {
@@ -361,6 +438,15 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
       const grandTot   = +(po.grandTotal||itemsTotal+gstAmt).toFixed(2);
       const cgstAmt    = +(gstAmt/2).toFixed(2);
       const sgstAmt    = +(gstAmt-cgstAmt).toFixed(2);
+
+      // ── Step 2: Match by PO Number — po.poId is the PO Number ────────────
+      // Primary: BuyersOrderNo match. Fallback: VoucherNumber match (for older pushes).
+      const poNumber   = (po.poId || '').toUpperCase().trim();
+      const existing   = (poNumber ? tallyPOMap.get(poNumber) : null)
+                      || (poNumber ? tallyVchMap.get(poNumber) : null);
+      const action     = existing ? 'Alter' : 'Create';
+      const guidTag    = existing ? `<GUID>${esc(existing.guid)}</GUID>` : '';
+      LOG(`PO ${po.poId}: action=${action}${existing ? ` (Tally GUID: ${existing.guid})` : ' (new)'}`);
 
       const itemsXml = (po.items||[]).map(item => {
         const qty   = item.qty||item.quantity||1;
@@ -380,11 +466,13 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
       }).join('');
 
       return `
-<VOUCHER VCHTYPE="Purchase" ACTION="Create">
+<VOUCHER VCHTYPE="Purchase" ACTION="${action}">
+  ${guidTag}
   <DATE>${date}</DATE>
   <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(po.poId)}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(vendorName)}</PARTYLEDGERNAME>
+  <BUYERSORDERNO>${esc(po.poId)}</BUYERSORDERNO>
   <NARRATION>PO: ${esc(po.poId)}</NARRATION>
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(vendorName)}</LEDGERNAME>
@@ -429,12 +517,10 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
     // Export all ERP-created invoices that haven't been synced yet.
     // Status filter is intentionally broad — 'Draft' is the default for Excel-uploaded
     // invoices from /finance/invoices/single. We must not block those from export.
-    // Only skip: Cancelled (invalid) and already-synced records.
-    // Tally-origin invoices are excluded by the source filter.
+    // Only skip: Cancelled (invalid) and Tally-origin invoices.
     const invoices = await Invoice.find({
       status: { $nin: ['Cancelled'] },
       source: { $nin: ['Tally', 'tally'] },
-      $or: [{ tallySync: { $ne: true } }, { tallyGuid: { $exists: false } }],
     }).lean();
 
     if (!invoices.length) {
@@ -444,6 +530,11 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
 
     LOG(`pushSalesVouchersToTally: exporting ${invoices.length} invoices`);
     LOG(`First invoice: no=${invoices[0].invoiceNo} source=${invoices[0].source} tallySync=${invoices[0].tallySync} tallyGuid=${invoices[0].tallyGuid || 'none'}`);
+
+    // ── Step 1: Fetch existing Tally vouchers indexed by PO Number ──────────
+    // Determines whether to Create (new PO) or Alter (existing PO) each voucher.
+    const { byPO: tallyPOMap, byVchNo: tallyVchMap } = await fetchTallyPOMap(cfg);
+    LOG(`pushSalesVouchersToTally: ${invoices.length} invoices to process, byPO=${tallyPOMap.size} byVchNo=${tallyVchMap.size}`);
 
     const vouchersXml = invoices.map((inv, idx) => {
       const cgst = (inv.items||[]).reduce((s,i)=>s+(i.cgst||0),0);
@@ -463,12 +554,26 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`).join('');
 
+      // ── Step 2: Match by PO Number (buyersOrderNo), fallback to VoucherNumber ─
+      // Priority 1: BuyersOrderNo match — the primary key going forward.
+      // Priority 2: VoucherNumber match — catches vouchers pushed before BuyersOrderNo was added.
+      // Neither found → Create new.
+      const poNumber = (inv.buyersOrderNo || '').toUpperCase().trim();
+      const vchKey   = (inv.invoiceNo     || '').toUpperCase().trim();
+      const existing = (poNumber ? tallyPOMap.get(poNumber) : null)
+                    || (vchKey   ? tallyVchMap.get(vchKey)  : null);
+      const action   = existing ? 'Alter' : 'Create';
+      const guidTag  = existing ? `<GUID>${esc(existing.guid)}</GUID>` : '';
+      LOG(`Invoice ${inv.invoiceNo} (PO: ${poNumber||'none'}): action=${action}${existing ? ` (Tally GUID: ${existing.guid})` : ' (new)'}`);
+
       const vXml = `
-<VOUCHER VCHTYPE="Sales" ACTION="Create">
+<VOUCHER VCHTYPE="Sales" ACTION="${action}">
+  ${guidTag}
   <DATE>${tallyDate(inv.invoiceDate)||tallyDate(new Date())}</DATE>
   <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(inv.invoiceNo)}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(inv.partyName)}</PARTYLEDGERNAME>
+  <BUYERSORDERNO>${esc(inv.buyersOrderNo||'')}</BUYERSORDERNO>
   <NARRATION>ERP Invoice: ${esc(inv.invoiceNo)}</NARRATION>
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
