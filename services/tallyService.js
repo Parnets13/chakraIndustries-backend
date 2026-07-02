@@ -128,7 +128,28 @@ export async function testTallyConnection() {
 }
 
 // ─── PUSH: ALL MASTERS (Items + Customers + Vendors + Ledgers) ────────────────
-// Uses GUID to avoid creating duplicates on re-sync.
+// Splits into multiple batches to avoid sending a single 3MB+ payload that Tally
+// cannot process within the timeout window. Each batch is ≤ MASTER_BATCH_SIZE records.
+const MASTER_BATCH_SIZE = 100;  // records per Tally Import Data request
+const MASTER_TIMEOUT_MS = 120000; // 2 min per batch — connector round-trip adds latency
+
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+function wrapMastersXml(cfg, bodyXml) {
+  return `<ENVELOPE>
+<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA>
+<REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">
+${bodyXml}
+</TALLYMESSAGE></REQUESTDATA>
+</IMPORTDATA></BODY>
+</ENVELOPE>`;
+}
 
 export async function pushMastersToTally(cfg, triggeredBy) {
   const start  = Date.now();
@@ -137,16 +158,16 @@ export async function pushMastersToTally(cfg, triggeredBy) {
 
   try {
     const [items, vendors, clients, corporateClients, ledgers, pos] = await Promise.all([
-      ItemMaster.find({ isActive: true }).lean(),
-      Vendor.find({}).lean(),
-      Client.find({ status: 'Active' }).lean(),
-      CorporateClient.find({ status: 'Active' }).lean(),
-      AccountsLedger.find({ isActive: true }).lean(),
+      ItemMaster.find({ isActive: true, dataSource: { $ne: 'Tally' } }).lean(),
+      Vendor.find({ dataSource: { $ne: 'Tally' } }).lean(),
+      Client.find({ status: 'Active', dataSource: { $ne: 'Tally' } }).lean(),
+      CorporateClient.find({ status: 'Active', dataSource: { $ne: 'Tally' } }).lean(),
+      AccountsLedger.find({ isActive: true, dataSource: { $ne: 'Tally' } }).lean(),
       PurchaseOrder.find({ status: { $in: ['Approved','Received'] } }).lean(),
     ]);
 
-    // ── Stock Items (with GUID for dedup) ───────────────────────────────────
-    const stockItemsXml = items.map(item => `
+    // ── Build per-record XML fragments ──────────────────────────────────────
+    const stockItemFragments = items.map(item => `
 <STOCKITEM NAME="${esc(item.name)}" ACTION="${item.tallyGuid ? 'Alter' : 'Create'}">
   <NAME>${esc(item.name)}</NAME>
   <UNITS>${tallyUnit(item.unit)}</UNITS>
@@ -155,7 +176,7 @@ export async function pushMastersToTally(cfg, triggeredBy) {
   <HSNCODE>${esc(item.hsn || '')}</HSNCODE>
   <GSTRATE>${item.gst || 0}</GSTRATE>
   ${item.tallyGuid ? `<GUID>${esc(item.tallyGuid)}</GUID>` : ''}
-</STOCKITEM>`).join('');
+</STOCKITEM>`);
 
     // Extra items from POs not in ItemMaster
     const knownNames = new Set(items.map(i => i.name));
@@ -165,22 +186,24 @@ export async function pushMastersToTally(cfg, triggeredBy) {
         if (it.name && !knownNames.has(it.name)) extraNames.add(it.name.trim());
       }
     }
-    const extraItemsXml = [...extraNames].map(name => `
+    const extraItemFragments = [...extraNames].map(name => `
 <STOCKITEM NAME="${esc(name)}" ACTION="Create">
   <NAME>${esc(name)}</NAME><UNITS>Nos</UNITS>
   <GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
-</STOCKITEM>`).join('');
+</STOCKITEM>`);
 
-    // ── System Ledgers ───────────────────────────────────────────────────────
-    const systemLedgersXml = `
-<LEDGER NAME="Purchase Accounts" ACTION="Create"><NAME>Purchase Accounts</NAME><PARENT>Purchase Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`;
+    const allStockFragments = [...stockItemFragments, ...extraItemFragments];
 
-    // ── Vendor Ledgers (Sundry Creditors) ───────────────────────────────────
-    const vendorLedgersXml = vendors.map(v => `
+    // ── System Ledgers (always in first batch) ───────────────────────────────
+    const systemLedgerFragments = [
+      `<LEDGER NAME="Purchase Accounts" ACTION="Create"><NAME>Purchase Accounts</NAME><PARENT>Purchase Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`,
+      `<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`,
+      `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`,
+      `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`,
+      `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`,
+    ];
+
+    const vendorFragments = vendors.map(v => `
 <LEDGER NAME="${esc(v.companyName)}" ACTION="${v.tallyGuid ? 'Alter' : 'Create'}">
   <NAME>${esc(v.companyName)}</NAME>
   <PARENT>Sundry Creditors</PARENT>
@@ -191,14 +214,13 @@ export async function pushMastersToTally(cfg, triggeredBy) {
   <MAILINGNAME>${esc(v.contactPerson || v.companyName)}</MAILINGNAME>
   <OPENINGBALANCE>${v.openingBalance || 0}</OPENINGBALANCE>
   ${v.tallyGuid ? `<GUID>${esc(v.tallyGuid)}</GUID>` : ''}
-</LEDGER>`).join('');
+</LEDGER>`);
 
-    // ── Customer Ledgers (Clients + Corporate Clients, Sundry Debtors) ────────
     const allClients = [
       ...clients.map(c => ({ name: c.name, gst: c.gstNumber, phone: c.phone, email: c.email, guid: c.tallyGuid, openingBalance: c.outstanding || 0 })),
       ...corporateClients.map(c => ({ name: c.name, gst: c.gstNumber, phone: c.phone, email: c.email, guid: c.tallyGuid || c.tallyLedgerId, openingBalance: c.accountsLedger?.openingBalance || 0 })),
     ];
-    const customerLedgersXml = allClients.map(c => `
+    const clientFragments = allClients.map(c => `
 <LEDGER NAME="${esc(c.name)}" ACTION="${c.guid ? 'Alter' : 'Create'}">
   <NAME>${esc(c.name)}</NAME>
   <PARENT>Sundry Debtors</PARENT>
@@ -208,9 +230,8 @@ export async function pushMastersToTally(cfg, triggeredBy) {
   <LEDGERMOBILE>${esc(c.phone || '')}</LEDGERMOBILE>
   <OPENINGBALANCE>${c.openingBalance || 0}</OPENINGBALANCE>
   ${c.guid ? `<GUID>${esc(c.guid)}</GUID>` : ''}
-</LEDGER>`).join('');
+</LEDGER>`);
 
-    // ── Accounts Ledger entries ──────────────────────────────────────────────
     const tallyParent = (g) => {
       const s = (g||'').toLowerCase();
       if (s.includes('creditor')) return 'Sundry Creditors';
@@ -221,7 +242,7 @@ export async function pushMastersToTally(cfg, triggeredBy) {
       if (s.includes('income'))   return 'Indirect Incomes';
       return 'Sundry Debtors';
     };
-    const acctLedgersXml = ledgers.map(l => `
+    const acctLedgerFragments = ledgers.map(l => `
 <LEDGER NAME="${esc(l.ledgerName)}" ACTION="${l.tallyGuid ? 'Alter' : 'Create'}">
   <NAME>${esc(l.ledgerName)}</NAME>
   <PARENT>${esc(tallyParent(l.ledgerGroup))}</PARENT>
@@ -229,30 +250,58 @@ export async function pushMastersToTally(cfg, triggeredBy) {
   <PARTYGSTIN>${esc(l.gstNumber || '')}</PARTYGSTIN>
   <OPENINGBALANCE>${l.openingBalance || 0}</OPENINGBALANCE>
   ${l.tallyGuid ? `<GUID>${esc(l.tallyGuid)}</GUID>` : ''}
-</LEDGER>`).join('');
+</LEDGER>`);
 
-    const xml = `<ENVELOPE>
-<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
-<BODY><IMPORTDATA>
-<REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
-<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">
-${stockItemsXml}${extraItemsXml}${systemLedgersXml}${vendorLedgersXml}${customerLedgersXml}${acctLedgersXml}
-</TALLYMESSAGE></REQUESTDATA>
-</IMPORTDATA></BODY>
-</ENVELOPE>`;
+    // ── Build batches ────────────────────────────────────────────────────────
+    // Batch 1: system ledgers + first N stock items (system ledgers are tiny, always first)
+    // Subsequent batches: remaining items, then vendors, clients, account ledgers
+    const allLedgerFragments = [
+      ...systemLedgerFragments,
+      ...vendorFragments,
+      ...clientFragments,
+      ...acctLedgerFragments,
+    ];
 
-    const resp    = await postXmlWithRetry(cfg, xml, 35000);
-    const result  = parseTallyResponse(resp, 'All Masters');
-    const records = items.length + vendors.length + allClients.length + ledgers.length;
+    const batches = [
+      ...chunkArray(allStockFragments, MASTER_BATCH_SIZE),
+      ...chunkArray(allLedgerFragments, MASTER_BATCH_SIZE),
+    ].filter(b => b.length > 0);
+
+    LOG(`Masters split into ${batches.length} batches (items:${allStockFragments.length} ledgers:${allLedgerFragments.length})`);
+
+    // ── Send each batch sequentially ─────────────────────────────────────────
+    let totalCreated = 0, totalAltered = 0;
+    const errors = [];
+
+    for (let i = 0; i < batches.length; i++) {
+      const batchXml = wrapMastersXml(cfg, batches[i].join(''));
+      LOG(`Sending batch ${i + 1}/${batches.length} (${batches[i].length} records, ${batchXml.length} bytes)`);
+      try {
+        const resp   = await postXmlWithRetry(cfg, batchXml, MASTER_TIMEOUT_MS, 2);
+        const result = parseTallyResponse(resp, `Masters batch ${i + 1}/${batches.length}`);
+        totalCreated += result.created || 0;
+        totalAltered += result.altered || 0;
+        if (!result.ok && result.error) errors.push(`Batch ${i + 1}: ${result.error}`);
+      } catch (batchErr) {
+        ERR(`Masters batch ${i + 1} failed: ${batchErr.message}`);
+        errors.push(`Batch ${i + 1}: ${batchErr.message}`);
+      }
+    }
+
+    const records  = items.length + vendors.length + allClients.length + ledgers.length;
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
+    const ok       = errors.length === 0;
 
-    await writeLog({ syncId, type:'Item Master', direction:'ERP → Tally', status: result.ok?'Success':'Failed', duration, error:result.error, records, triggeredBy });
-    if (result.ok) {
+    await writeLog({ syncId, type:'Item Master', direction:'ERP → Tally', status: ok ? 'Success' : 'Failed', duration, error: errors.join('; '), records, triggeredBy });
+    if (ok) {
       await TallyConfig.findOneAndUpdate({},{lastSyncAt:new Date()},{sort:{_id:1},upsert:true});
       await AccountsLedger.updateMany({ isActive:true }, { syncedWithTally:true, lastTallySync:new Date() });
-      LOG(`Masters synced OK — ${records} records in ${duration}`);
+      LOG(`Masters synced OK — ${records} records in ${duration} (created:${totalCreated} altered:${totalAltered})`);
+    } else {
+      LOG(`Masters sync partial — ${errors.length} batch(es) failed in ${duration}`);
     }
-    return { ok:result.ok, records, error:result.error };
+    return { ok, records, error: errors.length ? errors.join('; ') : undefined };
+
   } catch (err) {
     ERR('pushMastersToTally:', err.message);
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
@@ -271,9 +320,10 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
   const syncId = `SYNC-PUR-${Date.now()}`;
   LOG('=== pushPurchaseVouchersToTally START ===');
   try {
-    // Only push POs not yet synced (uses tallyGuid as second dedup check)
+    // Only push POs not yet synced that were created in the ERP (not imported from Tally)
     const pos = await PurchaseOrder.find({
       status: { $in:['Approved','Received'] },
+      dataSource: { $ne: 'Tally' },
       $or: [{ tallySync: { $ne:true } }, { tallyGuid: { $exists:false } }],
     }).populate('vendor').lean();
 
@@ -356,8 +406,10 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   const syncId = `SYNC-SALES-${Date.now()}`;
   LOG('=== pushSalesVouchersToTally START ===');
   try {
+    // Only push invoices created in the ERP — never re-export records that came FROM Tally
     const invoices = await Invoice.find({
       status: { $in:['Sent','Paid'] },
+      source: { $nin: ['Tally', 'tally'] },
       $or: [{ tallySync:{$ne:true} }, { tallyGuid:{$exists:false} }],
     }).lean();
 
@@ -614,6 +666,7 @@ export async function pullItemsFromTally(cfg, triggeredBy) {
         update:{
           $set:{ itemId, sku, hsn, gst, unit:uMap[unit]||'units', costPrice:cost, unitPrice:cost,
                  tallySynced:true, lastTallySync:new Date(),
+                 dataSource:'Tally',  // mark as imported from Tally — never export back
                  ...(guid ? { tallyGuid:guid } : {}),
                  ...(alterId ? { tallyAlterId:alterId } : {}) },
           $setOnInsert:{ name, sellingPrice:cost, isActive:true },
@@ -735,7 +788,8 @@ export async function pullLedgersFromTally(cfg, triggeredBy) {
         filter: ledgerFilter,
         update:{
           $set:{ tallyGuid: guid, tallyAlterId: alterId, ledgerGroup, gstNumber, openingBalance, email, phone,
-                 syncedWithTally:true, lastTallySync:new Date() },
+                 syncedWithTally:true, lastTallySync:new Date(),
+                 dataSource:'Tally' },  // mark as imported from Tally — never export back
           $setOnInsert:{ ledgerCode, ledgerName:name, contactPerson:name, panNumber:'N/A', isActive:true },
         },
         upsert:true,
@@ -756,7 +810,8 @@ export async function pullLedgersFromTally(cfg, triggeredBy) {
               gstNumber: gstNumber || 'N/A',
               address: 'Imported from Tally',
               contactPerson: name,
-              tallySynced:true, lastTallySync:new Date()
+              tallySynced:true, lastTallySync:new Date(),
+              dataSource:'Tally'  // mark as imported from Tally — never export back
             },
             $setOnInsert:{
               vendorId: `VND-TALLY-${guid.replace(/[^A-Z0-9]/gi, '')}`,
@@ -781,7 +836,8 @@ export async function pullLedgersFromTally(cfg, triggeredBy) {
               gstNumber: gstNumber || 'N/A',
               address: 'Imported from Tally',
               contact: name,
-              tallySynced:true, lastTallySync:new Date()
+              tallySynced:true, lastTallySync:new Date(),
+              dataSource:'Tally'  // mark as imported from Tally — never export back
             },
             $setOnInsert:{
               clientId: `CLT-TALLY-${guid.replace(/[^A-Z0-9]/gi, '')}`,
@@ -845,8 +901,8 @@ ${exportVars(`<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><VOUCHERTYPENAME>${v
       ops.push({ updateOne:{
         filter: { tallyGuid: guid },
         update:{
-          $set:{ tallyGuid: guid, tallyAlterId: alterId, partyName, grandTotal },
-          $setOnInsert:{ invoiceNo, partyName, invoiceDate:invDate, grandTotal, source:'manual', status:'Sent', invoiceType:'single', items:[] },
+          $set:{ tallyGuid: guid, tallyAlterId: alterId, partyName, grandTotal, source:'Tally' },
+          $setOnInsert:{ invoiceNo, partyName, invoiceDate:invDate, grandTotal, source:'Tally', status:'Sent', invoiceType:'single', items:[] },
         },
         upsert:true,
       }});

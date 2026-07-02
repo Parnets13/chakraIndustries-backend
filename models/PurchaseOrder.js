@@ -50,6 +50,15 @@ const purchaseOrderSchema = new mongoose.Schema({
     method: { type: String, enum: ['email', 'whatsapp'], required: true },
     recipient: { type: String, required: true }
   }],
+  // Data source — 'ERP' for records created in this system, 'Tally' for records imported from Tally.
+  // Only 'ERP' records are eligible for export back to Tally.
+  dataSource: {
+    type: String,
+    enum: ['ERP', 'Tally'],
+    default: 'ERP',
+    index: true
+  },
+
   // Tally sync tracking
   tallySync: { type: Boolean, default: false },
   tallySyncAt: { type: Date },

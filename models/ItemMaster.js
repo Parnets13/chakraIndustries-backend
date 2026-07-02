@@ -112,6 +112,15 @@ const itemMasterSchema = new mongoose.Schema({
     ref: 'User'
   },
   
+  // Data source — 'ERP' for records created in this system, 'Tally' for records imported from Tally.
+  // Only 'ERP' records are eligible for export back to Tally.
+  dataSource: {
+    type: String,
+    enum: ['ERP', 'Tally'],
+    default: 'ERP',
+    index: true
+  },
+
   // Tally Integration Fields
   tallyGuid: {
     type: String,

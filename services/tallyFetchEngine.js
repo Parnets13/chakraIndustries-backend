@@ -1403,6 +1403,7 @@ function ledgersToOps(ledgers) {
             closingBalance: safeClosingBalance,
             closingBalanceCalculatedAt: new Date(),
             syncedWithTally: true, lastTallySync: new Date(),
+            dataSource: 'Tally',  // mark as imported from Tally — never export back
             ...(email ? { email } : {}),
             ...(cleanPhone ? { phone: cleanPhone } : (rawDigits ? { phone: rawDigits } : {})),
             ...(address ? { 'address.street': address } : {}),
@@ -1425,7 +1426,9 @@ function ledgersToOps(ledgers) {
             $set: {
               tallyGuid: guid,
               tallyAlterId: alterId,
-              tallySynced: true, lastTallySync: new Date(), phone: safePhone, email: safeEmail, contactPerson: contactPerson || name,
+              tallySynced: true, lastTallySync: new Date(),
+              dataSource: 'Tally',  // mark as imported from Tally — never export back
+              phone: safePhone, email: safeEmail, contactPerson: contactPerson || name,
               address: address || 'Imported from Tally',
               ...(city ? { city } : {}),
               ...(state ? { state } : {}),
@@ -1448,7 +1451,9 @@ function ledgersToOps(ledgers) {
             $set: {
               tallyGuid: guid,
               tallyAlterId: alterId,
-              tallySynced: true, lastTallySync: new Date(), phone: safePhone, email: safeEmail, contact: contactPerson || name,
+              tallySynced: true, lastTallySync: new Date(),
+              dataSource: 'Tally',  // mark as imported from Tally — never export back
+              phone: safePhone, email: safeEmail, contact: contactPerson || name,
               address: address || 'Imported from Tally',
               ...(city ? { city } : {}),
               ...(state ? { state } : {}),
@@ -2711,7 +2716,8 @@ async function autoCreateMissingLedgers(vouchers) {
             $set: {
               ledgerGroup,
               syncedWithTally: true,
-              lastTallySync: new Date()
+              lastTallySync: new Date(),
+              dataSource: 'Tally'  // mark as imported from Tally — never export back
             },
             $setOnInsert: {
               ledgerCode,
@@ -2954,7 +2960,8 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
               closingBalance: closingBalance || '0',
               closingValue: closingValue || '0',
               gstApplicable,
-              tallySynced: true, lastTallySync: new Date()
+              tallySynced: true, lastTallySync: new Date(),
+              dataSource: 'Tally'  // mark as imported from Tally — never export back
             },
             $setOnInsert: { name, sellingPrice: cost, isActive: true }
           },

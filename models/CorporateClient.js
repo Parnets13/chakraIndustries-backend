@@ -113,6 +113,15 @@ const corporateClientSchema = new mongoose.Schema(
       enum: ['Active', 'Inactive', 'Suspended', 'Blacklisted'],
       default: 'Active'
     },
+    // Data source — 'ERP' for records created in this system, 'Tally' for records imported from Tally.
+    // Only 'ERP' records are eligible for export back to Tally.
+    dataSource: {
+      type: String,
+      enum: ['ERP', 'Tally'],
+      default: 'ERP',
+      index: true
+    },
+
     // Dynamic Data Flow Integration
     tallyLedgerId: {
       type: String,
