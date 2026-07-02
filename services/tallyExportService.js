@@ -605,8 +605,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   const syncId = `EXPORT-SALES-${Date.now()}`;
   LOG('exportSalesInvoices START');
   try {
+    // Only export ERP-created/Excel-uploaded invoices — never re-export records
+    // that originated from Tally (source: 'Tally' | 'tally'), and never export
+    // invoices that already have a tallyGuid (they already exist in Tally).
     const invoices = await Invoice.find({
       status: { $in: ['Sent', 'Paid', 'Partial', 'Overdue'] },
+      source: { $nin: ['Tally', 'tally'] },
       $or: [{ tallySync: { $ne: true } }, { tallyGuid: { $exists: false } }],
     }).lean();
 

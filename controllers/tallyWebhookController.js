@@ -229,8 +229,8 @@ export const tallyWebhook = async (req, res) => {
         ops.push({ updateOne:{
           filter,
           update:{
-            $set:{ partyName, grandTotal, ...(guid?{tallyGuid:guid}:{}), ...(alterId?{tallyAlterId:alterId}:{}) },
-            $setOnInsert:{ invoiceNo, partyName, invoiceDate, grandTotal, source:'manual', status:'Sent', invoiceType:'single', items:[] },
+            $set:{ partyName, grandTotal, source:'Tally', ...(guid?{tallyGuid:guid}:{}), ...(alterId?{tallyAlterId:alterId}:{}) },
+            $setOnInsert:{ invoiceNo, partyName, invoiceDate, grandTotal, source:'Tally', status:'Sent', invoiceType:'single', items:[] },
           },
           upsert:true,
         }});
