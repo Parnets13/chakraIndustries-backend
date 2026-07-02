@@ -239,9 +239,6 @@ export async function checkTallyReachable(cfg) {
     let online = isConnectorOnline(cfg.connectorId);
     console.log(`[TallyRoute] checkTallyReachable → connector ${cfg.connectorId} online=${online}`);
     if (!online) {
-      // Connector may be mid-reconnect (e.g. just after a backend restart).
-      // Wait up to 15 s before giving up — sendTallyRequest already waits 60 s
-      // but we want a faster feedback loop for the health-check endpoint.
       console.log(`[TallyRoute] Connector not yet online — waiting up to 15s for reconnect…`);
       const { waitForConnector } = await import('./tallyConnectorServer.js');
       const c = await waitForConnector(cfg.connectorId, 15000);
@@ -249,15 +246,22 @@ export async function checkTallyReachable(cfg) {
       console.log(`[TallyRoute] After wait, connector online=${online}`);
     }
     if (!online) {
-      return { reachable: false, error: `Connector ${cfg.connectorId} is not connected. Ensure the SriChakra Connector is running on the client PC.` };
-    }
-    // Send a lightweight ping XML through the connector
-    const pingXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>List of Companies</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></DESC></BODY></ENVELOPE>`;
-    try {
-      const body = await sendTallyRequest(cfg.connectorId, pingXml, HEALTH_CHECK_TIMEOUT);
-      return { reachable: body.length > 0, status: 200, body: body.slice(0, 200) };
-    } catch (err) {
-      return { reachable: false, error: err.message };
+      // ── Connector offline fallback: if tallyLocalUrl is set, try direct ──
+      if (cfg.tallyLocalUrl) {
+        console.log(`[TallyRoute] Connector offline — falling back to direct: ${cfg.tallyLocalUrl}`);
+        // fall through to direct mode below
+      } else {
+        return { reachable: false, error: `Connector ${cfg.connectorId} is offline. Start the SriChakra Connector on the client PC, or set tallyLocalUrl for local testing.` };
+      }
+    } else {
+      // connector is online — ping through it
+      const pingXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>List of Companies</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></DESC></BODY></ENVELOPE>`;
+      try {
+        const body = await sendTallyRequest(cfg.connectorId, pingXml, HEALTH_CHECK_TIMEOUT);
+        return { reachable: body.length > 0, status: 200, body: body.slice(0, 200) };
+      } catch (err) {
+        return { reachable: false, error: err.message };
+      }
     }
   }
 
@@ -344,54 +348,61 @@ export async function testTallyConnection() {
 
 // === HTTP POST WITH RETRIES AND TIMEOUT ===
 async function postXml(cfg, xml, timeoutMs) {
-  // ── Diagnostic: always log the routing decision ─────────────────────────────
-  const diagUrl = (() => {
-    try { return tallyBaseUrl(cfg); } catch (e) { return `(not set — ${e.message})`; }
-  })();
+  const connectorMode = cfg.useConnector && cfg.connectorId;
+  const connectorOnline = connectorMode ? isConnectorOnline(cfg.connectorId) : false;
+  const hasLocalUrl = !!(cfg.tallyLocalUrl || '').trim();
+
+  // ── Routing decision ────────────────────────────────────────────────────────
+  // 1. Connector mode + connector online  → use connector (production path)
+  // 2. Connector mode + connector OFFLINE + tallyLocalUrl set → fallback to direct (local dev)
+  // 3. Connector mode + connector OFFLINE + no local URL → error
+  // 4. Direct mode → use tallyLocalUrl directly
+
+  const useConnectorPath = connectorMode && connectorOnline;
+  const useDirectFallback = connectorMode && !connectorOnline && hasLocalUrl;
+
   console.log('[TallyRoute]', {
     useConnector: cfg.useConnector,
     connectorId:  cfg.connectorId || '(empty)',
-    connectorOnline: cfg.useConnector && cfg.connectorId ? isConnectorOnline(cfg.connectorId) : 'n/a',
+    connectorOnline,
     tallyLocalUrl: cfg.tallyLocalUrl || '(empty)',
-    resolvedDirectUrl: diagUrl,
-    selectedPath: (cfg.useConnector && cfg.connectorId) ? 'CONNECTOR → Socket.IO' : 'DIRECT → HTTP',
+    selectedPath: useConnectorPath
+      ? 'CONNECTOR → Socket.IO'
+      : useDirectFallback
+        ? 'DIRECT → HTTP (connector offline fallback)'
+        : 'DIRECT → HTTP',
   });
 
-  // ── PATH A: Connector mode ───────────────────────────────────────────────────
-  if (cfg.useConnector && cfg.connectorId) {
-    if (!validateXml(xml)) {
-      throw new Error('Invalid XML format');
-    }
+  // ── PATH A: Connector online ─────────────────────────────────────────────────
+  if (useConnectorPath) {
+    if (!validateXml(xml)) throw new Error('Invalid XML format');
     LOG(`POST via connector ${cfg.connectorId} bytes=${xml.length} timeout=${timeoutMs}ms`);
     const body = await sendTallyRequest(cfg.connectorId, xml, timeoutMs);
     LOG(`  → Received bytes=${body.length}`);
-    // <LINEERROR> in an Import response is a diagnostic detail message — pass it through
-    // so parseTallyResponse() can extract and log each LINEERROR. Only treat it as a
-    // transport-level throw for Export/fetch responses (those lack <RESPONSE><CREATED>).
     const isImportResponse = body.includes('<RESPONSE>') || body.includes('<CREATED>');
     if (!isImportResponse && body.includes('<LINEERROR>')) {
       throw new Error(`Tally returned LINEERROR: ${body}`);
     }
-    if (body.includes('<STATUS>0</STATUS>')) {
-      return '';
-    }
+    if (body.includes('<STATUS>0</STATUS>')) return '';
     return body;
   }
 
-  // ── PATH B: Direct mode ─────────────────────────────────────────────────────
-  // Safety guard: if connector is registered but useConnector is somehow false,
-  // refuse to fall through to a direct connection — Render cannot reach localhost.
-  if (cfg.connectorId) {
+  // ── PATH B: Connector offline but tallyLocalUrl is set → direct fallback ────
+  if (useDirectFallback) {
+    LOG(`Connector offline — falling back to direct: ${cfg.tallyLocalUrl}`);
+  }
+
+  // ── PATH C: Direct mode — guard against cloud servers without a local URL ───
+  // If connectorId is registered but connector is offline AND no local URL → error.
+  if (connectorMode && !connectorOnline && !hasLocalUrl) {
     throw new Error(
-      `Connector is registered (${cfg.connectorId}) but useConnector=false. ` +
-      `Enable "Use Connector" in Tally Settings to route requests through the SriChakra Connector.`
+      `Connector "${cfg.connectorId}" is offline and no tallyLocalUrl is set. ` +
+      `Either start the SriChakra Connector on the client PC, or set tallyLocalUrl in Tally Settings.`
     );
   }
 
   const url = tallyBaseUrl(cfg); // throws if URL is not configured
-  if (!validateXml(xml)) {
-    throw new Error('Invalid XML format');
-  }
+  if (!validateXml(xml)) throw new Error('Invalid XML format');
   LOG(`POST ${url} bytes=${xml.length} timeout=${timeoutMs}ms`);
   const resp = await axiosInstance.post(url, xml, {
     timeout: timeoutMs,
@@ -399,16 +410,11 @@ async function postXml(cfg, xml, timeoutMs) {
   });
   const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
   LOG(`  → HTTP ${resp.status} bytes=${body.length}`);
-  // <LINEERROR> in an Import response is a diagnostic detail message — pass it through
-  // so parseTallyResponse() can extract and log each LINEERROR. Only treat it as a
-  // transport-level throw for Export/fetch responses (those lack <RESPONSE><CREATED>).
   const isImportResponse = body.includes('<RESPONSE>') || body.includes('<CREATED>');
   if (!isImportResponse && body.includes('<LINEERROR>')) {
     throw new Error(`Tally returned LINEERROR: ${body}`);
   }
-  if (body.includes('<STATUS>0</STATUS>')) {
-    return '';
-  }
+  if (body.includes('<STATUS>0</STATUS>')) return '';
   return body;
 }
 

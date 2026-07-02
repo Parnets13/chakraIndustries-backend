@@ -726,9 +726,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     const failedItems = [];
     const vouchersXml = invoices.map((inv, idx) => {
       try {
-        const cgst = (inv.items || []).reduce((s, i) => s + (i.cgst || 0), 0);
-        const sgst = (inv.items || []).reduce((s, i) => s + (i.sgst || 0), 0);
-        const igst = (inv.items || []).reduce((s, i) => s + (i.igst || 0), 0);
         const date = td(inv.invoiceDate) || TODAY;
 
         // ── Match by PO Number ONLY ─────────────────────────────────────────
@@ -738,20 +735,56 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         const guidTag  = existing ? `<GUID>${esc(existing.guid)}</GUID>` : '';
         LOG(`Invoice ${inv.invoiceNo} (PO: ${poNumber || 'none'}): ${action}${existing ? ` GUID=${existing.guid}` : ''}`);
 
-        const inventoryLines = (inv.items || []).map(item => {
-          const unit = tallyUnit(item.unit);
+        // ── Amount balance guarantee ───────────────────────────────────────
+        // Tally requires: partyDebit == sum of all credit entries (must balance to 0).
+        // Strategy: use grandTotal as the party debit (source of truth), then compute
+        // salesBase = grandTotal - cgst - sgst - igst so the equation always closes,
+        // regardless of per-line rounding in item.amount.
+        const grandTotal = +(inv.grandTotal || inv.totalAmount || 0).toFixed(2);
+
+        // Per-item line amounts (base amounts, no tax)
+        const itemLines = (inv.items || []).map(item => ({
+          name: item.description || item.name || 'Item',
+          unit: tallyUnit(item.unit),
+          rate: +(item.rate || item.unitPrice || 0),
+          qty:  +(item.qty || item.quantity || 1),
+          amt:  +(item.amount || item.total || (item.qty || 1) * (item.rate || item.unitPrice || 0) || 0),
+        }));
+
+        // Tax amounts: prefer explicit per-item fields, fall back to invoice-level
+        const cgst = +((inv.items || []).reduce((s, i) => s + (i.cgst || 0), 0) || inv.cgstAmount || 0).toFixed(2);
+        const sgst = +((inv.items || []).reduce((s, i) => s + (i.sgst || 0), 0) || inv.sgstAmount || 0).toFixed(2);
+        const igst = +((inv.items || []).reduce((s, i) => s + (i.igst || 0), 0) || inv.igstAmount || 0).toFixed(2);
+
+        // Compute salesBase to guarantee balance: salesBase = grandTotal - taxes
+        // This is placed in the LAST inventory line's allocation, overriding its
+        // per-item amount so the entire voucher sums to zero.
+        const itemsSubtotal = +itemLines.reduce((s, i) => s + i.amt, 0).toFixed(2);
+        const salesBase     = +(grandTotal - cgst - sgst - igst).toFixed(2);
+
+        // Distribute salesBase across inventory lines proportionally.
+        // For the last line use remainder to absorb any rounding gap.
+        let allocated = 0;
+        const inventoryLines = itemLines.map((item, i) => {
+          const isLast = i === itemLines.length - 1;
+          // Each line's sales allocation = proportional share of salesBase
+          const lineAlloc = isLast
+            ? +(salesBase - allocated).toFixed(2)
+            : +(itemsSubtotal > 0 ? (item.amt / itemsSubtotal) * salesBase : salesBase / itemLines.length).toFixed(2);
+          allocated = +(allocated + lineAlloc).toFixed(2);
+
           return `
 <ALLINVENTORYENTRIES.LIST>
-  <STOCKITEMNAME>${esc(item.description || item.name || 'Item')}</STOCKITEMNAME>
+  <STOCKITEMNAME>${esc(item.name)}</STOCKITEMNAME>
   <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-  <RATE>${+(item.rate || item.unitPrice || 0).toFixed(2)} /1 ${unit}</RATE>
-  <AMOUNT>-${+(item.amount || item.total || 0).toFixed(2)}</AMOUNT>
-  <ACTUALQTY>${item.qty || item.quantity || 1} ${unit}</ACTUALQTY>
-  <BILLEDQTY>${item.qty || item.quantity || 1} ${unit}</BILLEDQTY>
+  <RATE>${item.rate.toFixed(2)} /1 ${item.unit}</RATE>
+  <AMOUNT>-${item.amt.toFixed(2)}</AMOUNT>
+  <ACTUALQTY>${item.qty} ${item.unit}</ACTUALQTY>
+  <BILLEDQTY>${item.qty} ${item.unit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>Sales Accounts</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-    <AMOUNT>-${+(item.amount || item.total || 0).toFixed(2)}</AMOUNT>
+    <AMOUNT>-${lineAlloc.toFixed(2)}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
         }).join('');
@@ -769,7 +802,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-    <AMOUNT>${+(inv.grandTotal || 0).toFixed(2)}</AMOUNT>
+    <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
   ${cgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
   ${sgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
@@ -859,11 +892,25 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
       if (!voucherDate) voucherDate = TODAY;
 
       const items      = po.items || [];
-      const subtotal   = items.reduce((s, i) => s + (i.qty || 1) * (i.basePrice || 0), 0);
-      const gstAmt     = +(po.gstTotal || subtotal * 0.18).toFixed(2);
-      const grandTotal = +(po.grandTotal || subtotal + gstAmt).toFixed(2);
-      const cgst       = +(gstAmt / 2).toFixed(2);
-      const sgst       = +(gstAmt - cgst).toFixed(2);
+      const subtotal   = +items.reduce((s, i) => s + (+(i.qty || 1)) * (+(i.basePrice || 0)), 0).toFixed(2);
+
+      // Prefer explicit PO-level tax fields; fall back to per-item tax if available.
+      // Never estimate with * 0.18 — an approximation always causes Tally imbalance.
+      const cgstRaw = +(po.cgstAmount || po.cgst || items.reduce((s, i) => s + (i.cgst || 0), 0) || 0).toFixed(2);
+      const sgstRaw = +(po.sgstAmount || po.sgst || items.reduce((s, i) => s + (i.sgst || 0), 0) || 0).toFixed(2);
+      const igstRaw = +(po.igstAmount || po.igst || items.reduce((s, i) => s + (i.igst || 0), 0) || 0).toFixed(2);
+      // If no explicit GST info use gstTotal, split 50/50 CGST/SGST
+      const gstTotal = +(po.gstTotal || 0).toFixed(2);
+      const cgst = cgstRaw || +(gstTotal / 2).toFixed(2);
+      const sgst = sgstRaw || +(gstTotal - cgst).toFixed(2);
+      const igst = igstRaw;
+
+      // grandTotal is the vendor credit (what we owe) — must be the source of truth.
+      const grandTotal = +(po.grandTotal || subtotal + cgst + sgst + igst).toFixed(2);
+
+      // purchaseBase = what goes to Purchase Accounts = grandTotal - taxes
+      // (guaranteed to balance regardless of per-line rounding)
+      const purchaseBase = +(grandTotal - cgst - sgst - igst).toFixed(2);
 
       // ── Match by PO Number ONLY ─────────────────────────────────────────
       // po.poId IS the PO Number. Look it up in Tally's BuyersOrderNo index.
@@ -873,23 +920,31 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
       const guidTag  = existing ? `<GUID>${esc(existing.guid)}</GUID>` : '';
       LOG(`PO ${po.poId}: ${action}${existing ? ` GUID=${existing.guid}` : ''}`);
 
-      const inventoryLines = items.map(item => {
-        const qty   = item.qty || item.quantity || 1;
-        const rate  = item.basePrice || item.unitPrice || 0;
+      // Distribute purchaseBase across inventory lines; last line absorbs rounding.
+      let purAllocated = 0;
+      const inventoryLines = items.map((item, i) => {
+        const qty   = +(item.qty || item.quantity || 1);
+        const rate  = +(item.basePrice || item.unitPrice || 0);
         const total = +(qty * rate).toFixed(2);
-        const unit = tallyUnit(item.unit);
+        const unit  = tallyUnit(item.unit);
+        const isLast = i === items.length - 1;
+        const lineAlloc = isLast
+          ? +(purchaseBase - purAllocated).toFixed(2)
+          : +(subtotal > 0 ? (total / subtotal) * purchaseBase : purchaseBase / items.length).toFixed(2);
+        purAllocated = +(purAllocated + lineAlloc).toFixed(2);
+
         return `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${esc(item.name || 'Item')}</STOCKITEMNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
   <RATE>${rate.toFixed(2)} /1 ${unit}</RATE>
-  <AMOUNT>-${total}</AMOUNT>
+  <AMOUNT>-${total.toFixed(2)}</AMOUNT>
   <ACTUALQTY>${qty} ${unit}</ACTUALQTY>
   <BILLEDQTY>${qty} ${unit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>Purchase Accounts</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <AMOUNT>-${total}</AMOUNT>
+    <AMOUNT>-${lineAlloc.toFixed(2)}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
       }).join('');
@@ -907,10 +962,11 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(vendorName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-    <AMOUNT>${grandTotal}</AMOUNT>
+    <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
-  ${cgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgst}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
-  ${sgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgst}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  ${cgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  ${sgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  ${igst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${igst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
   ${inventoryLines}
 </VOUCHER>`;
     }).join('');
