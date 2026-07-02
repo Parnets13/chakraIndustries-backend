@@ -4,7 +4,7 @@ import {
   getSyncLogs, getSyncStats,
   getMasterDataStatus, getTransactionStatus,
   triggerSync, retrySync,
-  getVouchers, getVoucherById, resetVoucherSyncStates, createVoucher, deleteVoucher,
+  getVouchers, getVoucherById, resetVoucherSyncStates, createVoucher, updateVoucher, deleteVoucher,
   fixBillToData,
   getGuidStatus,
   // Directional streams (legacy)
@@ -78,6 +78,7 @@ router.post('/retry/:id',            protect, retrySync);
 router.get('/vouchers',                    protect, getVouchers);
 router.get('/vouchers/:id',                protect, getVoucherById);
 router.post('/vouchers',                   protect, createVoucher);
+router.patch('/vouchers/:id',              protect, updateVoucher);
 router.delete('/vouchers/:id',             protect, deleteVoucher);
 router.post('/reset-voucher-sync-states',  protect, resetVoucherSyncStates);
 router.post('/fix-bill-to-data',           protect, fixBillToData);

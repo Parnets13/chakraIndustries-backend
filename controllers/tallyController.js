@@ -492,6 +492,33 @@ export const createVoucher = async (req, res) => {
   } catch (e) { res.status(400).json({ success: false, message: e.message }); }
 };
 
+export const updateVoucher = async (req, res) => {
+  try {
+    // Only allow editing of address/party fields — never overwrite financial or Tally-sync fields
+    const allowed = [
+      'billToName', 'billToMailingName', 'billToAddress', 'billToCity',
+      'billToState', 'billToCountry', 'billToGST', 'billToGstRegType',
+      'shipToName', 'shipToMailingName', 'shipToAddress', 'shipToCity',
+      'shipToState', 'shipToCountry', 'shipToGST',
+      'partyName', 'partyGstin',
+    ];
+    const updates = {};
+    for (const key of allowed) {
+      if (key in req.body) updates[key] = req.body[key];
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: 'No editable fields provided' });
+    }
+    const voucher = await TallyVoucher.findByIdAndUpdate(
+      req.params.id,
+      { $set: updates },
+      { new: true, runValidators: true }
+    ).lean();
+    if (!voucher) return res.status(404).json({ success: false, message: 'Voucher not found' });
+    res.json({ success: true, data: voucher, message: 'Voucher updated' });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
 export const deleteVoucher = async (req, res) => {
   try {
     await TallyVoucher.findByIdAndDelete(req.params.id);
@@ -1411,6 +1438,7 @@ export const getSalesInvoices = async (req, res) => {
         igst,
         taxTotal,
         grandTotal,
+        buyersOrderNo: v.buyersOrderNo || '',
         source: 'Tally',
       };
     });

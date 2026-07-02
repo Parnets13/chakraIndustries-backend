@@ -157,7 +157,13 @@ const invoiceSchema = new mongoose.Schema({
   tallyVoucherNumber: {
     type: String,
     trim: true
-  }
+  },
+  // PO Number from Tally (Buyer's Order No / BuyersOrderNo field)
+  buyersOrderNo: {
+    type: String,
+    trim: true,
+    default: ''
+  },
 }, { timestamps: true });
 
 invoiceSchema.index({ invoiceNo: 1 });

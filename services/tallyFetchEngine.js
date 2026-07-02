@@ -2031,7 +2031,7 @@ function parseVouchers(xml, voucherTypes) {
         referenceDate = new Date(`${rawReferenceDate.slice(0,4)}-${rawReferenceDate.slice(4,6)}-${rawReferenceDate.slice(6,8)}`);
         if (isNaN(referenceDate.getTime())) referenceDate = null;
       }
-      const buyersOrderNo = getSafeValue(voucher, 'ORDERNO') || getSafeValue(voucher, 'BUYERORDERNO') || getSafeValue(voucher, 'PURCHASEORDERNO');
+      const buyersOrderNo = getSafeValue(voucher, 'BUYERSORDERNO') || getSafeValue(voucher, 'ORDERNO') || getSafeValue(voucher, 'BUYERORDERNO') || getSafeValue(voucher, 'PURCHASEORDERNO');
       const rawBuyersOrderDate = getSafeValue(voucher, 'ORDERDATE') || getSafeValue(voucher, 'BUYERORDERDATE') || getSafeValue(voucher, 'PURCHASEORDERDATE');
       let buyersOrderDate = null;
       if (rawBuyersOrderDate && rawBuyersOrderDate.length === 8 && /^\d{8}$/.test(rawBuyersOrderDate)) {
@@ -2444,6 +2444,7 @@ function vouchersToInvoiceOps(vouchers) {
             ledgerEntries:   v.ledgerEntries,
             billAllocations: v.billAllocations,
             tallyVoucherNumber: v.voucherNumber,
+            buyersOrderNo:    v.buyersOrderNo || '',
           },
           $setOnInsert: { invoiceNo }
         },
