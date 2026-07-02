@@ -195,12 +195,15 @@ export async function pushMastersToTally(cfg, triggeredBy) {
     const allStockFragments = [...stockItemFragments, ...extraItemFragments];
 
     // ── System Ledgers (always in first batch) ───────────────────────────────
+    // ACTION="Create" — Tally silently skips these if they already exist.
+    // Never send OPENINGBALANCE — it resets the client's balance on a newly created ledger
+    // or can interfere with Tally's own GST setup if the ledger is created fresh.
     const systemLedgerFragments = [
-      `<LEDGER NAME="Purchase Accounts" ACTION="Create"><NAME>Purchase Accounts</NAME><PARENT>Purchase Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`,
-      `<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`,
-      `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`,
-      `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`,
-      `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`,
+      `<LEDGER NAME="Purchase Accounts" ACTION="Create"><NAME>Purchase Accounts</NAME><PARENT>Purchase Accounts</PARENT></LEDGER>`,
+      `<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT></LEDGER>`,
+      `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
     ];
 
     const vendorFragments = vendors.map(v => `
@@ -212,7 +215,6 @@ export async function pushMastersToTally(cfg, triggeredBy) {
   <EMAIL>${esc(v.email || '')}</EMAIL>
   <LEDGERMOBILE>${esc(v.phone || '')}</LEDGERMOBILE>
   <MAILINGNAME>${esc(v.contactPerson || v.companyName)}</MAILINGNAME>
-  <OPENINGBALANCE>${v.openingBalance || 0}</OPENINGBALANCE>
   ${v.tallyGuid ? `<GUID>${esc(v.tallyGuid)}</GUID>` : ''}
 </LEDGER>`);
 
@@ -228,7 +230,6 @@ export async function pushMastersToTally(cfg, triggeredBy) {
   <PARTYGSTIN>${esc(c.gst || '')}</PARTYGSTIN>
   <EMAIL>${esc(c.email || '')}</EMAIL>
   <LEDGERMOBILE>${esc(c.phone || '')}</LEDGERMOBILE>
-  <OPENINGBALANCE>${c.openingBalance || 0}</OPENINGBALANCE>
   ${c.guid ? `<GUID>${esc(c.guid)}</GUID>` : ''}
 </LEDGER>`);
 
@@ -248,7 +249,6 @@ export async function pushMastersToTally(cfg, triggeredBy) {
   <PARENT>${esc(tallyParent(l.ledgerGroup))}</PARENT>
   <GSTREGISTRATIONTYPE>${l.gstNumber ? 'Regular' : 'Unregistered'}</GSTREGISTRATIONTYPE>
   <PARTYGSTIN>${esc(l.gstNumber || '')}</PARTYGSTIN>
-  <OPENINGBALANCE>${l.openingBalance || 0}</OPENINGBALANCE>
   ${l.tallyGuid ? `<GUID>${esc(l.tallyGuid)}</GUID>` : ''}
 </LEDGER>`);
 

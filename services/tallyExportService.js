@@ -283,6 +283,8 @@ export async function exportUnits(cfg, triggeredBy) {
     // Standard Tally units always needed
     ['Nos', 'Kg', 'Ltr', 'Mtr', 'Box', 'Pcs', 'Gm', 'Ml'].forEach(u => unitSet.add(u));
 
+    // ACTION="Create" — Tally silently skips units that already exist (SKIPPED count).
+    // Never use "Alter" on UoMs: it can change the symbol on existing items.
     const xml = [...unitSet].map(u => `
 <UNIT NAME="${esc(u)}" ACTION="Create">
   <NAME>${esc(u)}</NAME>
@@ -311,22 +313,19 @@ export async function exportStockGroups(cfg, triggeredBy) {
   try {
     const categories = await Category.find().lean();
 
-    // First create/alter Primary group (base group that should always exist in Tally)
-    const primaryGroupXml = `
-<STOCKGROUP NAME="Primary" ACTION="Alter">
-  <NAME>Primary</NAME>
-  <ISADDABLE>Yes</ISADDABLE>
-</STOCKGROUP>`;
-
+    // ── Stock groups: only create ERP-defined categories.
+    // Never alter "Primary" — it is a built-in Tally group and altering it
+    // can affect every stock item already in the client's Tally.
+    // Use ACTION="Create" for all; Tally skips groups that already exist.
     const categoryXml = categories.map(c => `
-<STOCKGROUP NAME="${esc(c.name)}" ACTION="Alter">
+<STOCKGROUP NAME="${esc(c.name)}" ACTION="Create">
   <NAME>${esc(c.name)}</NAME>
   <PARENT>Primary</PARENT>
   <ISADDABLE>Yes</ISADDABLE>
 </STOCKGROUP>`).join('');
 
-    const xml = primaryGroupXml + categoryXml;
-    const totalRecords = 1 + categories.length;
+    const xml = categoryXml;  // Do NOT touch the built-in "Primary" group
+    const totalRecords = categories.length;
 
     const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 30000);
     const result = parseResponse(resp, 'Stock Groups');
@@ -349,7 +348,8 @@ export async function exportGodowns(cfg, triggeredBy) {
   try {
     const warehouses = await Warehouse.find({ status: 'Active' }).lean();
     
-    // First create Main Location godown
+    // Godowns: ACTION="Create" only — never alter existing godowns in the client's Tally.
+    // Tally silently skips godowns that already exist under the same name.
     const mainLocationXml = `
 <GODOWN NAME="Main Location" ACTION="Create">
   <NAME>Main Location</NAME>
@@ -411,10 +411,13 @@ export async function exportStockItems(cfg, triggeredBy) {
       const gstRate   = item.gst || 0;
       const costPrice = item.costPrice || item.unitPrice || openRate || 0;
       const sellingPrice = item.sellingPrice || item.unitPrice || costPrice || 0;
-      const action    = item.tallyGuid ? 'Alter' : 'Create';
+      // Items that came FROM Tally already have a tallyGuid — use Alter so Tally
+      // matches by GUID and updates the record without creating a duplicate.
+      // ERP-only items have no tallyGuid — use Create so they are added as new.
+      const action = item.tallyGuid ? 'Alter' : 'Create';
 
       return `
-<STOCKITEM NAME="${esc(item.name)}" ACTION="Alter">
+<STOCKITEM NAME="${esc(item.name)}" ACTION="${action}">
   <NAME>${esc(item.name)}</NAME>
   ${groupName ? `<PARENT>${esc(groupName)}</PARENT>` : ''}
   <UNITS>${unit}</UNITS>
@@ -469,8 +472,16 @@ export async function exportCustomerLedgers(cfg, triggeredBy) {
 
     if (!all.length) return { ok: true, records: 0 };
 
-    const xml = all.map(c => `
-<LEDGER NAME="${esc(c.name)}" ACTION="Alter">
+    // ACTION logic:
+    // - Records that came FROM Tally have a tallyGuid → ACTION="Alter" so Tally matches
+    //   by GUID and updates safely (e.g. phone/email sync).
+    // - ERP-only records have no tallyGuid → ACTION="Create" so they are added as new.
+    //   If a ledger with the same name already exists in Tally (and we have no GUID),
+    //   Tally will SKIP it — which is the safe behaviour (no overwrite, no data loss).
+    const xml = all.map(c => {
+      const action = c.guid ? 'Alter' : 'Create';
+      return `
+<LEDGER NAME="${esc(c.name)}" ACTION="${action}">
   <NAME>${esc(c.name)}</NAME>
   <PARENT>Sundry Debtors</PARENT>
   <ISBILLWISEON>Yes</ISBILLWISEON>
@@ -479,13 +490,13 @@ export async function exportCustomerLedgers(cfg, triggeredBy) {
   <EMAIL>${esc(c.email || '')}</EMAIL>
   <LEDGERMOBILE>${esc(c.phone || '')}</LEDGERMOBILE>
   <MAILINGNAME>${esc(c.name)}</MAILINGNAME>
-  <OPENINGBALANCE>0</OPENINGBALANCE>
   <ADDRESS.LIST>
     <ADDRESS>${esc(c.address || '')}</ADDRESS>
     <ADDRESS>${esc([c.city, c.state].filter(Boolean).join(', '))}</ADDRESS>
   </ADDRESS.LIST>
   ${c.guid ? `<GUID>${esc(c.guid)}</GUID>` : ''}
-</LEDGER>`).join('');
+</LEDGER>`;
+    }).join('');
 
     const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 35000);
     const result = parseResponse(resp, 'Customer Ledgers');
@@ -509,8 +520,14 @@ export async function exportVendorLedgers(cfg, triggeredBy) {
     const vendors = await Vendor.find({ status: { $ne: 'Blacklisted' } }).lean();
     if (!vendors.length) return { ok: true, records: 0 };
 
-    const xml = vendors.map(v => `
-<LEDGER NAME="${esc(v.companyName)}" ACTION="Alter">
+    // Same ACTION logic as customer ledgers:
+    // Tally-origin vendors (have tallyGuid) → Alter by GUID (safe update).
+    // ERP-only vendors (no tallyGuid) → Create. Tally skips if name already exists.
+    // Never send OPENINGBALANCE on export — it resets the client's balance to 0.
+    const xml = vendors.map(v => {
+      const action = v.tallyGuid ? 'Alter' : 'Create';
+      return `
+<LEDGER NAME="${esc(v.companyName)}" ACTION="${action}">
   <NAME>${esc(v.companyName)}</NAME>
   <PARENT>Sundry Creditors</PARENT>
   <ISBILLWISEON>Yes</ISBILLWISEON>
@@ -520,13 +537,13 @@ export async function exportVendorLedgers(cfg, triggeredBy) {
   <EMAIL>${esc(v.email || '')}</EMAIL>
   <LEDGERMOBILE>${esc(v.phone || '')}</LEDGERMOBILE>
   <MAILINGNAME>${esc(v.contactPerson || v.companyName)}</MAILINGNAME>
-  <OPENINGBALANCE>0</OPENINGBALANCE>
   <ADDRESS.LIST>
     <ADDRESS>${esc(v.address || '')}</ADDRESS>
     <ADDRESS>${esc([v.city, v.state, v.pincode].filter(Boolean).join(', '))}</ADDRESS>
   </ADDRESS.LIST>
   ${v.tallyGuid ? `<GUID>${esc(v.tallyGuid)}</GUID>` : ''}
-</LEDGER>`).join('');
+</LEDGER>`;
+    }).join('');
 
     const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 35000);
     const result = parseResponse(resp, 'Vendor Ledgers');
@@ -547,16 +564,22 @@ export async function exportSystemLedgers(cfg, triggeredBy) {
   const syncId = `EXPORT-SYSLED-${Date.now()}`;
   LOG('exportSystemLedgers START');
   try {
-    // Essential GST and accounting ledgers
+    // ── System / GST ledgers ──────────────────────────────────────────────────
+    // CRITICAL: Use ACTION="Create" for all built-in Tally ledgers.
+    // These ledgers (CGST, SGST, IGST, Sales Accounts, Purchase Accounts) already
+    // exist in every Tally company. Using ACTION="Alter" would overwrite their
+    // settings and reset OPENINGBALANCE to 0, destroying the client's data.
+    // With ACTION="Create", Tally silently skips records that already exist.
+    // Also: never send OPENINGBALANCE on these — it resets the client's balances.
     const systemXml = `
-<LEDGER NAME="CGST" ACTION="Alter"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><GSTRATE>0</GSTRATE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="SGST" ACTION="Alter"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><GSTRATE>0</GSTRATE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="IGST" ACTION="Alter"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><GSTRATE>0</GSTRATE><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="Purchase Accounts" ACTION="Alter"><NAME>Purchase Accounts</NAME><PARENT>Purchase Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="Sales Accounts" ACTION="Alter"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="Freight &amp; Forwarding Charges" ACTION="Alter"><NAME>Freight &amp; Forwarding Charges</NAME><PARENT>Indirect Expenses</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="Discount Given" ACTION="Alter"><NAME>Discount Given</NAME><PARENT>Indirect Expenses</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
-<LEDGER NAME="Discount Received" ACTION="Alter"><NAME>Discount Received</NAME><PARENT>Indirect Incomes</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>`;
+<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><GSTRATE>0</GSTRATE></LEDGER>
+<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><GSTRATE>0</GSTRATE></LEDGER>
+<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><GSTRATE>0</GSTRATE></LEDGER>
+<LEDGER NAME="Purchase Accounts" ACTION="Create"><NAME>Purchase Accounts</NAME><PARENT>Purchase Accounts</PARENT></LEDGER>
+<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT></LEDGER>
+<LEDGER NAME="Freight &amp; Forwarding Charges" ACTION="Create"><NAME>Freight &amp; Forwarding Charges</NAME><PARENT>Indirect Expenses</PARENT></LEDGER>
+<LEDGER NAME="Discount Given" ACTION="Create"><NAME>Discount Given</NAME><PARENT>Indirect Expenses</PARENT></LEDGER>
+<LEDGER NAME="Discount Received" ACTION="Create"><NAME>Discount Received</NAME><PARENT>Indirect Incomes</PARENT></LEDGER>`;
 
     // Also export ERP AccountsLedger records
     const acctLedgers = await AccountsLedger.find({ isActive: true }).lean();
@@ -570,15 +593,21 @@ export async function exportSystemLedgers(cfg, triggeredBy) {
       if (s.includes('income'))   return 'Indirect Incomes';
       return 'Sundry Debtors';
     };
-    const acctXml = acctLedgers.map(l => `
-<LEDGER NAME="${esc(l.ledgerName)}" ACTION="Alter">
+    // ERP AccountsLedger records — same ACTION logic:
+    // Tally-origin records (have tallyGuid) → Alter by GUID (safe).
+    // ERP-only records (no tallyGuid) → Create. Tally skips if name exists.
+    // Never send OPENINGBALANCE — it resets the client's balance to 0.
+    const acctXml = acctLedgers.map(l => {
+      const action = l.tallyGuid ? 'Alter' : 'Create';
+      return `
+<LEDGER NAME="${esc(l.ledgerName)}" ACTION="${action}">
   <NAME>${esc(l.ledgerName)}</NAME>
   <PARENT>${esc(tallyParent(l.ledgerGroup))}</PARENT>
   <GSTREGISTRATIONTYPE>${l.gstNumber && l.gstNumber !== 'N/A' ? 'Regular' : 'Unregistered'}</GSTREGISTRATIONTYPE>
   <PARTYGSTIN>${esc(l.gstNumber && l.gstNumber !== 'N/A' ? l.gstNumber : '')}</PARTYGSTIN>
-  <OPENINGBALANCE>${l.openingBalance || 0}</OPENINGBALANCE>
   ${l.tallyGuid ? `<GUID>${esc(l.tallyGuid)}</GUID>` : ''}
-</LEDGER>`).join('');
+</LEDGER>`;
+    }).join('');
 
     const xml    = systemXml + acctXml;
     const resp   = await postXml(cfg, importEnvelope(cfg, 'All Masters', xml), 90000);
@@ -643,14 +672,13 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         }).join('');
 
         return `
-<VOUCHER VCHTYPE="Sales" ACTION="Alter">
+<VOUCHER VCHTYPE="Sales" ACTION="Create">
   <DATE>${date}</DATE>
   <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(inv.invoiceNo)}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(inv.partyName)}</PARTYLEDGERNAME>
   <NARRATION>Invoice: ${esc(inv.invoiceNo)} | ${esc(inv.partyName)}</NARRATION>
   <ISINVOICE>Yes</ISINVOICE>
-  ${inv.tallyGuid ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : ''}
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
@@ -733,14 +761,13 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
       }).join('');
 
       return `
-<VOUCHER VCHTYPE="Purchase" ACTION="Alter">
+<VOUCHER VCHTYPE="Purchase" ACTION="Create">
   <DATE>${voucherDate}</DATE>
   <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(po.poId)}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(vendorName)}</PARTYLEDGERNAME>
   <NARRATION>PO: ${esc(po.poId)} | ${esc(vendorName)}</NARRATION>
   <ISINVOICE>Yes</ISINVOICE>
-  ${po.tallyGuid ? `<GUID>${esc(po.tallyGuid)}</GUID>` : ''}
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(vendorName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
