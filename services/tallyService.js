@@ -481,21 +481,20 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
         const rate  = +(item.basePrice||item.unitPrice||item.rate||0);
         const total = +(qty*rate).toFixed(2);
         const iUnit = tallyUnit(item.unit || 'Nos');
+        // Purchase: stock comes IN → ISDEEMEDPOSITIVE=Yes, AMOUNT=positive
+        // ACCOUNTINGALLOCATIONS: Purchase Accounts is debited → Yes, positive
         return `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${esc(item.name||'Unknown Item')}</STOCKITEMNAME>
-  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-  <RATE>${rate}/${iUnit}</RATE><AMOUNT>-${total}</AMOUNT>
+  <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+  <RATE>${rate}/${iUnit}</RATE><AMOUNT>${total}</AMOUNT>
   <ACTUALQTY>${qty} ${iUnit}</ACTUALQTY><BILLEDQTY>${qty} ${iUnit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>Purchase Accounts</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${total}</AMOUNT>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>${total}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
       }).join('');
-
-      // purchaseBase = grandTot − all taxes (ensures voucher balance)
-      const purchaseBase = +(grandTot - cgstAmt - sgstAmt).toFixed(2);
 
       return `
 <VOUCHER VCHTYPE="Purchase" ACTION="${action}">
@@ -508,14 +507,10 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
   <NARRATION>PO: ${esc(po.poId)}</NARRATION>
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(vendorName)}</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>${grandTot}</AMOUNT>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${grandTot}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
-  ${cgstAmt>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgstAmt}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
-  ${sgstAmt>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgstAmt}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
-  <ALLLEDGERENTRIES.LIST>
-    <LEDGERNAME>Purchase Accounts</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${purchaseBase}</AMOUNT>
-  </ALLLEDGERENTRIES.LIST>
+  ${cgstAmt>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>${cgstAmt}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
+  ${sgstAmt>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>${sgstAmt}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
   ${itemsXml}
 </VOUCHER>`;
     }).join('');
@@ -627,16 +622,13 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
       cgst = +cgst.toFixed(2);
       sgst = +sgst.toFixed(2);
       igst = +igst.toFixed(2);
-
-      // salesBase = grandTotal − all taxes (guarantees voucher balance)
-      const salesBase = +(grandTotal - cgst - sgst - igst).toFixed(2);
-
-      const unit = tallyUnit(inv.items?.[0]?.unit || 'Nos');
       const itemsXml = (inv.items||[]).map(item => {
         const qty    = +(item.qty || item.quantity || 1);
         const rate   = +(item.rate || item.unitPrice || item.basePrice || 0);
         const amount = +(item.amount || item.total || (qty * rate) || 0).toFixed(2);
         const itemUnit = tallyUnit(item.unit || 'Nos');
+        // Sales: stock goes OUT → ISDEEMEDPOSITIVE=Yes, AMOUNT=negative
+        // ACCOUNTINGALLOCATIONS: Sales Accounts is credited → No, negative
         return `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${esc(item.description||item.name||'Item')}</STOCKITEMNAME>
@@ -647,7 +639,7 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   <BILLEDQTY>${qty} ${itemUnit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>Sales Accounts</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${amount}</AMOUNT>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${amount}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
       }).join('');
@@ -657,8 +649,14 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
       const existing = poNumber ? tallyPOMap.get(poNumber) : null;
       const action   = existing ? 'Alter' : 'Create';
       const guidTag  = existing ? `<GUID>${esc(existing.guid)}</GUID>` : '';
-      LOG(`Invoice ${inv.invoiceNo} (PO: ${poNumber || 'none'}): action=${action}${existing ? ` (Tally GUID: ${existing.guid})` : ' (new)'} grandTotal=${grandTotal} cgst=${cgst} sgst=${sgst} igst=${igst} salesBase=${salesBase}`);
+      LOG(`Invoice ${inv.invoiceNo} (PO: ${poNumber || 'none'}): action=${action}${existing ? ` (Tally GUID: ${existing.guid})` : ' (new)'} grandTotal=${grandTotal} cgst=${cgst} sgst=${sgst} igst=${igst}`);
 
+      // Sales voucher sign convention:
+      //   Party (customer)  → debit  → ISDEEMEDPOSITIVE=Yes, AMOUNT=+grandTotal
+      //   CGST/SGST/IGST    → credit → ISDEEMEDPOSITIVE=No,  AMOUNT=-tax
+      //   Sales Accounts    → handled entirely by ALLINVENTORYENTRIES ACCOUNTINGALLOCATIONS
+      //                       Do NOT add a standalone Sales Accounts ALLLEDGERENTRIES entry
+      //                       when inventory entries are present — it would double-credit.
       const vXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}">
   ${guidTag}
@@ -675,10 +673,6 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   ${cgst>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgst}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
   ${sgst>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgst}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
   ${igst>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${igst}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
-  <ALLLEDGERENTRIES.LIST>
-    <LEDGERNAME>Sales Accounts</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${salesBase}</AMOUNT>
-  </ALLLEDGERENTRIES.LIST>
   ${itemsXml}
 </VOUCHER>`;
 
