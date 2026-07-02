@@ -365,7 +365,11 @@ async function postXml(cfg, xml, timeoutMs) {
     LOG(`POST via connector ${cfg.connectorId} bytes=${xml.length} timeout=${timeoutMs}ms`);
     const body = await sendTallyRequest(cfg.connectorId, xml, timeoutMs);
     LOG(`  → Received bytes=${body.length}`);
-    if (body.includes('<LINEERROR>')) {
+    // <LINEERROR> in an Import response is a diagnostic detail message — pass it through
+    // so parseTallyResponse() can extract and log each LINEERROR. Only treat it as a
+    // transport-level throw for Export/fetch responses (those lack <RESPONSE><CREATED>).
+    const isImportResponse = body.includes('<RESPONSE>') || body.includes('<CREATED>');
+    if (!isImportResponse && body.includes('<LINEERROR>')) {
       throw new Error(`Tally returned LINEERROR: ${body}`);
     }
     if (body.includes('<STATUS>0</STATUS>')) {
@@ -395,7 +399,11 @@ async function postXml(cfg, xml, timeoutMs) {
   });
   const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
   LOG(`  → HTTP ${resp.status} bytes=${body.length}`);
-  if (body.includes('<LINEERROR>')) {
+  // <LINEERROR> in an Import response is a diagnostic detail message — pass it through
+  // so parseTallyResponse() can extract and log each LINEERROR. Only treat it as a
+  // transport-level throw for Export/fetch responses (those lack <RESPONSE><CREATED>).
+  const isImportResponse = body.includes('<RESPONSE>') || body.includes('<CREATED>');
+  if (!isImportResponse && body.includes('<LINEERROR>')) {
     throw new Error(`Tally returned LINEERROR: ${body}`);
   }
   if (body.includes('<STATUS>0</STATUS>')) {

@@ -877,6 +877,11 @@ export const exportToTallyStream = async (req, res) => {
     const exportTasks = [];
     const typeNorm = type.toLowerCase();
 
+    // Masters must always be pushed first so party ledgers and stock items exist in Tally
+    // before any voucher references them. ACTION="Create" means Tally skips existing ones.
+    if (typeNorm === 'full' || typeNorm === 'masters' || typeNorm === 'purchase' || typeNorm === 'purchase vouchers' || typeNorm === 'sales' || typeNorm === 'sales vouchers' || typeNorm === 'payment' || typeNorm === 'payment vouchers' || typeNorm === 'receipt' || typeNorm === 'receipt vouchers') {
+      exportTasks.push({ label: 'Masters (Ledgers & Items)', fn: () => pushMastersToTally(cfg, user._id) });
+    }
     if (typeNorm === 'full' || typeNorm === 'purchase' || typeNorm === 'purchase vouchers') {
       exportTasks.push({ label: 'Purchase Vouchers', fn: () => pushPurchaseVouchersToTally(cfg, user._id) });
     }

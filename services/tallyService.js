@@ -425,7 +425,36 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
       return { ok:true, records:0 };
     }
 
-    // ── Step 1: Fetch existing Tally vouchers indexed by PO Number ──────────
+    // ── Step 1: Auto-create required ledgers & stock items before vouchers ───
+    // Collect unique vendor names and stock item names from all POs
+    const vendorNames = [...new Set(pos.map(po => po.vendor?.companyName).filter(Boolean))];
+    const poStockNames = [...new Set(
+      pos.flatMap(po => (po.items||[]).map(i => (i.name||'').trim())).filter(Boolean)
+    )];
+
+    const purAutoLedgerXml = [
+      `<LEDGER NAME="Purchase Accounts" ACTION="Create"><NAME>Purchase Accounts</NAME><PARENT>Purchase Accounts</PARENT></LEDGER>`,
+      `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
+      ...vendorNames.map(name =>
+        `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sundry Creditors</PARENT></LEDGER>`
+      ),
+    ].join('');
+
+    const purAutoStockXml = poStockNames.map(name =>
+      `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS></STOCKITEM>`
+    ).join('');
+
+    LOG(`Purchase: auto-creating ${vendorNames.length} vendor ledgers + ${poStockNames.length} stock items before vouchers`);
+    const purMastersXml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${purAutoLedgerXml}${purAutoStockXml}</TALLYMESSAGE></REQUESTDATA>
+</IMPORTDATA></BODY></ENVELOPE>`;
+    const purMastersResp = await postXmlWithRetry(cfg, purMastersXml, 60000);
+    parseTallyResponse(purMastersResp, 'Purchase Auto-Masters');  // log result, don't abort
+
+    // ── Step 2: Fetch existing Tally vouchers indexed by PO Number ──────────
     // This lets us decide Create vs Alter per voucher, regardless of tallySync flag.
     const tallyPOMap = await fetchTallyPOMap(cfg);
     LOG(`pushPurchaseVouchersToTally: ${pos.length} POs to process, ${tallyPOMap.size} PO numbers already in Tally`);
@@ -538,7 +567,39 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
     LOG(`pushSalesVouchersToTally: exporting ${invoices.length} invoices`);
     LOG(`First invoice: no=${invoices[0].invoiceNo} source=${invoices[0].source} tallySync=${invoices[0].tallySync} tallyGuid=${invoices[0].tallyGuid || 'none'}`);
 
-    // ── Step 1: Fetch existing Tally vouchers indexed by PO Number ──────────
+    // ── Step 1: Auto-create required ledgers & stock items in the same request ──
+    // Tally requires party ledger + Sales Accounts + CGST/SGST/IGST + stock items
+    // to exist BEFORE voucher entries can reference them.
+    // We embed ledger/item CREATE statements in the same TALLYMESSAGE so they are
+    // created atomically before the vouchers are processed.
+    // ACTION="Create" — Tally silently skips records that already exist.
+
+    // Collect unique party names from all invoices
+    const partyNames = [...new Set(invoices.map(inv => inv.partyName).filter(Boolean))];
+    // Collect unique stock item names from all invoice lines
+    const stockNames = [...new Set(
+      invoices.flatMap(inv => (inv.items||[]).map(i => (i.description||i.name||'').trim())).filter(Boolean)
+    )];
+
+    const autoLedgerXml = [
+      // System ledgers — Tally skips if already present
+      `<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT></LEDGER>`,
+      `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
+      // Party ledgers — one per unique customer; Tally skips if already present
+      ...partyNames.map(name =>
+        `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sundry Debtors</PARENT></LEDGER>`
+      ),
+    ].join('');
+
+    const autoStockXml = stockNames.map(name =>
+      `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS></STOCKITEM>`
+    ).join('');
+
+    LOG(`Sales: auto-creating ${partyNames.length} party ledgers + ${stockNames.length} stock items before vouchers`);
+
+    // ── Step 2: Fetch existing Tally vouchers indexed by PO Number ──────────
     // Determines whether to Create (new PO) or Alter (existing PO) each voucher.
     const tallyPOMap = await fetchTallyPOMap(cfg);
     LOG(`pushSalesVouchersToTally: ${invoices.length} invoices to process, ${tallyPOMap.size} PO numbers already in Tally`);
@@ -624,6 +685,18 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
       if (idx === 0) LOG(`pushSalesVouchersToTally: FIRST INVOICE XML:\n${vXml}`);
       return vXml;
     }).join('');
+
+    // ── Step 3: Send masters first, then vouchers ──────────────────────────
+    // Two separate requests: Tally does not process multiple ENVELOPEs in one POST.
+    // Masters request uses "All Masters" reportname so ledgers + stock items go in together.
+    const mastersXml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${autoLedgerXml}${autoStockXml}</TALLYMESSAGE></REQUESTDATA>
+</IMPORTDATA></BODY></ENVELOPE>`;
+
+    LOG(`Sales: pushing ${partyNames.length} party ledgers + ${stockNames.length} stock items to Tally first`);
+    const mastersResp = await postXmlWithRetry(cfg, mastersXml, 60000);
+    parseTallyResponse(mastersResp, 'Sales Auto-Masters');  // log result, don't abort on failure
 
     const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
@@ -1213,8 +1286,11 @@ export async function runFullSync(triggeredBy) {
   const results   = [];
 
   // ── ERP → Tally ────────────────────────────────────────────────────────────
-  // Masters (Ledgers, Stock Items, etc.) are NOT exported — vouchers only.
   if (direction !== 'Tally → ERP') {
+    // Always push masters first — party ledgers and stock items must exist in Tally
+    // before vouchers can reference them, otherwise Tally throws EXCEPTIONS for every
+    // voucher. Masters use ACTION="Create" so Tally silently skips existing ones.
+    results.push(await pushMastersToTally(cfg, triggeredBy));
     if (prefs.purchaseVouchers !== false) results.push(await pushPurchaseVouchersToTally(cfg, triggeredBy));
     if (prefs.salesVouchers !== false)    results.push(await pushSalesVouchersToTally(cfg, triggeredBy));
     if (prefs.paymentVouchers !== false)  results.push(await pushPaymentVouchersToTally(cfg, triggeredBy));
@@ -1276,28 +1352,40 @@ export async function runTargetedSync(type, triggeredBy) {
     case 'Purchase':
     case 'Purchase Vouchers': {
       const results = [];
-      if (!pullOnly) results.push(await pushPurchaseVouchersToTally(cfg, triggeredBy));
+      if (!pullOnly) {
+        results.push(await pushMastersToTally(cfg, triggeredBy));  // ensure ledgers/items exist first
+        results.push(await pushPurchaseVouchersToTally(cfg, triggeredBy));
+      }
       if (!pushOnly) results.push(await pullVouchersFromTally(cfg,'Purchase',triggeredBy));
       return mergeResults(results);
     }
     case 'Sales':
     case 'Sales Vouchers': {
       const results = [];
-      if (!pullOnly) results.push(await pushSalesVouchersToTally(cfg, triggeredBy));
+      if (!pullOnly) {
+        results.push(await pushMastersToTally(cfg, triggeredBy));  // ensure ledgers/items exist first
+        results.push(await pushSalesVouchersToTally(cfg, triggeredBy));
+      }
       if (!pushOnly) results.push(await pullVouchersFromTally(cfg,'Sales',triggeredBy));
       return mergeResults(results);
     }
     case 'Payment':
     case 'Payment Vouchers': {
       const results = [];
-      if (!pullOnly) results.push(await pushPaymentVouchersToTally(cfg, triggeredBy));
+      if (!pullOnly) {
+        results.push(await pushMastersToTally(cfg, triggeredBy));  // ensure ledgers/items exist first
+        results.push(await pushPaymentVouchersToTally(cfg, triggeredBy));
+      }
       if (!pushOnly) results.push(await pullPaymentReceiptFromTally(cfg,'Payment',triggeredBy));
       return mergeResults(results);
     }
     case 'Receipt':
     case 'Receipt Vouchers': {
       const results = [];
-      if (!pullOnly) results.push(await pushReceiptVouchersToTally(cfg, triggeredBy));
+      if (!pullOnly) {
+        results.push(await pushMastersToTally(cfg, triggeredBy));  // ensure ledgers/items exist first
+        results.push(await pushReceiptVouchersToTally(cfg, triggeredBy));
+      }
       if (!pushOnly) results.push(await pullPaymentReceiptFromTally(cfg,'Receipt',triggeredBy));
       return mergeResults(results);
     }
