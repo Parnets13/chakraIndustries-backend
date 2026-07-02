@@ -3,6 +3,7 @@ import SalesOrder from '../models/SalesOrder.js';
 import Dealer from '../models/Dealer.js';
 import AccountsReceivable from '../models/AccountsReceivable.js';
 import { sendInvoiceEmail } from '../utils/emailService.js';
+import { pushSingleInvoiceToTally } from '../services/tallyService.js';
 
 // ── ID generator ──────────────────────────────────────────────────────────────
 const genInvoiceNo = async () => {
@@ -421,6 +422,39 @@ export const createFromSalesOrder = async (req, res) => {
     res.status(201).json({ success: true, data: invoice });
   } catch (err) {
     console.error('createFromSalesOrder error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── POST /api/invoices/:id/send-to-tally ──────────────────────────────────────
+// One-click push of a single ERP invoice into Tally as a Sales Voucher.
+// After a successful push the invoice's tallySync flag is set to true.
+export const sendToTally = async (req, res) => {
+  try {
+    const inv = await Invoice.findById(req.params.id).lean();
+    if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+    if (inv.source === 'Tally' || inv.source === 'tally') {
+      return res.status(400).json({ success: false, message: 'This invoice was imported from Tally — no need to push back.' });
+    }
+
+    const result = await pushSingleInvoiceToTally(req.params.id);
+
+    if (!result.ok) {
+      return res.status(400).json({ success: false, message: result.error || 'Failed to push invoice to Tally' });
+    }
+
+    // Fetch updated invoice to return fresh tallySync status
+    const updated = await Invoice.findById(req.params.id).lean();
+    res.json({
+      success: true,
+      message: `Invoice ${result.invoiceNo} pushed to Tally successfully`,
+      data: updated,
+      warning: result.warning || null,
+      duration: result.duration,
+    });
+  } catch (err) {
+    console.error('[sendToTally]', err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 };

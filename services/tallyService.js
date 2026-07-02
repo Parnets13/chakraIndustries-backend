@@ -715,6 +715,140 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   }
 }
 
+// ─── PUSH: SINGLE INVOICE TO TALLY (ERP → Tally) ────────────────────────────
+// Pushes one specific invoice by its MongoDB _id.
+// Called from the "Send to Tally" button on the invoice list.
+
+export async function pushSingleInvoiceToTally(invoiceId) {
+  const start  = Date.now();
+  const syncId = `SYNC-INV-${Date.now()}`;
+  LOG(`=== pushSingleInvoiceToTally START: ${invoiceId} ===`);
+
+  try {
+    const cfg = await getConfig();
+    const hasConnection = cfg?.useConnector && cfg?.connectorId
+      ? true
+      : !!(cfg?.tallyLocalUrl);
+    if (!hasConnection) {
+      return { ok: false, error: 'Tally not configured. Set Tally URL or enable Connector in Settings.' };
+    }
+
+    const inv = await Invoice.findById(invoiceId).lean();
+    if (!inv) return { ok: false, error: 'Invoice not found' };
+
+    const grandTotal = +((inv.grandTotal || inv.totalAmount || 0)).toFixed(2);
+    if (!grandTotal) return { ok: false, error: 'Invoice has zero amount — cannot push to Tally' };
+    if (!inv.partyName) return { ok: false, error: 'Invoice has no party name — cannot push to Tally' };
+
+    // ── Step 1: Auto-create party ledger + system ledgers + stock items ───
+    const stockNames = [...new Set(
+      (inv.items || []).map(i => (i.description || i.name || '').trim()).filter(Boolean)
+    )];
+    const autoLedgerXml = [
+      `<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT></LEDGER>`,
+      `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="${esc(inv.partyName)}" ACTION="Create"><NAME>${esc(inv.partyName)}</NAME><PARENT>Sundry Debtors</PARENT></LEDGER>`,
+    ].join('');
+    const autoStockXml = stockNames.map(name =>
+      `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS></STOCKITEM>`
+    ).join('');
+    const mastersXml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${autoLedgerXml}${autoStockXml}</TALLYMESSAGE></REQUESTDATA>
+</IMPORTDATA></BODY></ENVELOPE>`;
+    const mastersResp = await postXmlWithRetry(cfg, mastersXml, 60000);
+    parseTallyResponse(mastersResp, `Invoice ${inv.invoiceNo} Auto-Masters`);
+
+    // ── Step 2: Build Sales Voucher XML ───────────────────────────────────
+    let cgst = +((inv.cgstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.cgst||0),0))).toFixed(2);
+    let sgst = +((inv.sgstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.sgst||0),0))).toFixed(2);
+    let igst = +((inv.igstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.igst||0),0))).toFixed(2);
+
+    const itemsXml = (inv.items||[]).map(item => {
+      const qty    = +(item.qty || item.quantity || 1);
+      const rate   = +(item.rate || item.unitPrice || item.basePrice || 0);
+      const amount = +(item.amount || item.total || (qty * rate) || 0).toFixed(2);
+      const iUnit  = tallyUnit(item.unit || 'Nos');
+      return `
+<ALLINVENTORYENTRIES.LIST>
+  <STOCKITEMNAME>${esc(item.description||item.name||'Item')}</STOCKITEMNAME>
+  <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+  <RATE>${rate}/${iUnit}</RATE>
+  <AMOUNT>-${amount}</AMOUNT>
+  <ACTUALQTY>${qty} ${iUnit}</ACTUALQTY>
+  <BILLEDQTY>${qty} ${iUnit}</BILLEDQTY>
+  <ACCOUNTINGALLOCATIONS.LIST>
+    <LEDGERNAME>Sales Accounts</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${amount}</AMOUNT>
+  </ACCOUNTINGALLOCATIONS.LIST>
+</ALLINVENTORYENTRIES.LIST>`;
+    }).join('');
+
+    // Determine Create vs Alter
+    const existingGuid = inv.tallyGuid || null;
+    const action  = existingGuid ? 'Alter' : 'Create';
+    const guidTag = existingGuid ? `<GUID>${esc(existingGuid)}</GUID>` : '';
+
+    LOG(`Invoice ${inv.invoiceNo}: action=${action} grandTotal=${grandTotal} cgst=${cgst} sgst=${sgst} igst=${igst}`);
+
+    const voucherXml = `
+<VOUCHER VCHTYPE="Sales" ACTION="${action}">
+  ${guidTag}
+  <DATE>${tallyDate(inv.invoiceDate)||tallyDate(new Date())}</DATE>
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${esc(inv.invoiceNo)}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(inv.partyName)}</PARTYLEDGERNAME>
+  <BUYERSORDERNO>${esc(inv.purchaseOrderRef || inv.buyersOrderNo || '')}</BUYERSORDERNO>
+  <NARRATION>ERP Invoice: ${esc(inv.invoiceNo)}</NARRATION>
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>${grandTotal}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+  ${cgst>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgst}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
+  ${sgst>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgst}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
+  ${igst>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${igst}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
+  ${itemsXml}
+</VOUCHER>`;
+
+    const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${voucherXml}</TALLYMESSAGE></REQUESTDATA>
+</IMPORTDATA></BODY></ENVELOPE>`;
+
+    const resp   = await postXmlWithRetry(cfg, xml, 30000);
+    const result = parseTallyResponse(resp, `Invoice ${inv.invoiceNo}`);
+    const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
+
+    await writeLog({
+      syncId, type: 'Sales', direction: 'ERP → Tally',
+      status: result.ok ? 'Success' : 'Failed',
+      duration, error: result.error, records: 1,
+    });
+
+    if (result.ok) {
+      await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { sort: { _id: 1 }, upsert: true });
+      await Invoice.findByIdAndUpdate(invoiceId, { tallySync: true, tallySyncAt: new Date() });
+      LOG(`Invoice ${inv.invoiceNo} pushed to Tally OK in ${duration}`);
+    }
+
+    return {
+      ok: result.ok,
+      invoiceNo: inv.invoiceNo,
+      error: result.error,
+      warning: result.warning,
+      duration,
+    };
+
+  } catch (err) {
+    ERR('pushSingleInvoiceToTally:', err.message);
+    const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
+    await writeLog({ syncId, type: 'Sales', direction: 'ERP → Tally', status: 'Failed', duration, error: err.message, records: 0 });
+    return { ok: false, error: err.message };
+  }
+}
+
 // ─── PUSH: PAYMENT VOUCHERS (ERP → Tally) ───────────────────────────────────
 // Pushes TallyVoucher records of type 'Payment' that were created in ERP.
 
