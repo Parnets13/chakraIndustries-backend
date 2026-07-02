@@ -92,6 +92,105 @@ router.post('/import-sales-register',protect, importSalesRegister);
 // GET  /api/tally/sales-invoices?fromDate=2025-04-01&toDate=2025-06-30
 router.get('/sales-invoices',        protect, getSalesInvoices);
 
+// ── Voucher export diagnostics — shows why Sales/Purchase are rejected ────────
+router.get('/diagnose-vouchers', protect, async (req, res) => {
+  try {
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    if (!cfg) return res.json({ success: false, error: 'No TallyConfig found' });
+
+    const company = (cfg.companyName || '').trim().toUpperCase();
+    const coTag   = company ? `<SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>` : '';
+    const results = {};
+
+    // ── 1. VoucherType names ─────────────────────────────────────────────────
+    try {
+      const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>VTList</ID></HEADER>
+<BODY><DESC>
+  <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="VTList"><TYPE>VoucherType</TYPE><FETCH>Name</FETCH></COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY></ENVELOPE>`;
+      const resp  = await postXmlWithRetry(cfg, xml, 20000);
+      const names = [...resp.matchAll(/<NAME>(.*?)<\/NAME>/gi)].map(m => m[1].trim());
+      results.voucherTypes = names;
+    } catch (e) { results.voucherTypesError = e.message; }
+
+    // ── 2. Relevant ledger names ─────────────────────────────────────────────
+    try {
+      const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedList</ID></HEADER>
+<BODY><DESC>
+  <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="LedList"><TYPE>Ledger</TYPE><FETCH>Name,Parent</FETCH></COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY></ENVELOPE>`;
+      const resp    = await postXmlWithRetry(cfg, xml, 30000);
+      const blocks  = [...resp.matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)].map(m => m[1]);
+      const keywords = ['sales', 'purchase', 'cgst', 'sgst', 'igst', 'bi worldwide', 'debtor'];
+      results.relevantLedgers = blocks
+        .filter(b => keywords.some(k => b.toLowerCase().includes(k)))
+        .map(b => ({
+          name:   (b.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '?').trim(),
+          parent: (b.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '?').trim(),
+        }));
+    } catch (e) { results.ledgersError = e.message; }
+
+    // ── 3. Minimal test Sales voucher with SVSHOWERRORLIST ───────────────────
+    try {
+      const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA>
+  <REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME>
+    <STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></STATICVARIABLES>
+  </REQUESTDESC>
+  <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">
+    <VOUCHER VCHTYPE="Sales" ACTION="Create">
+      <DATE>20260702</DATE>
+      <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+      <VOUCHERNUMBER>TEST-DIAG-001</VOUCHERNUMBER>
+      <PARTYLEDGERNAME>BI Worldwide India PVT LTD</PARTYLEDGERNAME>
+      <ISINVOICE>Yes</ISINVOICE>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>BI Worldwide India PVT LTD</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>200.00</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>CGST</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-4.76</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>SGST</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-4.76</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLINVENTORYENTRIES.LIST>
+        <STOCKITEMNAME>HYDRA STEEL WATER BOTTLE 1000ML</STOCKITEMNAME>
+        <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+        <RATE>190.48 /1 Nos</RATE><AMOUNT>-190.48</AMOUNT>
+        <ACTUALQTY>1 Nos</ACTUALQTY><BILLEDQTY>1 Nos</BILLEDQTY>
+        <ACCOUNTINGALLOCATIONS.LIST>
+          <LEDGERNAME>Sales Accounts</LEDGERNAME>
+          <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-190.48</AMOUNT>
+        </ACCOUNTINGALLOCATIONS.LIST>
+      </ALLINVENTORYENTRIES.LIST>
+    </VOUCHER>
+  </TALLYMESSAGE></REQUESTDATA>
+</IMPORTDATA></BODY></ENVELOPE>`;
+      const resp = await postXmlWithRetry(cfg, xml, 20000);
+      results.testVoucherRaw      = resp.slice(0, 1000);
+      results.testVoucherLineErrors = [...resp.matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m => m[1].trim());
+      results.testVoucherCreated    = parseInt(resp.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
+      results.testVoucherExceptions = parseInt(resp.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1] || '0');
+    } catch (e) { results.testVoucherError = e.message; }
+
+    res.json({ success: true, data: results });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── Tally-pushed webhook (no auth — secured by optional shared secret) ────────
 router.post('/webhook',              tallyWebhook);
 
