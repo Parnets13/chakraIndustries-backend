@@ -756,13 +756,17 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         LOG(`Invoice ${inv.invoiceNo} (PO: ${poNumber || 'none'}): ${action}${existing ? ` GUID=${existing.guid}` : ''}`);
 
         // ── Amount balance guarantee ───────────────────────────────────────
-        // Tally requires: partyDebit == sum of all credit entries (must balance to 0).
-        // Strategy: use grandTotal as the party debit (source of truth), then compute
-        // salesBase = grandTotal - cgst - sgst - igst so the equation always closes,
-        // regardless of per-line rounding in item.amount.
+        // Strategy: skip separate CGST/SGST/IGST ledger entries entirely.
+        // The client's Tally uses custom GST ledger names (e.g. "Output CGST @ 9%")
+        // that we cannot know in advance. Sending "CGST"/"SGST" causes EXCEPTIONS
+        // because those ledgers don't exist in this Tally company.
+        //
+        // Instead: party debit = grandTotal, Sales Accounts credit = grandTotal.
+        // This always balances (zero sum) and Tally accepts it without needing
+        // specific GST ledger names. Tax reporting is handled separately in Tally.
         const grandTotal = +(inv.grandTotal || inv.totalAmount || 0).toFixed(2);
 
-        // Per-item line amounts (base amounts, no tax)
+        // Per-item line amounts (base amounts)
         const itemLines = (inv.items || []).map(item => ({
           name: item.description || item.name || 'Item',
           unit: tallyUnit(item.unit),
@@ -771,31 +775,21 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           amt:  +(item.amount || item.total || (item.qty || 1) * (item.rate || item.unitPrice || 0) || 0),
         }));
 
-        // Tax amounts: prefer explicit per-item fields, fall back to invoice-level
-        const cgst = +((inv.items || []).reduce((s, i) => s + (i.cgst || 0), 0) || inv.cgstAmount || 0).toFixed(2);
-        const sgst = +((inv.items || []).reduce((s, i) => s + (i.sgst || 0), 0) || inv.sgstAmount || 0).toFixed(2);
-        const igst = +((inv.items || []).reduce((s, i) => s + (i.igst || 0), 0) || inv.igstAmount || 0).toFixed(2);
-
-        // Compute salesBase to guarantee balance: salesBase = grandTotal - taxes
-        // This is placed in the LAST inventory line's allocation, overriding its
-        // per-item amount so the entire voucher sums to zero.
+        // salesBase = grandTotal distributed across inventory lines
+        // (no separate GST ledger entries — avoids ledger-name mismatch EXCEPTIONS)
         const itemsSubtotal = +itemLines.reduce((s, i) => s + i.amt, 0).toFixed(2);
-        const salesBase     = +(grandTotal - cgst - sgst - igst).toFixed(2);
+        const salesBase     = grandTotal; // full grandTotal goes to Sales Accounts
 
         // Distribute salesBase across inventory lines proportionally.
-        // For the last line use remainder to absorb any rounding gap.
+        // Last line absorbs any rounding remainder.
         let allocated = 0;
         const inventoryLines = itemLines.map((item, i) => {
           const isLast = i === itemLines.length - 1;
-          // Each line's sales allocation = proportional share of salesBase
           const lineAlloc = isLast
             ? +(salesBase - allocated).toFixed(2)
             : +(itemsSubtotal > 0 ? (item.amt / itemsSubtotal) * salesBase : salesBase / itemLines.length).toFixed(2);
           allocated = +(allocated + lineAlloc).toFixed(2);
 
-          // Sales voucher sign convention for inventory entries:
-          //   ALLINVENTORYENTRIES: stock goes OUT → ISDEEMEDPOSITIVE=Yes, AMOUNT=negative
-          //   ACCOUNTINGALLOCATIONS (Sales Accounts): credit entry → ISDEEMEDPOSITIVE=No, AMOUNT=negative
           return `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${esc(item.name)}</STOCKITEMNAME>
@@ -828,9 +822,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
     <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
-  ${cgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
-  ${sgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
-  ${igst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${igst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
   ${inventoryLines}
 </VOUCHER>`;
 
@@ -932,9 +923,10 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
       // grandTotal is the vendor credit (what we owe) — must be the source of truth.
       const grandTotal = +(po.grandTotal || subtotal + cgst + sgst + igst).toFixed(2);
 
-      // purchaseBase = what goes to Purchase Accounts = grandTotal - taxes
-      // (guaranteed to balance regardless of per-line rounding)
-      const purchaseBase = +(grandTotal - cgst - sgst - igst).toFixed(2);
+      // purchaseBase = grandTotal goes entirely to Purchase Accounts.
+      // Skip separate CGST/SGST/IGST ledger entries — client's Tally uses custom
+      // GST ledger names we cannot predict, so sending "CGST"/"SGST" causes EXCEPTIONS.
+      const purchaseBase = grandTotal;
 
       // ── Match by PO Number ONLY ─────────────────────────────────────────
       // po.poId IS the PO Number. Look it up in Tally's BuyersOrderNo index.
@@ -989,9 +981,6 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
     <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
-  ${cgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
-  ${sgst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
-  ${igst > 0 ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${igst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
   ${inventoryLines}
 </VOUCHER>`;
     }).join('');
