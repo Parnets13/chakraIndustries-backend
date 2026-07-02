@@ -10,6 +10,10 @@
 import TallyConfig from '../models/TallyConfig.js';
 import { pullEntityFromTally } from './tallyFetchEngine.js';
 import { startFileWatcher } from './tallyFileImporter.js';
+import {
+  exportSalesInvoices,
+  exportPurchaseInvoices,
+} from './tallyExportService.js';
 
 const LOG = (msg) => console.log(`[TallyScheduler] ${msg}`);
 const ERR = (msg, err) => console.error(`[TallyScheduler Error] ${msg}`, err ? err.message || err : '');
@@ -60,6 +64,22 @@ async function syncTransactions() {
     }
 
     LOG('Starting transaction sync...');
+
+    // ── ERP → Tally: Push pending invoices and purchase orders ──────────────
+    try {
+      LOG('Exporting Sales Invoices (ERP → Tally)...');
+      await exportSalesInvoices(cfg, 'scheduler');
+    } catch (err) {
+      ERR('Failed to export Sales Invoices', err);
+    }
+    try {
+      LOG('Exporting Purchase Invoices (ERP → Tally)...');
+      await exportPurchaseInvoices(cfg, 'scheduler');
+    } catch (err) {
+      ERR('Failed to export Purchase Invoices', err);
+    }
+
+    // ── Tally → ERP: Pull latest vouchers ───────────────────────────────────
     for (const type of TRANSACTION_TYPES) {
       try {
         LOG(`Syncing ${type}...`);
