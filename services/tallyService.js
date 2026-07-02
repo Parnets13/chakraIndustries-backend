@@ -53,7 +53,9 @@ function staticVars(cfg, extra = '') {
   // Tally stores company names as UPPERCASE internally — always send uppercase
   const company = (cfg.companyName || '').trim().toUpperCase();
   const tag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
-  return `<STATICVARIABLES>${tag}${extra}</STATICVARIABLES>`;
+  // SVSHOWERRORLIST=Yes makes Tally include LINEERROR tags in the response
+  // so we can see the exact reason for each EXCEPTION in the logs.
+  return `<STATICVARIABLES>${tag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST>${extra}</STATICVARIABLES>`;
 }
 
 function exportVars(extra = '') {
@@ -84,8 +86,8 @@ function parseTallyResponse(xml, label = '') {
   if (!xml || !xml.trim()) return { ok: false, error: 'Empty response from Tally' };
   const s = String(xml);
 
-  // Log full raw response for every call — essential for debugging live issues
-  LOG(`${label} RAW RESPONSE (first 1000 chars):\n${s.slice(0, 1000)}`);
+  // Log full raw response — essential for debugging EXCEPTIONS
+  LOG(`${label} RAW RESPONSE:\n${s}`);
 
   const errors = [];
 
@@ -110,10 +112,21 @@ function parseTallyResponse(xml, label = '') {
     }
   }
 
-  const created = parseInt(s.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
-  const altered  = parseInt(s.match(/<ALTERED>(\d+)<\/ALTERED>/i)?.[1] || '0');
-  const skipped  = parseInt(s.match(/<SKIPPED>(\d+)<\/SKIPPED>/i)?.[1] || '0');
-  LOG(`${label} IMPORTRESULT → created:${created} altered:${altered} skipped:${skipped} errors:${errors.length}`);
+  const created    = parseInt(s.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
+  const altered    = parseInt(s.match(/<ALTERED>(\d+)<\/ALTERED>/i)?.[1] || '0');
+  const skipped    = parseInt(s.match(/<SKIPPED>(\d+)<\/SKIPPED>/i)?.[1] || '0');
+  const exceptions = parseInt(s.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1] || '0');
+
+  // EXCEPTIONS = Tally business-logic rejections (ledger not found, imbalanced voucher,
+  // duplicate number, etc.). These are NOT in <ERRORS> and NOT in <LINEERROR>.
+  // Tally silently discards exceptioned vouchers — they will never appear in Tally.
+  if (exceptions > 0) {
+    const msg = `Tally rejected ${exceptions} record(s) with EXCEPTIONS (ledger missing, imbalanced voucher, or duplicate number). Run master sync first, then retry.`;
+    ERR(`${label} EXCEPTIONS count: ${exceptions}`);
+    errors.push(msg);
+  }
+
+  LOG(`${label} IMPORTRESULT → created:${created} altered:${altered} skipped:${skipped} exceptions:${exceptions} errors:${errors.length}`);
 
   if (errors.length > 0) {
     if (created === 0 && altered === 0) {
@@ -428,8 +441,6 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
       const sgstAmt    = +(gstAmt-cgstAmt).toFixed(2);
 
       // ── Step 2: Match by PO Number ONLY ─────────────────────────────────
-      // po.poId IS the PO Number. Look it up in Tally's BuyersOrderNo index.
-      // Found → Alter (update). Not found → Create (new voucher).
       const poNumber = (po.poId || '').toUpperCase().trim();
       const existing = poNumber ? tallyPOMap.get(poNumber) : null;
       const action   = existing ? 'Alter' : 'Create';
@@ -437,21 +448,25 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
       LOG(`PO ${po.poId}: action=${action}${existing ? ` (Tally GUID: ${existing.guid})` : ' (new)'}`);
 
       const itemsXml = (po.items||[]).map(item => {
-        const qty   = item.qty||item.quantity||1;
-        const rate  = item.basePrice||item.unitPrice||item.rate||0;
+        const qty   = +(item.qty||item.quantity||1);
+        const rate  = +(item.basePrice||item.unitPrice||item.rate||0);
         const total = +(qty*rate).toFixed(2);
+        const iUnit = tallyUnit(item.unit || 'Nos');
         return `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${esc(item.name||'Unknown Item')}</STOCKITEMNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-  <RATE>${rate}/Nos</RATE><AMOUNT>-${total}</AMOUNT>
-  <ACTUALQTY>${qty} Nos</ACTUALQTY><BILLEDQTY>${qty} Nos</BILLEDQTY>
+  <RATE>${rate}/${iUnit}</RATE><AMOUNT>-${total}</AMOUNT>
+  <ACTUALQTY>${qty} ${iUnit}</ACTUALQTY><BILLEDQTY>${qty} ${iUnit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>Purchase Accounts</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${total}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
       }).join('');
+
+      // purchaseBase = grandTot − all taxes (ensures voucher balance)
+      const purchaseBase = +(grandTot - cgstAmt - sgstAmt).toFixed(2);
 
       return `
 <VOUCHER VCHTYPE="Purchase" ACTION="${action}">
@@ -468,6 +483,10 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
   </ALLLEDGERENTRIES.LIST>
   ${cgstAmt>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgstAmt}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
   ${sgstAmt>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgstAmt}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>Purchase Accounts</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${purchaseBase}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
   ${itemsXml}
 </VOUCHER>`;
     }).join('');
@@ -525,32 +544,59 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
     LOG(`pushSalesVouchersToTally: ${invoices.length} invoices to process, ${tallyPOMap.size} PO numbers already in Tally`);
 
     const vouchersXml = invoices.map((inv, idx) => {
-      const cgst = (inv.items||[]).reduce((s,i)=>s+(i.cgst||0),0);
-      const sgst = (inv.items||[]).reduce((s,i)=>s+(i.sgst||0),0);
-      const igst = (inv.items||[]).reduce((s,i)=>s+(i.igst||0),0);
-      const itemsXml = (inv.items||[]).map(item => `
+      // ── Amount calculation ──────────────────────────────────────────────────
+      // Tally requires: partyLedger + gstLedgers + salesLedger(s) = 0 (balanced).
+      //
+      // Formula:
+      //   partyLedger (debit/positive)  = grandTotal
+      //   CGST/SGST/IGST (credit/neg)   = tax amounts
+      //   Sales Accounts (credit/neg)   = grandTotal - totalTax  [computed, not from items]
+      //
+      // We derive salesBase from grandTotal to guarantee balance regardless of any
+      // rounding in item-level amounts. This is the Tally-standard approach.
+
+      const grandTotal = +((inv.grandTotal || inv.totalAmount || 0)).toFixed(2);
+
+      // Prefer invoice-level tax fields; fall back to summing item-level fields
+      let cgst = +((inv.cgstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.cgst||0),0))).toFixed(4);
+      let sgst = +((inv.sgstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.sgst||0),0))).toFixed(4);
+      let igst = +((inv.igstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.igst||0),0))).toFixed(4);
+
+      // Round taxes to 2dp for Tally
+      cgst = +cgst.toFixed(2);
+      sgst = +sgst.toFixed(2);
+      igst = +igst.toFixed(2);
+
+      // salesBase = grandTotal − all taxes (guarantees voucher balance)
+      const salesBase = +(grandTotal - cgst - sgst - igst).toFixed(2);
+
+      const unit = tallyUnit(inv.items?.[0]?.unit || 'Nos');
+      const itemsXml = (inv.items||[]).map(item => {
+        const qty    = +(item.qty || item.quantity || 1);
+        const rate   = +(item.rate || item.unitPrice || item.basePrice || 0);
+        const amount = +(item.amount || item.total || (qty * rate) || 0).toFixed(2);
+        const itemUnit = tallyUnit(item.unit || 'Nos');
+        return `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${esc(item.description||item.name||'Item')}</STOCKITEMNAME>
   <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-  <RATE>${item.rate||item.unitPrice||0}/Nos</RATE>
-  <AMOUNT>-${item.amount||item.total||0}</AMOUNT>
-  <ACTUALQTY>${item.qty||item.quantity||0} Nos</ACTUALQTY>
-  <BILLEDQTY>${item.qty||item.quantity||0} Nos</BILLEDQTY>
+  <RATE>${rate}/${itemUnit}</RATE>
+  <AMOUNT>-${amount}</AMOUNT>
+  <ACTUALQTY>${qty} ${itemUnit}</ACTUALQTY>
+  <BILLEDQTY>${qty} ${itemUnit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>Sales Accounts</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${item.amount||item.total||0}</AMOUNT>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${amount}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
-</ALLINVENTORYENTRIES.LIST>`).join('');
+</ALLINVENTORYENTRIES.LIST>`;
+      }).join('');
 
       // ── Step 2: Match by PO Number (buyersOrderNo) ONLY ─────────────────
-      // If inv.buyersOrderNo matches a BuyersOrderNo already in Tally → Alter.
-      // If no buyersOrderNo, or not found → Create.
-      // Never match by partyName, ledgerName, or invoiceNo.
       const poNumber = (inv.buyersOrderNo || '').toUpperCase().trim();
       const existing = poNumber ? tallyPOMap.get(poNumber) : null;
       const action   = existing ? 'Alter' : 'Create';
       const guidTag  = existing ? `<GUID>${esc(existing.guid)}</GUID>` : '';
-      LOG(`Invoice ${inv.invoiceNo} (PO: ${poNumber || 'none'}): action=${action}${existing ? ` (Tally GUID: ${existing.guid})` : ' (new)'}`);
+      LOG(`Invoice ${inv.invoiceNo} (PO: ${poNumber || 'none'}): action=${action}${existing ? ` (Tally GUID: ${existing.guid})` : ' (new)'} grandTotal=${grandTotal} cgst=${cgst} sgst=${sgst} igst=${igst} salesBase=${salesBase}`);
 
       const vXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}">
@@ -563,11 +609,15 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   <NARRATION>ERP Invoice: ${esc(inv.invoiceNo)}</NARRATION>
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>${inv.grandTotal||0}</AMOUNT>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>${grandTotal}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
   ${cgst>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${cgst}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
   ${sgst>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${sgst}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
   ${igst>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${igst}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>Sales Accounts</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${salesBase}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
   ${itemsXml}
 </VOUCHER>`;
 
