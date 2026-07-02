@@ -33,6 +33,7 @@ import CreditNote     from '../models/CreditNote.js';
 import DebitNote      from '../models/DebitNote.js';
 import TallyVoucher   from '../models/TallyVoucher.js';
 import Category       from '../models/Category.js';
+import { postXmlWithRetry } from './tallyFetchEngine.js';
 
 const LOG = (...a) => console.log('[TallyExport]', ...a);
 const ERR = (...a) => console.error('[TallyExport ERROR]', ...a);
@@ -180,13 +181,14 @@ function parseResponse(xml, label = '') {
       ERR(`${label} LINEERROR: ${msg}`);
     }
   }
-  const errTag = s.match(/<ERRORS>([\s\S]*?)<\/ERRORS>/i);
-  if (errTag) {
-    const msg = errTag[1].replace(/<[^>]+>/g, ' ').trim();
-    if (msg) {
-      errors.push(msg);
-      ERR(`${label} ERRORS tag: ${msg}`);
-    }
+  // <ERRORS> in Tally's IMPORTRESULT is a COUNT (integer), not a message string.
+  // Only treat it as a problem when the count is > 0.
+  const errTag = s.match(/<ERRORS>(\d+)<\/ERRORS>/i);
+  const errCount = errTag ? parseInt(errTag[1], 10) : 0;
+  if (errCount > 0) {
+    const msg = `Tally reported ${errCount} import error(s)`;
+    errors.push(msg);
+    ERR(`${label} ERRORS count: ${errCount}`);
   }
 
   const created = parseInt(s.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
@@ -194,12 +196,6 @@ function parseResponse(xml, label = '') {
   const skipped = parseInt(s.match(/<SKIPPED>(\d+)<\/SKIPPED>/i)?.[1] || '0');
 
   LOG(`${label} → created:${created} altered:${altered} skipped:${skipped} errors:${errors.length}`);
-
-  // If altered > 0 and created == 0, Tally matched records by name/number instead of creating.
-  // Log a warning so this is visible immediately.
-  if (altered > 0 && created === 0) {
-    LOG(`${label} ⚠️ WARNING: Tally altered ${altered} records instead of creating. This means Tally matched by VOUCHERNUMBER or NAME. Check if voucher numbers already exist in Tally.`);
-  }
 
   if (errors.length > 0 && created === 0 && altered === 0) {
     return { ok: false, error: errors.join(' | '), created: 0, altered: 0, skipped };
@@ -643,6 +639,51 @@ export async function exportSystemLedgers(cfg, triggeredBy) {
   }
 }
 
+// ─── PO NUMBER LOOKUP ────────────────────────────────────────────────────────
+// Fetches all Tally vouchers and returns Map<BuyersOrderNo (uppercase) → { guid, voucherNumber }>
+// Used by exportSalesInvoices and exportPurchaseInvoices to decide Create vs Alter.
+// Uses postXmlWithRetry so it works in both connector mode and direct mode.
+async function fetchTallyPOMap(cfg) {
+  try {
+    const company = (cfg.companyName || '').trim().toUpperCase();
+    const coTag = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE>
+<HEADER>
+  <VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE><ID>ERPVoucherPOLookup</ID>
+</HEADER>
+<BODY><DESC>
+  <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="ERPVoucherPOLookup">
+      <TYPE>Voucher</TYPE>
+      <FETCH>GUID, VoucherNumber, VoucherTypeName, BuyersOrderNo</FETCH>
+    </COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
+</ENVELOPE>`;
+
+    const resp = await postXmlWithRetry(cfg, xml, 60000);
+    if (!resp) return new Map();
+
+    const byPO = new Map();
+    for (const m of resp.matchAll(/<VOUCHER[^>]*>([\s\S]*?)<\/VOUCHER>/gi)) {
+      const block         = m[1];
+      const guid          = (block.match(/<GUID>(.*?)<\/GUID>/i)?.[1]                  || '').trim();
+      const voucherNumber = (block.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/i)?.[1] || '').trim();
+      const buyersOrderNo = (block.match(/<BUYERSORDERNO>(.*?)<\/BUYERSORDERNO>/i)?.[1] || '').trim();
+      if (guid && buyersOrderNo) {
+        byPO.set(buyersOrderNo.toUpperCase().trim(), { guid, voucherNumber });
+      }
+    }
+    LOG(`fetchTallyPOMap: ${byPO.size} vouchers with BuyersOrderNo found in Tally`);
+    return byPO;
+  } catch (err) {
+    ERR('fetchTallyPOMap failed (non-fatal, defaulting to Create):', err.message);
+    return new Map();
+  }
+}
+
 // ─── EXPORT TASK: SALES INVOICES ─────────────────────────────────────────────
 
 export async function exportSalesInvoices(cfg, triggeredBy) {
@@ -650,23 +691,22 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   const syncId = `EXPORT-SALES-${Date.now()}`;
   LOG('exportSalesInvoices START');
   try {
-    // Export all ERP-created/Excel-uploaded invoices that haven't been synced yet.
-    // Status filter is intentionally broad — Excel-uploaded invoices from
-    // /finance/invoices/single are created as 'Draft' by default.
-    // Blocking on status would silently skip all those invoices.
-    // Only skip: Cancelled (invalid) and already-synced records.
-    // Tally-origin invoices are excluded by the source filter.
+    // Export all ERP-created invoices. Skip only Cancelled and Tally-origin invoices.
+    // PO number matching (below) handles create vs update — no tallySync filter needed.
     const invoices = await Invoice.find({
       status: { $nin: ['Cancelled'] },
       source: { $nin: ['Tally', 'tally'] },
-      $or: [{ tallySync: { $ne: true } }, { tallyGuid: { $exists: false } }],
     }).lean();
 
     if (!invoices.length) return { ok: true, records: 0 };
 
-    // Log the first invoice XML for debugging so we can see exactly what is sent to Tally
-    LOG(`exportSalesInvoices: exporting ${invoices.length} invoices`);
-    LOG(`First invoice being exported: no=${invoices[0].invoiceNo} source=${invoices[0].source} tallySync=${invoices[0].tallySync} tallyGuid=${invoices[0].tallyGuid || 'none'}`);
+    LOG(`exportSalesInvoices: ${invoices.length} invoices to export`);
+    LOG(`First invoice: no=${invoices[0].invoiceNo} source=${invoices[0].source} PO=${invoices[0].buyersOrderNo || 'none'}`);
+
+    // ── Fetch existing Tally vouchers indexed by BuyersOrderNo ───────────────
+    // PO Number is the ONLY match key. No Party Name / Invoice Number matching.
+    const tallyPOMap = await fetchTallyPOMap(cfg);
+    LOG(`exportSalesInvoices: ${tallyPOMap.size} PO numbers already in Tally`);
 
     const failedItems = [];
     const vouchersXml = invoices.map((inv, idx) => {
@@ -675,6 +715,13 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         const sgst = (inv.items || []).reduce((s, i) => s + (i.sgst || 0), 0);
         const igst = (inv.items || []).reduce((s, i) => s + (i.igst || 0), 0);
         const date = td(inv.invoiceDate) || TODAY;
+
+        // ── Match by PO Number ONLY ─────────────────────────────────────────
+        const poNumber = (inv.buyersOrderNo || '').toUpperCase().trim();
+        const existing = poNumber ? tallyPOMap.get(poNumber) : null;
+        const action   = existing ? 'Alter' : 'Create';
+        const guidTag  = existing ? `<GUID>${esc(existing.guid)}</GUID>` : '';
+        LOG(`Invoice ${inv.invoiceNo} (PO: ${poNumber || 'none'}): ${action}${existing ? ` GUID=${existing.guid}` : ''}`);
 
         const inventoryLines = (inv.items || []).map(item => {
           const unit = tallyUnit(item.unit);
@@ -695,11 +742,13 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         }).join('');
 
         const voucherXml = `
-<VOUCHER VCHTYPE="Sales" ACTION="Create">
+<VOUCHER VCHTYPE="Sales" ACTION="${action}">
+  ${guidTag}
   <DATE>${date}</DATE>
   <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(inv.invoiceNo)}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(inv.partyName)}</PARTYLEDGERNAME>
+  <BUYERSORDERNO>${esc(inv.buyersOrderNo || '')}</BUYERSORDERNO>
   <NARRATION>ERP Invoice: ${esc(inv.invoiceNo)} | ${esc(inv.partyName)}</NARRATION>
   <ISINVOICE>Yes</ISINVOICE>
   <ALLLEDGERENTRIES.LIST>
@@ -713,11 +762,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   ${inventoryLines}
 </VOUCHER>`;
 
-        // Log the full XML of the first invoice so we can verify exactly what Tally receives
-        if (idx === 0) {
-          LOG(`exportSalesInvoices: FIRST INVOICE XML SENT TO TALLY:\n${voucherXml}`);
-        }
-
+        if (idx === 0) LOG(`exportSalesInvoices: FIRST INVOICE XML SENT TO TALLY:\n${voucherXml}`);
         return voucherXml;
       } catch (e) {
         failedItems.push({ id: inv.invoiceNo, error: e.message });
@@ -748,12 +793,19 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
   const syncId = `EXPORT-PUR-${Date.now()}`;
   LOG('exportPurchaseInvoices START');
   try {
+    // Export all ERP-created POs. Skip only Tally-origin ones.
+    // PO number matching handles create vs update — no tallySync filter needed.
     const pos = await PurchaseOrder.find({
       status: { $in: ['Approved', 'Received'] },
-      $or: [{ tallySync: { $ne: true } }, { tallyGuid: { $exists: false } }],
+      dataSource: { $ne: 'Tally' },
     }).populate('vendor').lean();
 
     if (!pos.length) return { ok: true, records: 0 };
+
+    // ── Fetch existing Tally vouchers indexed by BuyersOrderNo ───────────────
+    // PO Number is the ONLY match key.
+    const tallyPOMap = await fetchTallyPOMap(cfg);
+    LOG(`exportPurchaseInvoices: ${pos.length} POs to export, ${tallyPOMap.size} PO numbers already in Tally`);
 
     const vouchersXml = pos.map(po => {
       const vendorName = po.vendor?.companyName || 'Unknown Vendor';
@@ -761,13 +813,21 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
       if (po.deliveryDate) voucherDate = td(po.deliveryDate);
       if (!voucherDate && po.createdAt) voucherDate = td(po.createdAt);
       if (!voucherDate) voucherDate = TODAY;
-      
+
       const items      = po.items || [];
       const subtotal   = items.reduce((s, i) => s + (i.qty || 1) * (i.basePrice || 0), 0);
       const gstAmt     = +(po.gstTotal || subtotal * 0.18).toFixed(2);
       const grandTotal = +(po.grandTotal || subtotal + gstAmt).toFixed(2);
       const cgst       = +(gstAmt / 2).toFixed(2);
       const sgst       = +(gstAmt - cgst).toFixed(2);
+
+      // ── Match by PO Number ONLY ─────────────────────────────────────────
+      // po.poId IS the PO Number. Look it up in Tally's BuyersOrderNo index.
+      const poNumber = (po.poId || '').toUpperCase().trim();
+      const existing = poNumber ? tallyPOMap.get(poNumber) : null;
+      const action   = existing ? 'Alter' : 'Create';
+      const guidTag  = existing ? `<GUID>${esc(existing.guid)}</GUID>` : '';
+      LOG(`PO ${po.poId}: ${action}${existing ? ` GUID=${existing.guid}` : ''}`);
 
       const inventoryLines = items.map(item => {
         const qty   = item.qty || item.quantity || 1;
@@ -791,11 +851,13 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
       }).join('');
 
       return `
-<VOUCHER VCHTYPE="Purchase" ACTION="Create">
+<VOUCHER VCHTYPE="Purchase" ACTION="${action}">
+  ${guidTag}
   <DATE>${voucherDate}</DATE>
   <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(po.poId)}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(vendorName)}</PARTYLEDGERNAME>
+  <BUYERSORDERNO>${esc(po.poId)}</BUYERSORDERNO>
   <NARRATION>PO: ${esc(po.poId)} | ${esc(vendorName)}</NARRATION>
   <ISINVOICE>Yes</ISINVOICE>
   <ALLLEDGERENTRIES.LIST>
