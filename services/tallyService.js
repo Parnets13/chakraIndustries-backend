@@ -83,18 +83,38 @@ function extractAlterId(xmlBlock) {
 function parseTallyResponse(xml, label = '') {
   if (!xml || !xml.trim()) return { ok: false, error: 'Empty response from Tally' };
   const s = String(xml);
+
+  // Log full raw response for every call — essential for debugging live issues
+  LOG(`${label} RAW RESPONSE (first 1000 chars):\n${s.slice(0, 1000)}`);
+
   const errors = [];
   for (const m of s.matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)) {
-    const msg = m[1].trim(); if (msg) errors.push(msg);
+    const msg = m[1].trim();
+    if (msg) {
+      errors.push(msg);
+      ERR(`${label} LINEERROR: ${msg}`);
+    }
   }
   if (s.includes('<ERRORS>')) {
     const m = s.match(/<ERRORS>([\s\S]*?)<\/ERRORS>/i);
-    if (m) { const msg = m[1].replace(/<[^>]+>/g,' ').trim(); if (msg) errors.push(msg); }
+    if (m) {
+      const msg = m[1].replace(/<[^>]+>/g,' ').trim();
+      if (msg) {
+        errors.push(msg);
+        ERR(`${label} ERRORS tag: ${msg}`);
+      }
+    }
   }
   const created = parseInt(s.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
   const altered  = parseInt(s.match(/<ALTERED>(\d+)<\/ALTERED>/i)?.[1] || '0');
   const skipped  = parseInt(s.match(/<SKIPPED>(\d+)<\/SKIPPED>/i)?.[1] || '0');
   LOG(`${label} IMPORTRESULT → created:${created} altered:${altered} skipped:${skipped} errors:${errors.length}`);
+
+  // Warn if Tally altered instead of creating — means voucher numbers collide with existing Tally data
+  if (altered > 0 && created === 0) {
+    LOG(`${label} ⚠️ WARNING: Tally altered ${altered} records instead of creating new ones. Voucher numbers or master names already exist in Tally.`);
+  }
+
   if (errors.length > 0) {
     if (created === 0 && altered === 0) {
       ERR(`${label} FAILED:`, errors.join(' | '));
@@ -406,11 +426,15 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   const syncId = `SYNC-SALES-${Date.now()}`;
   LOG('=== pushSalesVouchersToTally START ===');
   try {
-    // Only push invoices created in the ERP — never re-export records that came FROM Tally
+    // Export all ERP-created invoices that haven't been synced yet.
+    // Status filter is intentionally broad — 'Draft' is the default for Excel-uploaded
+    // invoices from /finance/invoices/single. We must not block those from export.
+    // Only skip: Cancelled (invalid) and already-synced records.
+    // Tally-origin invoices are excluded by the source filter.
     const invoices = await Invoice.find({
-      status: { $in:['Sent','Paid'] },
+      status: { $nin: ['Cancelled'] },
       source: { $nin: ['Tally', 'tally'] },
-      $or: [{ tallySync:{$ne:true} }, { tallyGuid:{$exists:false} }],
+      $or: [{ tallySync: { $ne: true } }, { tallyGuid: { $exists: false } }],
     }).lean();
 
     if (!invoices.length) {
@@ -418,7 +442,10 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
       return { ok:true, records:0 };
     }
 
-    const vouchersXml = invoices.map(inv => {
+    LOG(`pushSalesVouchersToTally: exporting ${invoices.length} invoices`);
+    LOG(`First invoice: no=${invoices[0].invoiceNo} source=${invoices[0].source} tallySync=${invoices[0].tallySync} tallyGuid=${invoices[0].tallyGuid || 'none'}`);
+
+    const vouchersXml = invoices.map((inv, idx) => {
       const cgst = (inv.items||[]).reduce((s,i)=>s+(i.cgst||0),0);
       const sgst = (inv.items||[]).reduce((s,i)=>s+(i.sgst||0),0);
       const igst = (inv.items||[]).reduce((s,i)=>s+(i.igst||0),0);
@@ -436,13 +463,13 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`).join('');
 
-      return `
+      const vXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="Create">
   <DATE>${tallyDate(inv.invoiceDate)||tallyDate(new Date())}</DATE>
   <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(inv.invoiceNo)}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(inv.partyName)}</PARTYLEDGERNAME>
-  <NARRATION>Invoice: ${esc(inv.invoiceNo)}</NARRATION>
+  <NARRATION>ERP Invoice: ${esc(inv.invoiceNo)}</NARRATION>
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>${inv.grandTotal||0}</AMOUNT>
@@ -452,6 +479,9 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   ${igst>0?`<ALLLEDGERENTRIES.LIST><LEDGERNAME>IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-${igst}</AMOUNT></ALLLEDGERENTRIES.LIST>`:''}
   ${itemsXml}
 </VOUCHER>`;
+
+      if (idx === 0) LOG(`pushSalesVouchersToTally: FIRST INVOICE XML:\n${vXml}`);
+      return vXml;
     }).join('');
 
     const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
