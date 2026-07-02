@@ -17,7 +17,6 @@
  *   • importFromTally() / exportToTally() method stubs for future-readiness
  */
 
-import axios from 'axios';
 import TallyConfig    from '../models/TallyConfig.js';
 import TallySyncLog   from '../models/TallySyncLog.js';
 import ItemMaster     from '../models/ItemMaster.js';
@@ -138,29 +137,10 @@ ${innerXml}
 // ─── HTTP TRANSPORT ───────────────────────────────────────────────────────────
 
 async function postXml(cfg, xml, timeoutMs = 40000) {
-  const url = resolveUrl(cfg);
-  const headers = { 'Content-Type': 'text/xml', Accept: '*/*' };
-  if (cfg.authType === 'Basic Auth' && cfg.apiKey)
-    headers['Authorization'] = `Basic ${Buffer.from(cfg.apiKey).toString('base64')}`;
-  else if (cfg.authType === 'API Key' && cfg.apiKey)
-    headers['Authorization'] = `Bearer ${cfg.apiKey}`;
-
-  LOG(`POST ${url}  (${xml.length} bytes, timeout ${timeoutMs}ms)`);
-
-  try {
-    const resp = await axios({
-      method: 'POST', url, data: xml, headers,
-      timeout: timeoutMs, responseType: 'text',
-      validateStatus: () => true,
-      maxRedirects: 5,
-    });
-    const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
-    LOG(`HTTP ${resp.status} — ${body.length} bytes`);
-    return body;
-  } catch (err) {
-    ERR('postXml error:', err.message, '(code:', err.code + ')');
-    throw err;
-  }
+  // Route via connector (if useConnector=true) or direct HTTP — same as tallyFetchEngine.
+  // postXmlWithRetry handles both paths transparently.
+  LOG(`postXml → ${xml.length} bytes, timeout ${timeoutMs}ms`);
+  return postXmlWithRetry(cfg, xml, timeoutMs);
 }
 
 // ─── RESPONSE PARSER ─────────────────────────────────────────────────────────
@@ -232,23 +212,16 @@ const PING_XML = `<ENVELOPE>
 
 /**
  * validateTallyConnection
- * Returns { reachable, companyName, companyMatch, error }
+ * Returns { reachable, openCompany, companyMatch, error }
+ * Uses connector routing (if useConnector=true) — same path as postXml.
  */
 export async function validateTallyConnection(cfg) {
-  const url = resolveUrl(cfg);
-  LOG('validateTallyConnection →', url);
+  LOG('validateTallyConnection — connector:', cfg.useConnector, 'id:', cfg.connectorId || '(none)');
 
   try {
-    const resp = await axios({
-      method: 'POST', url, data: PING_XML,
-      headers: { 'Content-Type': 'text/xml', Accept: '*/*' },
-      timeout: 15000, responseType: 'text',
-      validateStatus: () => true, maxRedirects: 5,
-    });
-    const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
+    const body = await postXmlWithRetry(cfg, PING_XML, 20000);
     LOG('Ping response:', body.slice(0, 400));
 
-    // Extract open company name from response
     const coMatch =
       body.match(/<COMPANYNAME>(.*?)<\/COMPANYNAME>/i) ||
       body.match(/<NAME>(.*?)<\/NAME>/i) ||
@@ -257,7 +230,6 @@ export async function validateTallyConnection(cfg) {
     const openCompany = coMatch ? coMatch[1].trim() : null;
     const expected    = (cfg.companyName || '').trim();
 
-    // Check if expected company matches what's open
     const companyMatch = !expected || !openCompany ||
       openCompany.toLowerCase().replace(/\s+/g, '') === expected.toLowerCase().replace(/\s+/g, '');
 
@@ -265,16 +237,16 @@ export async function validateTallyConnection(cfg) {
     return { reachable: true, openCompany, companyMatch, error: null };
 
   } catch (err) {
-    const code = err.code || '';
     let error = err.message;
+    const code = err.code || '';
     if (code === 'ECONNREFUSED')
-      error = `Tally is not running on ${url}. Start Tally Prime and enable the HTTP Server (F12 → Configure → Advanced → Enable ODBC/HTTP Server: Yes, Port: ${cfg.port || 9000}).`;
-    else if (code === 'ECONNRESET' || err.message?.includes('socket hang up'))
-      error = `Tally closed the connection. Enable HTTP Server in Tally: F12 → Configure → Advanced → Enable ODBC/HTTP Server: Yes.`;
+      error = `Tally is not running or HTTP Server is disabled. In Tally: F12 → Configure → Advanced → Enable ODBC/HTTP Server: Yes, Port: ${cfg.port || 9000}.`;
+    else if (code === 'ECONNRESET' || error.includes('socket hang up'))
+      error = `Tally closed the connection unexpectedly. Enable HTTP Server in Tally Prime.`;
     else if (code === 'ETIMEDOUT' || code === 'ECONNABORTED')
-      error = `Connection timed out at ${url}. Check the URL and ensure Tally HTTP Server is running.`;
+      error = `Connection timed out. Check Tally is running and the connector is online.`;
     else if (code === 'ENOTFOUND')
-      error = `Cannot reach host "${url}". Verify the Tally machine URL in Settings.`;
+      error = `Cannot reach Tally host. Verify the URL in Settings.`;
 
     await TallyConfig.findOneAndUpdate({}, { connectionStatus: 'Disconnected' }, { upsert: true });
     return { reachable: false, openCompany: null, companyMatch: false, error };
