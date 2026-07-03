@@ -790,18 +790,21 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             : +(itemsSubtotal > 0 ? (item.amt / itemsSubtotal) * salesBase : salesBase / itemLines.length).toFixed(2);
           allocated = +(allocated + lineAlloc).toFixed(2);
 
+          // Match Tally's own Sales voucher structure exactly:
+          // Item ISDEEMEDPOSITIVE=No, AMOUNT=positive
+          // Sales Accounts ISDEEMEDPOSITIVE=No, AMOUNT=positive
           return `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${esc(item.name)}</STOCKITEMNAME>
-  <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
   <RATE>${item.rate.toFixed(2)} /1 ${item.unit}</RATE>
-  <AMOUNT>-${lineAlloc.toFixed(2)}</AMOUNT>
+  <AMOUNT>${lineAlloc.toFixed(2)}</AMOUNT>
   <ACTUALQTY>${item.qty} ${item.unit}</ACTUALQTY>
   <BILLEDQTY>${item.qty} ${item.unit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>Sales Accounts</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <AMOUNT>-${lineAlloc.toFixed(2)}</AMOUNT>
+    <AMOUNT>${lineAlloc.toFixed(2)}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
         }).join('');
@@ -817,10 +820,13 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <BUYERSORDERNO>${esc(inv.buyersOrderNo || '')}</BUYERSORDERNO>
   <NARRATION>ERP Invoice: ${esc(inv.invoiceNo)} | ${esc(inv.partyName)}</NARRATION>
   <ISINVOICE>Yes</ISINVOICE>
+  <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+  <ISNEGISPOSSET>Yes</ISNEGISPOSSET>
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-    <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
+    <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
+    <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
   ${inventoryLines}
 </VOUCHER>`;
@@ -954,13 +960,13 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
   <STOCKITEMNAME>${esc(item.name || 'Item')}</STOCKITEMNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
   <RATE>${rate.toFixed(2)} /1 ${unit}</RATE>
-  <AMOUNT>-${lineAlloc.toFixed(2)}</AMOUNT>
+  <AMOUNT>${lineAlloc.toFixed(2)}</AMOUNT>
   <ACTUALQTY>${qty} ${unit}</ACTUALQTY>
   <BILLEDQTY>${qty} ${unit}</BILLEDQTY>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>Purchase Accounts</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <AMOUNT>-${lineAlloc.toFixed(2)}</AMOUNT>
+    <AMOUNT>${lineAlloc.toFixed(2)}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
       }).join('');
@@ -976,9 +982,12 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
   <BUYERSORDERNO>${esc(po.poId)}</BUYERSORDERNO>
   <NARRATION>PO: ${esc(po.poId)} | ${esc(vendorName)}</NARRATION>
   <ISINVOICE>Yes</ISINVOICE>
+  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+  <ISNEGISPOSSET>Yes</ISNEGISPOSSET>
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(vendorName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
   ${inventoryLines}
