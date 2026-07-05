@@ -1,11 +1,4 @@
-/**
- * deleteAndResync.js
- * 1. Deletes ALL Vendor and Client documents from MongoDB
- * 2. Re-pulls all ledgers from Tally and imports them fresh
- *    with correct phone, city, address, contact person (decoded)
- *
- * Usage: node scripts/deleteAndResync.js
- */
+
 
 import dotenv      from 'dotenv';
 import axios       from 'axios';

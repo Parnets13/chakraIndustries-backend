@@ -38,6 +38,14 @@ const tallyConfigSchema = new mongoose.Schema({
   lastExportAt:     { type: Date },
   updatedBy:        { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   
+  // Company dispatch / GST details (used when building Sales Voucher XML for Tally)
+  // These are Sri Chakra Industries' own details — the "from" side of every invoice.
+  gstin:   { type: String, default: '29ABWFS0002M1ZR' },  // company GSTIN
+  state:   { type: String, default: 'Karnataka' },         // dispatch from state
+  city:    { type: String, default: 'Bengaluru' },         // dispatch from city
+  pincode: { type: String, default: '560039' },            // dispatch from pincode
+  address: { type: String, default: '13/14, Azeez Sait Industrial Estate, Nayandahalli, Mysore Road, Bangalore-560039' },
+
   // Connector settings
   useConnector:    { type: Boolean, default: false },
   connectorId:     { type: String, default: '' },
