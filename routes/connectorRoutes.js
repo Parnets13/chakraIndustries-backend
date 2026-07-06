@@ -15,16 +15,32 @@ const httpJobResults = new Map();   // finished (waiting for server to consume)
 export function enqueueConnectorJob(connectorId, xml, timeoutMs) {
   return new Promise((resolve, reject) => {
     const jobId = crypto.randomUUID();
-    const timeout = setTimeout(() => {
+
+    // ── Timeout strategy ───────────────────────────────────────────────────────
+    // OLD BUG: The timeout started at enqueue time. If connector poll-latency was
+    // 5s and Tally took 58s, total = 63s > 60s timeout → result discarded even
+    // though Tally DID respond.
+    //
+    // FIX: Use a two-stage timer:
+    //   Stage 1 (safetyHandle): fires at 2× timeoutMs if connector never polls.
+    //                           Handles dead/disconnected connectors.
+    //   Stage 2 (dispatchHandle): starts ONLY when connector picks up the job.
+    //                             Gives Tally the full timeoutMs budget from
+    //                             the moment it receives the request.
+    const safetyHandle = setTimeout(() => {
       if (httpJobQueue.has(jobId)) {
         httpJobQueue.delete(jobId);
-        reject(new Error(`Connector HTTP job timed out after ${timeoutMs}ms — Tally may be slow or the connector is offline`));
-      } else if (httpJobResults.has(jobId)) {
-        httpJobResults.delete(jobId);
-        reject(new Error(`Connector HTTP job timed out after ${timeoutMs}ms — connector picked up the job but did not return a result`));
+        reject(new Error(`Connector HTTP job timed out after ${timeoutMs * 2}ms — connector did not pick up the job (is it running?)`));
       }
-    }, timeoutMs);
-    httpJobQueue.set(jobId, { xml, resolve, reject, timeout, connectorId, createdAt: Date.now() });
+    }, timeoutMs * 2);
+
+    httpJobQueue.set(jobId, {
+      xml, resolve, reject, timeoutMs,
+      safetyHandle,   // cleared when connector picks up in poll-job
+      connectorId,
+      createdAt: Date.now(),
+    });
+
     console.log(`[ConnectorHTTP] Enqueued job ${jobId} for connector ${connectorId} (queue size: ${httpJobQueue.size})`);
   });
 }
@@ -287,8 +303,19 @@ router.get('/poll-job', protectConnector, async (req, res) => {
     if (done) return;
     for (const [jobId, job] of httpJobQueue.entries()) {
       if (job.connectorId === connectorId) {
+        // Cancel the safety timeout — connector is alive and picked up the job
+        clearTimeout(job.safetyHandle);
         httpJobQueue.delete(jobId);
-        httpJobResults.set(jobId, { resolve: job.resolve, reject: job.reject, timeout: job.timeout });
+
+        // Start the real dispatch timer NOW (Tally gets the full timeoutMs budget)
+        const dispatchHandle = setTimeout(() => {
+          if (httpJobResults.has(jobId)) {
+            httpJobResults.delete(jobId);
+            job.reject(new Error(`Connector HTTP job timed out after ${job.timeoutMs}ms — Tally did not respond in time`));
+          }
+        }, job.timeoutMs);
+
+        httpJobResults.set(jobId, { resolve: job.resolve, reject: job.reject, timeout: dispatchHandle });
         console.log(`[ConnectorHTTP] Job ${jobId} dispatched to connector ${connectorId}`);
         done = true;
         return res.json({ job: { id: jobId, xml: job.xml } });

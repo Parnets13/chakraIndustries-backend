@@ -1012,11 +1012,22 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
     // ── Step 0.5: Fetch ACTUAL GST ledger names from Tally ────────────────────
     // This prevents the "silent EXCEPTIONS with no LINEERROR" issue caused by
-    // referencing a ledger name that doesn't exist in Tally (e.g., code says
-    // "Output CGST @ 9%" but Tally has it as "CGST" or "Output CGST @9%").
-    const tallyGstLedgers = await fetchTallyGstLedgerNames(cfg);
-    if (!tallyGstLedgers || (!tallyGstLedgers.cgstNames.length && !tallyGstLedgers.sgstNames.length && !tallyGstLedgers.igstNames.length)) {
-      LOG('⚠️ exportSalesInvoices: could not fetch GST ledger names from Tally — vouchers may be rejected if ledger names mismatch. Continuing with fallback names.');
+    // referencing a ledger name that doesn't exist in Tally.
+    // NOTE: This query is skipped in connector mode (it's a TDL Collection query
+    // that times out on slow connectors). In connector mode we rely on the
+    // SVSHOWERRORLIST fallback names and log any mismatch from the response.
+    // The auto-masters step creates these ledgers if they don't exist anyway.
+    let tallyGstLedgers = null;
+    if (!(cfg.useConnector && cfg.connectorId)) {
+      // Only fetch live ledger names in direct (local) mode — fast enough
+      tallyGstLedgers = await fetchTallyGstLedgerNames(cfg);
+      if (!tallyGstLedgers || (!tallyGstLedgers.cgstNames.length && !tallyGstLedgers.sgstNames.length && !tallyGstLedgers.igstNames.length)) {
+        LOG('⚠️ exportSalesInvoices: could not fetch GST ledger names from Tally — using fallback names.');
+      } else {
+        LOG(`exportSalesInvoices: using Tally GST ledgers — cgst:[${tallyGstLedgers.cgstNames.join(', ')}] sgst:[${tallyGstLedgers.sgstNames.join(', ')}]`);
+      }
+    } else {
+      LOG('exportSalesInvoices: connector mode — skipping live GST ledger name fetch (using fallback names)');
     }
 
     // Only export invoices not yet synced to Tally.
