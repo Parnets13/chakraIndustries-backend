@@ -175,9 +175,9 @@ const tallyUnit = (u) => UNIT_MAP[(u || '').toLowerCase().trim()] || 'Nos';
 /** Build <STATICVARIABLES> tag targeting the configured company */
 function staticVars(cfg, extra = '') {
   // Tally stores company names as UPPERCASE internally — always send uppercase.
-  // Fall back to the known company name so exports work even if companyName was
-  // never saved to TallyConfig.
-  const co = (cfg.companyName || 'SRI CHAKRA INDUSTRIES').trim().toUpperCase();
+  // Do NOT fall back to a hardcoded name — if companyName is wrong/empty, the
+  // export MUST fail visibly rather than silently sending to the wrong company.
+  const co = (cfg.companyName || '').trim().toUpperCase();
   // SVSHOWERRORLIST=Yes forces Tally to include LINEERROR tags in EVERY response
   // so we can see the exact rejection reason instead of just EXCEPTIONS count.
   //
@@ -931,6 +931,14 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
     LOG(`exportSalesInvoices: ▶ using SVCURRENTCOMPANY="${cfg.companyName || '(EMPTY — will cause EXCEPTIONS)'}"`);
 
+    // GUARD: If companyName is still empty after the ping, abort immediately.
+    // An empty SVCURRENTCOMPANY tag causes every voucher to be silently rejected
+    // with EXCEPTIONS=1 and no LINEERROR — the most confusing failure mode.
+    if (!cfg.companyName || !cfg.companyName.trim()) {
+      ERR('exportSalesInvoices: companyName is empty — cannot export. Open Tally Settings and click "Test Connection" to auto-detect the company name, then retry.');
+      return { ok: false, records: 0, error: 'Tally company name is not configured. Go to Tally Settings → Test Connection to auto-detect it, then retry the export.' };
+    }
+
     // Only export invoices not yet synced to Tally.
     // tallySync=true means already exported — skip them to prevent duplicates.
     const invoices = await Invoice.find({
@@ -1100,6 +1108,18 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         ].filter(Boolean).join(' | ');
 
         LOG(`Invoice ${inv.invoiceNo}: tallyDate=${tallyDate} grandTotal=${grandTotal} cgst=${totalCGST} sgst=${totalSGST} igst=${totalIGST}`);
+
+        // Balance check: party debit must equal sum of all credit entries.
+        // Tally rejects imbalanced vouchers silently with EXCEPTIONS=1 and no LINEERROR.
+        const creditTotal = +(totalCGST + totalSGST + totalIGST + (totalTax > 0 ? salesBase : grandTotal)).toFixed(2);
+        if (Math.abs(grandTotal - creditTotal) > 0.01) {
+          const reason = `Voucher imbalanced: debit=${grandTotal} credits=${creditTotal} (cgst=${totalCGST} sgst=${totalSGST} igst=${totalIGST} salesBase=${salesBase})`;
+          ERR(`Invoice ${inv.invoiceNo}: SKIPPED — ${reason}`);
+          failedItems.push({ id: inv.invoiceNo, error: reason });
+          await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', reason);
+          continue;
+        }
+
         const voucherXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}">
   <DATE>${tallyDate}</DATE>
