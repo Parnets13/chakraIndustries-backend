@@ -713,6 +713,90 @@ export async function exportSystemLedgers(cfg, triggeredBy) {
   }
 }
 
+// ─── SAFEGUARD: INVOICE NUMBER DEDUP LOOKUP ──────────────────────────────────
+// Fetches existing Sales voucher numbers from Tally so we can skip any invoice
+// whose invoiceNo already exists as a voucher number in Tally (preventing true
+// duplicates where the same invoice number appears twice in the Sales Register).
+//
+// Returns Set<voucherNumber (uppercase)>
+// Non-fatal — if the lookup fails, returns empty Set (export continues normally).
+async function fetchTallyExistingVoucherNumbers(cfg) {
+  try {
+    const company = (cfg.companyName || 'SRI CHAKRA INDUSTRIES').trim().toUpperCase();
+    const coTag   = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE>
+<HEADER>
+  <VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE><ID>ERPSalesVoucherNumbers</ID>
+</HEADER>
+<BODY><DESC>
+  <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="ERPSalesVoucherNumbers">
+      <TYPE>Voucher</TYPE>
+      <FILTERS>IsSales</FILTERS>
+      <FETCH>VoucherNumber</FETCH>
+    </COLLECTION>
+    <SYSTEM:FORMULA NAME="IsSales">$VoucherTypeName = "Sales"</SYSTEM:FORMULA>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
+</ENVELOPE>`;
+
+    const resp = await postXmlWithRetry(cfg, xml, 30000);
+    if (!resp) return new Set();
+
+    const existingNos = new Set();
+    for (const m of resp.matchAll(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/gi)) {
+      const vno = (m[1] || '').trim().toUpperCase();
+      if (vno) existingNos.add(vno);
+    }
+    LOG(`fetchTallyExistingVoucherNumbers: ${existingNos.size} Sales voucher numbers found in Tally`);
+    return existingNos;
+  } catch (err) {
+    ERR('fetchTallyExistingVoucherNumbers failed (non-fatal, skipping dedup check):', err.message);
+    return new Set();
+  }
+}
+
+// ─── SAFEGUARD: PRE-EXPORT VALIDATION ────────────────────────────────────────
+// Validates a single invoice before it is sent to Tally.
+// Returns { valid: true } if all required fields are present and non-zero,
+// or { valid: false, reason: '...' } describing the specific problem.
+// A failed validation skips the invoice entirely — nothing is sent to Tally.
+function validateInvoiceForExport(inv) {
+  if (!inv.invoiceNo || !String(inv.invoiceNo).trim()) {
+    return { valid: false, reason: 'Invoice number is missing' };
+  }
+  if (!inv.partyName || !String(inv.partyName).trim()) {
+    return { valid: false, reason: `Invoice ${inv.invoiceNo}: party name is missing` };
+  }
+  const grandTotal = +(inv.grandTotal || inv.totalAmount || 0);
+  if (!grandTotal || grandTotal <= 0) {
+    return { valid: false, reason: `Invoice ${inv.invoiceNo}: grand total is zero or missing` };
+  }
+  return { valid: true };
+}
+
+// ─── SAFEGUARD: DETAILED INVOICE EXPORT LOG ──────────────────────────────────
+// Writes one TallySyncLog entry per invoice outcome (created / skipped / failed).
+// These supplement the summary log written at the end of exportSalesInvoices.
+// Logged at type='Sales Invoice' so they appear separately in the Logs tab.
+async function logInvoiceExportResult(syncId, invoiceNo, partyName, status, detail) {
+  try {
+    await TallySyncLog.create({
+      syncId,
+      type: 'Sales',
+      entity: invoiceNo,
+      direction: 'ERP → Tally',
+      status,                        // 'Success' | 'Skipped' | 'Failed'
+      duration: '0s',
+      error: status !== 'Success' ? (detail || '') : '',
+      records: status === 'Success' ? 1 : 0,
+      triggeredBy: null,
+    });
+  } catch (_) { /* non-fatal — log failure must never abort export */ }
+}
+
 // ─── PO NUMBER LOOKUP ────────────────────────────────────────────────────────
 // Fetches all Tally vouchers and returns Map<BuyersOrderNo (uppercase) → { guid, voucherNumber }>
 // Used by exportSalesInvoices and exportPurchaseInvoices to decide Create vs Alter.
@@ -846,14 +930,51 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     const tallyPOMap = await fetchTallyPOMap(cfg);
     LOG(`exportSalesInvoices: ${tallyPOMap.size} PO numbers already in Tally`);
 
+    // ── SAFEGUARD: Fetch existing Sales voucher numbers from Tally ────────────
+    // If an invoice number already exists as a Sales voucher number in Tally,
+    // it means this invoice was already exported (possibly via a different path
+    // or with tallySync cleared). Skip and report it rather than creating a duplicate.
+    const tallyVoucherNumbers = await fetchTallyExistingVoucherNumbers(cfg);
+    LOG(`exportSalesInvoices: ${tallyVoucherNumbers.size} existing Sales voucher numbers in Tally`);
+
     // ── Fetch Tally company period end to cap voucher dates ───────────────────
     // Tally rejects vouchers dated after the company's ENDINGAT date with the
     // misleading "Voucher date is missing" error. Cap all dates to period end.
     const periodEnd = await fetchTallyPeriodEnd(cfg);
 
-    const failedItems = [];
-    const vouchersXml = invoices.map((inv, idx) => {  // returns { id, xml } objects
+    const failedItems  = [];
+    const skippedItems = [];   // invoices skipped due to validation failure or dedup
+    const vouchersXml = [];    // populated below after safeguard checks
+
+    for (let idx = 0; idx < invoices.length; idx++) {
+      const inv = invoices[idx];
       try {
+        // ── SAFEGUARD 1: Pre-export validation ──────────────────────────────
+        // Reject invoices with missing or zero critical fields before building
+        // XML. A bad invoice must never reach Tally — not even partially.
+        const validation = validateInvoiceForExport(inv);
+        if (!validation.valid) {
+          LOG(`Invoice ${inv.invoiceNo}: SKIPPED — validation failed: ${validation.reason}`);
+          failedItems.push({ id: inv.invoiceNo, error: `Validation: ${validation.reason}` });
+          await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', `Validation failed: ${validation.reason}`);
+          continue;
+        }
+
+        // ── SAFEGUARD 2: Invoice-number dedup check against Tally ───────────
+        // If the invoice number already exists as a Tally Sales voucher number,
+        // the invoice was already exported. Skip it and mark tallySync=true in
+        // the ERP so it won't be attempted again on the next run.
+        const invNoUpper = String(inv.invoiceNo).trim().toUpperCase();
+        if (tallyVoucherNumbers.has(invNoUpper)) {
+          LOG(`Invoice ${inv.invoiceNo}: SKIPPED — voucher number already exists in Tally (duplicate prevention)`);
+          skippedItems.push({ id: inv.invoiceNo, reason: 'Already exists in Tally' });
+          await logInvoiceExportResult(syncId, inv.invoiceNo, inv.partyName || '', 'Skipped', 'Voucher number already exists in Tally');
+          // Mark as synced so it's not retried (it IS already in Tally)
+          await Invoice.updateOne({ _id: inv._id }, { tallySync: true, tallySyncAt: new Date() });
+          continue;
+        }
+
+        // ── Build voucher XML (existing logic, untouched) ───────────────────
         // ── Match by PO Number ONLY ─────────────────────────────────────────
         const poNumber = (inv.buyersOrderNo || '').toUpperCase().trim();
         const existing = poNumber ? tallyPOMap.get(poNumber) : null;
@@ -951,12 +1072,13 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 </VOUCHER>`;
 
         if (idx === 0) LOG(`exportSalesInvoices: FIRST INVOICE XML:\n${voucherXml}`);
-        return { id: inv._id, xml: voucherXml };
+        vouchersXml.push({ id: inv._id, invoiceNo: inv.invoiceNo, partyName: inv.partyName || '', xml: voucherXml });
       } catch (e) {
         failedItems.push({ id: inv.invoiceNo, error: e.message });
-        return null;
+        // ── SAFEGUARD 3: Log the per-invoice build failure ─────────────────
+        await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', `Build error: ${e.message}`);
       }
-    }).filter(Boolean);
+    }
 
     // ── Send ONE voucher per request ─────────────────────────────────────
     // Sending individually ensures:
@@ -984,9 +1106,17 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       if (result.ok) {
         totalCreated += result.created || 0;
         totalAltered += result.altered || 0;
-        batch.forEach(v => successIds.push(v.id));
+        // ── SAFEGUARD 3: Per-invoice export log (created/success) ──────────
+        for (const v of batch) {
+          successIds.push(v.id);
+          await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', null);
+        }
       } else {
         batchErrors.push(`Batch ${batchNo}: ${result.error}`);
+        // ── SAFEGUARD 3: Per-invoice export log (failed) ───────────────────
+        for (const v of batch) {
+          await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', result.error || 'Tally rejected');
+        }
       }
     }
 
@@ -999,13 +1129,16 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     const dur = `${((Date.now() - start) / 1000).toFixed(1)}s`;
     await writeLog({ syncId, type: 'Sales', direction: 'ERP → Tally', status: overallOk ? 'Success' : 'Failed', duration: dur, error: batchErrors.join('; '), records: invoices.length, triggeredBy });
 
+    LOG(`exportSalesInvoices complete — created:${successIds.length} skipped:${skippedItems.length} failed:${failedItems.length} in ${dur}`);
     return {
       ok: overallOk,
       records: invoices.length,
       created: totalCreated,
       altered: totalAltered,
+      skipped: skippedItems.length,
       error: batchErrors.length ? batchErrors.join('; ') : undefined,
       failedItems,
+      skippedItems,
     };
   } catch (err) {
     ERR('exportSalesInvoices:', err.message);
