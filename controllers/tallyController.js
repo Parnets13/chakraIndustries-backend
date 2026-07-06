@@ -873,6 +873,29 @@ export const exportToTallyStream = async (req, res) => {
       return res.end();
     }
 
+    // ── Auto-detect the open Tally company and correct companyName if needed ──
+    // A blank or wrong SVCURRENTCOMPANY tag is the #1 cause of silent EXCEPTIONS.
+    // Re-fetch it here so all tasks below use the correct company name.
+    try {
+      const validation = await validateTallyConnection(cfg);
+      if (validation.openCompany) {
+        const saved = (cfg.companyName || '').trim();
+        if (!saved || saved.toUpperCase() !== validation.openCompany.toUpperCase()) {
+          console.log(`[exportToTallyStream] Correcting companyName "${saved}" → "${validation.openCompany}"`);
+          cfg.companyName = validation.openCompany;
+          await TallyConfig.findOneAndUpdate(
+            {},
+            { companyName: validation.openCompany },
+            { sort: { _id: 1 } }
+          ).catch(() => {});
+        }
+        send({ event: 'log', level: 'info', entity: 'Connection', message: `Using Tally company: "${validation.openCompany}"` });
+      }
+    } catch (connErr) {
+      // Non-fatal — continue with whatever companyName is in cfg
+      send({ event: 'log', level: 'warn', entity: 'Connection', message: `Company auto-detect failed (continuing): ${connErr.message}` });
+    }
+
     // Define what to export based on type
     const exportTasks = [];
     const typeNorm = type.toLowerCase();
@@ -1114,7 +1137,23 @@ export const fullExportToTallyStream = async (req, res) => {
       return res.end();
     }
 
-    send({ event: 'log', level: 'success', entity: 'Connection', message: `✅ Connected to Tally — Company: ${validation.openCompany || 'detected'}` });
+    // ── Auto-save detected company name to cfg and DB ──────────────────────
+    // If companyName was empty or mismatched, correct it now so every export
+    // task uses the right SVCURRENTCOMPANY tag. Silent EXCEPTIONS in Tally are
+    // almost always caused by this tag being wrong or missing.
+    if (validation.openCompany) {
+      if (!expectedCo || !validation.companyMatch) {
+        LOG(`fullExportToTallyStream: ⚠️ updating companyName "${expectedCo}" → "${validation.openCompany}"`);
+        cfg.companyName = validation.openCompany;
+        await TallyConfig.findOneAndUpdate(
+          {},
+          { companyName: validation.openCompany },
+          { sort: { _id: 1 } }
+        ).catch(() => {});
+      }
+    }
+
+    send({ event: 'log', level: 'success', entity: 'Connection', message: `✅ Connected to Tally — Company: ${validation.openCompany || cfg.companyName || 'detected'}` });
 
     // Run full export with progress callbacks
     await runFullExportToTally(cfg, user._id, (evt) => {
@@ -1165,6 +1204,18 @@ export const selectiveExportStream = async (req, res) => {
         : 'Tally Local URL not configured' });
       return res.end();
     }
+
+    // ── Auto-detect company name before any export task ────────────────────
+    try {
+      const validation = await validateTallyConnection(cfg);
+      if (validation.openCompany) {
+        const saved = (cfg.companyName || '').trim();
+        if (!saved || saved.toUpperCase() !== validation.openCompany.toUpperCase()) {
+          cfg.companyName = validation.openCompany;
+          await TallyConfig.findOneAndUpdate({}, { companyName: validation.openCompany }, { sort: { _id: 1 } }).catch(() => {});
+        }
+      }
+    } catch (_) { /* non-fatal */ }
 
     send({ event: 'start', message: `Exporting ${key}…`, direction: 'ERP → Tally' });
     const result = await runSelectiveExport(cfg, key, user._id);

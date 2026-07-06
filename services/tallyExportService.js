@@ -232,7 +232,7 @@ function parseResponse(xml, label = '') {
   const s = String(xml);
 
   // Log the full raw response for debugging — critical for diagnosing Tally issues
-  LOG(`${label} RAW RESPONSE (first 3000 chars):\n${s.slice(0, 3000)}`);
+  LOG(`${label} RAW RESPONSE (full ${s.length} chars):\n${s}`);
 
   // Collect all line errors — log each one in full so we can see exactly what Tally says
   const errors = [];
@@ -885,6 +885,52 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   const syncId = `EXPORT-SALES-${Date.now()}`;
   LOG('exportSalesInvoices START');
   try {
+    // ── Step 0: Auto-detect and verify company name from Tally ───────────────
+    // The #1 cause of silent EXCEPTIONS with no LINEERROR is a wrong, stale, or
+    // empty SVCURRENTCOMPANY tag. In production (Render) the saved companyName can
+    // drift from what is actually open in Tally. Re-fetch it before every export run.
+    try {
+      // Re-read cfg fresh from DB so any manually-corrected companyName is picked up
+      const freshCfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+      if (freshCfg) {
+        const plain = freshCfg.toObject ? freshCfg.toObject() : freshCfg;
+        Object.assign(cfg, plain);
+      }
+
+      // Ping Tally — ask which company is currently open
+      const pingXml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>OpenCompanyList</ID></HEADER>
+<BODY><DESC>
+  <STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="OpenCompanyList" ISMODIFY="No"><TYPE>Company</TYPE><FETCH>Name</FETCH></COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
+</ENVELOPE>`;
+      const pingResp = await postXml(cfg, pingXml, 30000);
+      const nameMatches = pingResp
+        ? [...pingResp.matchAll(/<NAME>(.*?)<\/NAME>/gi)].map(m => m[1].trim()).filter(Boolean)
+        : [];
+      const detectedCompany = nameMatches[0] || null;
+      const savedCompany    = (cfg.companyName || '').trim();
+
+      LOG(`exportSalesInvoices: savedCompany="${savedCompany}" detectedCompany="${detectedCompany || '(not detected)'}"`);
+
+      if (detectedCompany && detectedCompany.toUpperCase() !== savedCompany.toUpperCase()) {
+        LOG(`exportSalesInvoices: ⚠️ company name mismatch — correcting "${savedCompany}" → "${detectedCompany}"`);
+        cfg.companyName = detectedCompany;
+        await TallyConfig.findOneAndUpdate({}, { companyName: detectedCompany }, { sort: { _id: 1 } });
+      } else if (detectedCompany && !savedCompany) {
+        LOG(`exportSalesInvoices: company name was empty — setting to "${detectedCompany}"`);
+        cfg.companyName = detectedCompany;
+        await TallyConfig.findOneAndUpdate({}, { companyName: detectedCompany }, { sort: { _id: 1 } });
+      }
+    } catch (pingErr) {
+      LOG(`exportSalesInvoices: company auto-detect failed (non-fatal): ${pingErr.message}`);
+    }
+
+    LOG(`exportSalesInvoices: ▶ using SVCURRENTCOMPANY="${cfg.companyName || '(EMPTY — will cause EXCEPTIONS)'}"`);
+
     // Only export invoices not yet synced to Tally.
     // tallySync=true means already exported — skip them to prevent duplicates.
     const invoices = await Invoice.find({
@@ -1070,12 +1116,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
     <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
-    <BILLALLOCATIONS.LIST>
-      <NAME>${esc(inv.invoiceNo)}</NAME>
-      <BILLTYPE>New Ref</BILLTYPE>
-      <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
-      <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
-    </BILLALLOCATIONS.LIST>
   </ALLLEDGERENTRIES.LIST>
   ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}
 </VOUCHER>`;
@@ -1107,7 +1147,9 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
       const singleEnvelope = importEnvelope(cfg, 'Vouchers', batch.map(v=>v.xml).join(''));
       if (b === 0) {
-        LOG(`Sales DEBUG — first batch full XML:\n${singleEnvelope}`);
+        // Log full XML of first voucher — shows SVCURRENTCOMPANY, party name, amounts
+        // This is the single most useful diagnostic for production EXCEPTIONS issues
+        LOG(`Sales DEBUG — first batch full XML (company=${cfg.companyName || 'EMPTY'}):\n${singleEnvelope}`);
       }
       const resp   = await postXml(cfg, singleEnvelope, 60000);
       const result = parseResponse(resp, `Sales Invoices batch ${batchNo}/${batchTot}`);
