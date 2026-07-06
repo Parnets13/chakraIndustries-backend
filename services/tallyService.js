@@ -36,6 +36,16 @@ async function getConfig() {
   return cfg;
 }
 
+// ─── CONNECTOR TIMEOUT SCALING ───────────────────────────────────────────────
+// In connector mode, requests travel: Render cloud → HTTP long-poll → connector PC → Tally → back.
+// That round-trip can add 30-90s on top of Tally's processing time.
+// Always scale up timeouts in connector mode so results that arrive late are not discarded.
+function connectorTimeout(cfg, baseMs) {
+  return (cfg?.useConnector && cfg?.connectorId)
+    ? Math.max(baseMs * 3, 180000)   // at least 3× the base or 3 min, whichever is larger
+    : baseMs;
+}
+
 // ─── XML HELPERS ──────────────────────────────────────────────────────────────
 
 function esc(s) {
@@ -174,7 +184,7 @@ async function fetchTallyPOMap(cfg) {
 </BODY>
 </ENVELOPE>`;
 
-    const resp = await postXmlWithRetry(cfg, xml, 60000);
+    const resp = await postXmlWithRetry(cfg, xml, connectorTimeout(cfg, 60000));
     if (!resp) return new Map();
 
     const byPO = new Map();
@@ -371,7 +381,7 @@ export async function pushMastersToTally(cfg, triggeredBy) {
       const batchXml = wrapMastersXml(cfg, batches[i].join(''));
       LOG(`Sending batch ${i + 1}/${batches.length} (${batches[i].length} records, ${batchXml.length} bytes)`);
       try {
-        const resp   = await postXmlWithRetry(cfg, batchXml, MASTER_TIMEOUT_MS, 2);
+        const resp   = await postXmlWithRetry(cfg, batchXml, connectorTimeout(cfg, MASTER_TIMEOUT_MS), 2);
         const result = parseTallyResponse(resp, `Masters batch ${i + 1}/${batches.length}`);
         totalCreated += result.created || 0;
         totalAltered += result.altered || 0;
@@ -451,7 +461,7 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
 <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${purAutoLedgerXml}${purAutoStockXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
-    const purMastersResp = await postXmlWithRetry(cfg, purMastersXml, 60000);
+    const purMastersResp = await postXmlWithRetry(cfg, purMastersXml, connectorTimeout(cfg, 60000));
     parseTallyResponse(purMastersResp, 'Purchase Auto-Masters');  // log result, don't abort
 
     // ── Step 2: Fetch existing Tally vouchers indexed by PO Number ──────────
@@ -520,7 +530,7 @@ export async function pushPurchaseVouchersToTally(cfg, triggeredBy) {
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${vouchersXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
 
-    const resp    = await postXmlWithRetry(cfg, xml, 30000);
+    const resp    = await postXmlWithRetry(cfg, xml, connectorTimeout(cfg, 30000));
     const result  = parseTallyResponse(resp, 'Purchase Vouchers');
     const records = pos.length;
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
@@ -725,7 +735,7 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
 </IMPORTDATA></BODY></ENVELOPE>`;
 
     LOG(`Sales: pushing masters first (${partyNames.length} ledgers)`);
-    const mastersResp = await postXmlWithRetry(cfg, mastersXml, 60000);
+    const mastersResp = await postXmlWithRetry(cfg, mastersXml, connectorTimeout(cfg, 60000));
     parseTallyResponse(mastersResp, 'Sales Auto-Masters');
 
     // Send each voucher individually — avoids Tally payload size limits
@@ -739,7 +749,7 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
 <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${voucher.xml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
-      const resp   = await postXmlWithRetry(cfg, singleXml, 30000);
+      const resp   = await postXmlWithRetry(cfg, singleXml, connectorTimeout(cfg, 30000));
       const result = parseTallyResponse(resp, `Sales Voucher`);
       if (result.ok) {
         totalCreated += result.created || 0;
@@ -821,7 +831,7 @@ export async function pushSingleInvoiceToTally(invoiceId) {
 <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${autoLedgerXml}${autoStockXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
-    const mastersResp = await postXmlWithRetry(cfg, mastersXml, 60000);
+    const mastersResp = await postXmlWithRetry(cfg, mastersXml, connectorTimeout(cfg, 60000));
     parseTallyResponse(mastersResp, `Invoice ${inv.invoiceNo} Auto-Masters`);
 
     // ── Step 2: Build Sales Voucher XML (T-C format — pure accounting) ───
@@ -913,7 +923,7 @@ export async function pushSingleInvoiceToTally(invoiceId) {
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${voucherXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
 
-    const resp   = await postXmlWithRetry(cfg, xml, 30000);
+    const resp   = await postXmlWithRetry(cfg, xml, connectorTimeout(cfg, 30000));
     const result = parseTallyResponse(resp, `Invoice ${inv.invoiceNo}`);
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
 
@@ -987,7 +997,7 @@ export async function pushPaymentVouchersToTally(cfg, triggeredBy) {
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${vouchersXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
 
-    const resp    = await postXmlWithRetry(cfg, xml, 25000);
+    const resp    = await postXmlWithRetry(cfg, xml, connectorTimeout(cfg, 25000));
     const result  = parseTallyResponse(resp, 'Payment Vouchers');
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type:'Payment', direction:'ERP → Tally', status:result.ok?'Success':'Failed', duration, error:result.error, records:payments.length, triggeredBy });
@@ -1040,7 +1050,7 @@ export async function pushReceiptVouchersToTally(cfg, triggeredBy) {
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${vouchersXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
 
-    const resp    = await postXmlWithRetry(cfg, xml, 25000);
+    const resp    = await postXmlWithRetry(cfg, xml, connectorTimeout(cfg, 25000));
     const result  = parseTallyResponse(resp, 'Receipt Vouchers');
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;
     await writeLog({ syncId, type:'Receipt', direction:'ERP → Tally', status:result.ok?'Success':'Failed', duration, error:result.error, records:receipts.length, triggeredBy });
@@ -1091,10 +1101,10 @@ export async function pullItemsFromTally(cfg, triggeredBy) {
 </ENVELOPE>`;
     };
     // Use dynamic TDL collection first, avoid hardcoded report names
-    let resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('StockItem', 'DynamicInventory'), 60000);
+    let resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('StockItem', 'DynamicInventory'), connectorTimeout(cfg, 60000));
     if (!resp || !resp.includes('<STOCKITEM')) {
       LOG('Dynamic TDL failed, trying fallback dynamic collection...');
-      resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('StockItem', 'StockItems'), 60000);
+      resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('StockItem', 'StockItems'), connectorTimeout(cfg, 60000));
     }
     if (!resp || !resp.includes('<STOCKITEM')) {
       await writeLog({ syncId, type:'Item Master', direction:'Tally → ERP', status:'Success', records:0, triggeredBy });
@@ -1194,10 +1204,10 @@ export async function pullLedgersFromTally(cfg, triggeredBy) {
 </ENVELOPE>`;
     };
     // Use dynamic TDL collection first, avoid hardcoded report names
-    let resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('Ledger', 'DynamicLedger'), 60000);
+    let resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('Ledger', 'DynamicLedger'), connectorTimeout(cfg, 60000));
     if (!resp || !resp.includes('<LEDGER')) {
       LOG('Dynamic TDL failed, trying fallback dynamic collection...');
-      resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('Ledger', 'Ledgers'), 60000);
+      resp = await postXmlWithRetry(cfg, buildDynamicCollectionXml('Ledger', 'Ledgers'), connectorTimeout(cfg, 60000));
     }
     if (!resp || !resp.includes('<LEDGER')) {
       await writeLog({ syncId, type:'Ledger', direction:'Tally → ERP', status:'Success', records:0, triggeredBy });
@@ -1349,7 +1359,7 @@ export async function pullVouchersFromTally(cfg, voucherType, triggeredBy) {
     const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
 <BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Day Book</REPORTNAME>
 ${exportVars(`<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><VOUCHERTYPENAME>${voucherType}</VOUCHERTYPENAME>`)}</REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-    const resp = await postXmlWithRetry(cfg, xml, 30000);
+    const resp = await postXmlWithRetry(cfg, xml, connectorTimeout(cfg, 30000));
     if (!resp || !resp.includes('<VOUCHER') || resp.includes('<TALLYREQUEST>Import Data')) {
       await writeLog({ syncId, type:logType, direction:'Tally → ERP', status:'Success', records:0, triggeredBy });
       return { ok:true, records:0 };
@@ -1399,7 +1409,7 @@ export async function pullPaymentReceiptFromTally(cfg, voucherType, triggeredBy)
     const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
 <BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Day Book</REPORTNAME>
 ${exportVars(`<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><VOUCHERTYPENAME>${voucherType}</VOUCHERTYPENAME>`)}</REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-    const resp = await postXmlWithRetry(cfg, xml, 30000);
+    const resp = await postXmlWithRetry(cfg, xml, connectorTimeout(cfg, 30000));
     if (!resp || !resp.includes('<VOUCHER')) {
       await writeLog({ syncId, type:voucherType, direction:'Tally → ERP', status:'Success', records:0, triggeredBy });
       return { ok:true, records:0 };

@@ -212,8 +212,17 @@ ${innerXml}
 async function postXml(cfg, xml, timeoutMs = 40000) {
   // Route via connector (if useConnector=true) or direct HTTP — same as tallyFetchEngine.
   // postXmlWithRetry handles both paths transparently.
-  LOG(`postXml → ${xml.length} bytes, timeout ${timeoutMs}ms`);
-  return postXmlWithRetry(cfg, xml, timeoutMs);
+  //
+  // ── Connector timeout scaling ───────────────────────────────────────────────
+  // In connector mode, requests travel:  Render cloud → long-poll → connector PC → Tally → back
+  // The round-trip adds significant latency on top of Tally's own processing time.
+  // Callers pass direct-mode timeouts (e.g. 30s/60s). Scale them up when connector
+  // is active so results that arrive late are not discarded as "already timed out".
+  const effectiveTimeout = (cfg.useConnector && cfg.connectorId)
+    ? Math.max(timeoutMs * 3, 180000)  // at least 3× or 3 min — connector round-trip overhead
+    : timeoutMs;
+  LOG(`postXml → ${xml.length} bytes, timeout ${effectiveTimeout}ms${cfg.useConnector ? ' (connector scaled)' : ''}`);
+  return postXmlWithRetry(cfg, xml, effectiveTimeout);
 }
 
 // ─── RESPONSE PARSER ─────────────────────────────────────────────────────────
@@ -742,7 +751,7 @@ async function fetchTallyExistingVoucherNumbers(cfg) {
 </DESC></BODY>
 </ENVELOPE>`;
 
-    const resp = await postXmlWithRetry(cfg, xml, 30000);
+    const resp = await postXmlWithRetry(cfg, xml, (cfg.useConnector && cfg.connectorId) ? 180000 : 30000);
     if (!resp) return new Set();
 
     const existingNos = new Set();
@@ -821,7 +830,7 @@ async function fetchTallyPOMap(cfg) {
 </DESC></BODY>
 </ENVELOPE>`;
 
-    const resp = await postXmlWithRetry(cfg, xml, 60000);
+    const resp = await postXmlWithRetry(cfg, xml, (cfg.useConnector && cfg.connectorId) ? 180000 : 60000);
     if (!resp) return new Map();
 
     const byPO = new Map();
