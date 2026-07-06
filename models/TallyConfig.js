@@ -36,6 +36,7 @@ const tallyConfigSchema = new mongoose.Schema({
   lastSyncAt:       { type: Date },
   lastImportAt:     { type: Date },
   lastExportAt:     { type: Date },
+  tallyPeriodEnd:   { type: String, default: null }, // YYYYMMDD — cached from last successful fetchTallyPeriodEnd
   updatedBy:        { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   
   // Company dispatch / GST details (used when building Sales Voucher XML for Tally)

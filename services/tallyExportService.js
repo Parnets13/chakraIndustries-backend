@@ -107,6 +107,8 @@ async function fetchTallyPeriodEnd(cfg) {
   try {
     const company = (cfg.companyName || '').trim().toUpperCase();
     const coTag   = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+
+    // Try Method 1: TDL Company Collection (works when a company is fully open)
     const xml = `<ENVELOPE>
 <HEADER>
   <VERSION>1</VERSION>
@@ -130,11 +132,41 @@ async function fetchTallyPeriodEnd(cfg) {
 </BODY>
 </ENVELOPE>`;
     const resp = await postXmlWithRetry(cfg, xml, cfg.useConnector && cfg.connectorId ? 90000 : 60000, 1);
+
+    // Try ENDINGAT tag first
     const m = resp.match(/<ENDINGAT[^>]*>(\d{8})<\/ENDINGAT>/i);
     if (m) {
       LOG(`Tally company period ends: ${m[1]}`);
-      return m[1]; // e.g. "20260702"
+      return m[1];
     }
+
+    // Method 2: Parse from SVTODATE in the response envelope
+    const svTo = resp.match(/<SVTODATE[^>]*>(\d{8})<\/SVTODATE>/i);
+    if (svTo) {
+      LOG(`Tally company period ends (via SVTODATE): ${svTo[1]}`);
+      return svTo[1];
+    }
+
+    // Method 3: Ping for company info using a plain export
+    const pingXml = `<ENVELOPE>
+<HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+<BODY><EXPORTDATA><REQUESTDESC>
+  <REPORTNAME>Day Book</REPORTNAME>
+  <STATICVARIABLES>
+    ${coTag}
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+  </STATICVARIABLES>
+</REQUESTDESC></EXPORTDATA></BODY>
+</ENVELOPE>`;
+    const pingResp = await postXmlWithRetry(cfg, pingXml, 30000, 1);
+    const pm = pingResp.match(/<SVTODATE[^>]*>(\d{8})<\/SVTODATE>/i)
+            || pingResp.match(/<ENDINGAT[^>]*>(\d{8})<\/ENDINGAT>/i);
+    if (pm) {
+      LOG(`Tally company period ends (via DayBook): ${pm[1]}`);
+      return pm[1];
+    }
+
+    LOG('fetchTallyPeriodEnd: could not determine period end — date will not be capped');
     return null;
   } catch (e) {
     ERR('fetchTallyPeriodEnd failed (non-fatal):', e.message);
@@ -921,34 +953,31 @@ function pickGstLedger(tallyNames, ratePercent, defaultName) {
 
 /** Map tax rate → Tally Output CGST ledger name (static fallback used when live fetch fails) */
 function cgstLedgerName(taxableBase, cgstAmt, tallyGstLedgers = null) {
-  if (!taxableBase || !cgstAmt) return tallyGstLedgers?.cgstNames?.[0] || 'Output CGST @ 9%';
-  const r = +((cgstAmt / taxableBase) * 100).toFixed(2);
-  if (tallyGstLedgers?.cgstNames?.length) return pickGstLedger(tallyGstLedgers.cgstNames, r, 'Output CGST @ 9%');
-  if (r <= 0.1)  return 'Output CGST 0%';
-  if (r <= 1.5)  return 'Output CGST 1.5%';
-  if (r <= 2.5)  return 'Output CGST @ 2.5%';
-  if (r <= 6)    return 'Output CGST @ 6%';
-  if (r <= 9)    return 'Output CGST @ 9%';
-  if (r <= 14)   return 'Output CGST @ 14%';
-  return 'Output CGST @ 9%';
+  // When live Tally ledger names are available (direct mode), use them.
+  if (tallyGstLedgers?.cgstNames?.length) {
+    if (!taxableBase || !cgstAmt) return tallyGstLedgers.cgstNames[0];
+    const r = +((cgstAmt / taxableBase) * 100).toFixed(2);
+    return pickGstLedger(tallyGstLedgers.cgstNames, r, tallyGstLedgers.cgstNames[0]);
+  }
+  // Fallback: use plain "CGST" — the default ledger name in standard Tally setups.
+  // This is also created by the auto-masters step, so it will always exist.
+  return 'CGST';
 }
 function sgstLedgerName(taxableBase, sgstAmt, tallyGstLedgers = null) {
-  if (!taxableBase || !sgstAmt) return tallyGstLedgers?.sgstNames?.[0] || 'Output SGST @ 9%';
-  const r = +((sgstAmt / taxableBase) * 100).toFixed(2);
-  if (tallyGstLedgers?.sgstNames?.length) return pickGstLedger(tallyGstLedgers.sgstNames, r, 'Output SGST @ 9%');
-  return cgstLedgerName(taxableBase, sgstAmt).replace('CGST', 'SGST');
+  if (tallyGstLedgers?.sgstNames?.length) {
+    if (!taxableBase || !sgstAmt) return tallyGstLedgers.sgstNames[0];
+    const r = +((sgstAmt / taxableBase) * 100).toFixed(2);
+    return pickGstLedger(tallyGstLedgers.sgstNames, r, tallyGstLedgers.sgstNames[0]);
+  }
+  return 'SGST';
 }
 function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
-  if (!taxableBase || !igstAmt) return tallyGstLedgers?.igstNames?.[0] || 'Output IGST @ 18%';
-  const r = +((igstAmt / taxableBase) * 100).toFixed(2);
-  if (tallyGstLedgers?.igstNames?.length) return pickGstLedger(tallyGstLedgers.igstNames, r, 'Output IGST @ 18%');
-  if (r <= 0.1)  return 'Out Put IGST 0.1%';
-  if (r <= 3)    return 'Output IGST @ 3%';
-  if (r <= 5)    return 'Output IGST @ 5%';
-  if (r <= 12)   return 'Output IGST @ 12%';
-  if (r <= 18)   return 'Output IGST @ 18%';
-  if (r <= 28)   return 'Output IGST @ 28%';
-  return 'Output IGST @ 18%';
+  if (tallyGstLedgers?.igstNames?.length) {
+    if (!taxableBase || !igstAmt) return tallyGstLedgers.igstNames[0];
+    const r = +((igstAmt / taxableBase) * 100).toFixed(2);
+    return pickGstLedger(tallyGstLedgers.igstNames, r, tallyGstLedgers.igstNames[0]);
+  }
+  return 'IGST';
 }
 
 export async function exportSalesInvoices(cfg, triggeredBy) {
@@ -1053,6 +1082,13 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
     const autoLedgerXml = [
       `<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT></LEDGER>`,
+      // SAFEGUARD: Create plain CGST/SGST/IGST ledgers WITHOUT rate suffixes first.
+      // Most Tally installations (including this client) use plain "CGST"/"SGST"/"IGST"
+      // not "Output CGST @ 9%" etc. Creating both ensures vouchers referencing either
+      // naming style will find a matching ledger.
+      `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
+      `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
       `<LEDGER NAME="Output CGST @ 2.5%" ACTION="Create"><NAME>Output CGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
       `<LEDGER NAME="Output SGST @ 2.5%" ACTION="Create"><NAME>Output SGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
       `<LEDGER NAME="Output CGST @ 6%" ACTION="Create"><NAME>Output CGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
@@ -1072,6 +1108,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     ).join('');
 
     LOG(`Sales: auto-creating ${partyNames.length} party ledgers + ${stockNames.length} stock items before vouchers`);
+    LOG(`Sales: party names to create: ${partyNames.slice(0, 5).join(', ')}${partyNames.length > 5 ? ` ... (${partyNames.length - 5} more)` : ''}`);
     const mastersEnvelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${autoLedgerXml}${autoStockXml}</TALLYMESSAGE></REQUESTDATA>
@@ -1093,8 +1130,28 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
     // ── Fetch Tally company period end to cap voucher dates ───────────────────
     // Tally rejects vouchers dated after the company's ENDINGAT date with the
-    // misleading "Voucher date is missing" error. Cap all dates to period end.
-    const periodEnd = await fetchTallyPeriodEnd(cfg);
+    // MISLEADING "Voucher date is missing" error (even when <DATE> is present).
+    // Cap all dates to period end.
+    let periodEnd = await fetchTallyPeriodEnd(cfg);
+    if (!periodEnd) {
+      // Fallback: use the last day of the current financial year quarter
+      // as a conservative cap — better than sending a date Tally will reject.
+      // Save it to TallyConfig so subsequent runs use the same value.
+      const saved = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+      if (saved?.tallyPeriodEnd) {
+        periodEnd = saved.tallyPeriodEnd;
+        LOG(`exportSalesInvoices: using cached periodEnd from DB: ${periodEnd}`);
+      } else {
+        // Last resort: use today minus 1 day (safe fallback)
+        const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+        periodEnd = `${yesterday.getFullYear()}${String(yesterday.getMonth()+1).padStart(2,'0')}${String(yesterday.getDate()).padStart(2,'0')}`;
+        LOG(`exportSalesInvoices: ⚠ periodEnd unknown — using yesterday ${periodEnd} as safe cap`);
+      }
+    } else {
+      // Cache the period end in TallyConfig for fallback use
+      await TallyConfig.findOneAndUpdate({}, { tallyPeriodEnd: periodEnd }, { sort: { _id: 1 } });
+    }
+    LOG(`exportSalesInvoices: voucher dates will be capped to ${periodEnd}`);
 
     const failedItems  = [];
     const skippedItems = [];   // invoices skipped due to validation failure or dedup
@@ -1198,7 +1255,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           inv.notes || null,
         ].filter(Boolean).join(' | ');
 
-        LOG(`Invoice ${inv.invoiceNo}: tallyDate=${tallyDate} grandTotal=${grandTotal} cgst=${totalCGST}(${cgstLedgerName(salesBase, totalCGST, tallyGstLedgers)}) sgst=${totalSGST}(${sgstLedgerName(salesBase, totalSGST, tallyGstLedgers)}) igst=${totalIGST}(${igstLedgerName(salesBase, totalIGST, tallyGstLedgers)})`);
+        LOG(`Invoice ${inv.invoiceNo}: partyName="${inv.partyName}" tallyDate=${tallyDate} grandTotal=${grandTotal} cgst=${totalCGST}(${cgstLedgerName(salesBase, totalCGST, tallyGstLedgers)}) sgst=${totalSGST}(${sgstLedgerName(salesBase, totalSGST, tallyGstLedgers)}) igst=${totalIGST}(${igstLedgerName(salesBase, totalIGST, tallyGstLedgers)})`);
 
         // Balance check: party debit must equal sum of all credit entries.
         // Tally rejects imbalanced vouchers silently with EXCEPTIONS=1 and no LINEERROR.
@@ -1333,7 +1390,12 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
 
     // ── Step 1: Auto-create required ledgers & stock items BEFORE vouchers ───
     // ACTION="Create" — Tally silently skips records that already exist.
-    const vendorNames = [...new Set(pos.map(po => po.vendor?.companyName).filter(Boolean))];
+    // Collect vendor names: from populated reference OR parsed from remarks
+    const vendorNames = [...new Set(pos.map(po => {
+      if (po.vendor?.companyName) return po.vendor.companyName;
+      const m = (po.remarks || '').match(/—\s*(.+?)(?:'s\s+quotation)?$/i);
+      return m ? m[1].trim() : null;
+    }).filter(Boolean))];
     const poStockNames = [...new Set(
       pos.flatMap(po => (po.items || []).map(i => (i.name || '').trim())).filter(Boolean)
     )];
@@ -1366,10 +1428,39 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
     LOG(`exportPurchaseInvoices: ${pos.length} POs to export, ${tallyPOMap.size} PO numbers already in Tally`);
 
     // ── Fetch Tally company period end to cap voucher dates ───────────────────
-    const periodEnd = await fetchTallyPeriodEnd(cfg);
+    let periodEnd = await fetchTallyPeriodEnd(cfg);
+    if (periodEnd) {
+      // Cache for reuse across export tasks (sales may run before purchase and fail to fetch)
+      await TallyConfig.findOneAndUpdate({}, { tallyPeriodEnd: periodEnd }, { sort: { _id: 1 } });
+    } else {
+      const saved = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+      periodEnd = saved?.tallyPeriodEnd || null;
+      if (periodEnd) LOG(`exportPurchaseInvoices: using cached periodEnd: ${periodEnd}`);
+    }
 
     const vouchersXml = pos.map(po => {
-      const vendorName = po.vendor?.companyName || 'Unknown Vendor';
+      // Resolve vendor name: prefer populated reference, fall back to parsing remarks
+      // (remarks often contains "Created from RFQ XXX — VendorName's quotation")
+      let vendorName = po.vendor?.companyName;
+
+      if (!vendorName) {
+        // Try to extract vendor name from remarks: "... — VendorName's quotation"
+        const remarkMatch = (po.remarks || '').match(/—\s*(.+?)(?:'s\s+quotation)?$/i);
+        if (remarkMatch) {
+          vendorName = remarkMatch[1].trim();
+          LOG(`PO ${po.poId}: vendor reference missing — using name from remarks: "${vendorName}"`);
+        }
+      }
+
+      if (!vendorName) {
+        // Already synced with no vendor — nothing we can do, skip cleanly
+        if (po.tallySync) {
+          LOG(`PO ${po.poId}: skipping — already synced (tallySync=true) and vendor reference is missing`);
+          return null;
+        }
+        ERR(`PO ${po.poId}: skipping — vendor reference is missing. Link a vendor to this PO in the ERP before exporting.`);
+        return null;
+      }
 
       // ── Match by PO Number ONLY (compute action FIRST, needed for date logic) ─
       const poNumber = (po.poId || '').toUpperCase().trim();
@@ -1487,7 +1578,12 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
     <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
   </ALLLEDGERENTRIES.LIST>
 </VOUCHER>`;
-    }).join('');
+    }).filter(Boolean).join('');
+
+    if (!vouchersXml) {
+      LOG('exportPurchaseInvoices: all POs were skipped (missing vendor references or already synced) — nothing to export');
+      return { ok: true, records: pos.length, created: 0, altered: 0, error: undefined };
+    }
 
     const resp   = await postXml(cfg, importEnvelope(cfg, 'Vouchers', vouchersXml), 50000);
     const result = parseResponse(resp, 'Purchase Invoices');
