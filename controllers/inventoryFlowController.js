@@ -1,5 +1,6 @@
 import GRN from '../models/GRN.js';
 import Inventory from '../models/Inventory.js';
+import InventoryItem from '../models/InventoryItem.js';
 import StockMovement from '../models/StockMovement.js';
 import Batch from '../models/Batch.js';
 import QualityCheck from '../models/QualityCheck.js';
@@ -8,6 +9,8 @@ import MaterialReturn from '../models/MaterialReturn.js';
 /**
  * Get comprehensive inventory flow data for dashboard
  * Shows: GRN → Inventory Increase → Sales → Inventory Decrease → Production → +/- Inventory → Return → Inventory Increase
+ * Uses InventoryItem as the primary stock source (main collection used throughout the app).
+ * Falls back to Inventory model records and merges them in when present.
  */
 export const getInventoryFlowDashboard = async (req, res) => {
   try {
@@ -33,21 +36,56 @@ export const getInventoryFlowDashboard = async (req, res) => {
       acceptedQuantity: grns.reduce((sum, g) => sum + (g.acceptedQuantity || 0), 0),
     };
 
-    // 2. Inventory Data - Current Stock Levels
-    const inventoryItems = await Inventory.find()
-      .populate('warehouse', 'name')
-      .populate('grnId', 'grnId')
-      .populate('vendorId', 'companyName');
+    // 2. Inventory Data - use InventoryItem as primary source (used across the whole app).
+    //    Also query the Inventory model (GRN-converted stock) and merge unique SKUs.
+    const [rawInventoryItems, rawInventory] = await Promise.all([
+      InventoryItem.find(),
+      Inventory.find().populate('warehouse', 'name'),
+    ]);
+
+    // Normalise InventoryItem to a common shape
+    const normaliseItem = (i) => ({
+      sku: i.sku || i.itemCode || '',
+      name: i.name || i.itemName || '',
+      status: i.status || 'Active',
+      totalQty: i.qty ?? i.currentQuantity ?? 0,
+      availableQty: Math.max(0, (i.qty ?? i.currentQuantity ?? 0) - (i.reservedQuantity || 0)),
+      reservedQty: i.reservedQuantity || 0,
+      minQty: i.minQty ?? i.reorderPoint ?? 0,
+      unitPrice: i.unitPrice || 0,
+      warehouse: typeof i.warehouse === 'string' ? i.warehouse : (i.warehouse?.name || 'Main Warehouse'),
+    });
+
+    const normaliseInventory = (i) => ({
+      sku: i.sku || '',
+      name: i.name || '',
+      status: i.status || 'Active',
+      totalQty: i.totalQuantity || 0,
+      availableQty: i.availableQuantity || 0,
+      reservedQty: i.reservedQuantity || 0,
+      minQty: i.minQuantity || 0,
+      unitPrice: i.unitPrice || 0,
+      warehouse: i.warehouse?.name || 'Main Warehouse',
+    });
+
+    // Merge: InventoryItem records are authoritative; supplement with any Inventory
+    // records whose SKU is not already present in InventoryItem.
+    const itemSkus = new Set(rawInventoryItems.map(i => (i.sku || i.itemCode || '').toUpperCase()));
+    const extraFromInventory = rawInventory.filter(i => i.sku && !itemSkus.has(i.sku.toUpperCase()));
+    const allItems = [
+      ...rawInventoryItems.map(normaliseItem),
+      ...extraFromInventory.map(normaliseInventory),
+    ];
 
     const inventoryStats = {
-      total: inventoryItems.length,
-      active: inventoryItems.filter(i => i.status === 'Active').length,
-      critical: inventoryItems.filter(i => i.status === 'Critical').length,
-      dead: inventoryItems.filter(i => i.status === 'Dead').length,
-      totalQuantity: inventoryItems.reduce((sum, i) => sum + (i.totalQuantity || 0), 0),
-      availableQuantity: inventoryItems.reduce((sum, i) => sum + (i.availableQuantity || 0), 0),
-      reservedQuantity: inventoryItems.reduce((sum, i) => sum + (i.reservedQuantity || 0), 0),
-      totalValue: inventoryItems.reduce((sum, i) => sum + (i.totalValue || 0), 0),
+      total: allItems.length,
+      active: allItems.filter(i => i.status === 'Active').length,
+      critical: allItems.filter(i => i.status === 'Critical').length,
+      dead: allItems.filter(i => i.status === 'Dead').length,
+      totalQuantity: allItems.reduce((sum, i) => sum + i.totalQty, 0),
+      availableQuantity: allItems.reduce((sum, i) => sum + i.availableQty, 0),
+      reservedQuantity: allItems.reduce((sum, i) => sum + i.reservedQty, 0),
+      totalValue: allItems.reduce((sum, i) => sum + (i.totalQty * i.unitPrice), 0),
     };
 
     // 3. Stock Movements - Track all inventory changes
@@ -116,10 +154,10 @@ export const getInventoryFlowDashboard = async (req, res) => {
       finalStock: inventoryStats.availableQuantity,
     };
 
-    // 8. Warehouse-wise breakdown
+    // 8. Warehouse-wise breakdown (allItems uses normalised shape)
     const warehouseBreakdown = {};
-    inventoryItems.forEach(item => {
-      const whName = item.warehouse?.name || 'Unknown';
+    allItems.forEach(item => {
+      const whName = item.warehouse || 'Main Warehouse';
       if (!warehouseBreakdown[whName]) {
         warehouseBreakdown[whName] = {
           items: 0,
@@ -130,10 +168,10 @@ export const getInventoryFlowDashboard = async (req, res) => {
         };
       }
       warehouseBreakdown[whName].items += 1;
-      warehouseBreakdown[whName].totalQty += item.totalQuantity || 0;
-      warehouseBreakdown[whName].availableQty += item.availableQuantity || 0;
-      warehouseBreakdown[whName].reservedQty += item.reservedQuantity || 0;
-      warehouseBreakdown[whName].value += item.totalValue || 0;
+      warehouseBreakdown[whName].totalQty += item.totalQty;
+      warehouseBreakdown[whName].availableQty += item.availableQty;
+      warehouseBreakdown[whName].reservedQty += item.reservedQty;
+      warehouseBreakdown[whName].value += item.totalQty * item.unitPrice;
     });
 
     // 9. Recent GRN to Inventory conversions
@@ -149,16 +187,16 @@ export const getInventoryFlowDashboard = async (req, res) => {
         date: g.createdAt,
       }));
 
-    // 10. Low stock items
-    const lowStockItems = inventoryItems
-      .filter(i => i.status === 'Critical' || (i.minQuantity > 0 && i.availableQuantity < i.minQuantity))
+    // 10. Low stock items (from normalised allItems)
+    const lowStockItems = allItems
+      .filter(i => i.status === 'Critical' || (i.minQty > 0 && i.availableQty < i.minQty))
       .slice(0, 10)
       .map(i => ({
         sku: i.sku,
         name: i.name,
-        available: i.availableQuantity,
-        minimum: i.minQuantity,
-        warehouse: i.warehouse?.name,
+        available: i.availableQty,
+        minimum: i.minQty,
+        warehouse: i.warehouse,
         status: i.status,
       }));
 

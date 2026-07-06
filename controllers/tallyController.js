@@ -560,6 +560,160 @@ export const getGuidStatus = async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 };
 
+// ─── DASHBOARD STATS — single endpoint for the unified ERP+Tally dashboard ───
+/**
+ * GET /api/tally/dashboard-stats
+ * Returns a consolidated snapshot combining:
+ *  - Tally voucher counts + totals (Sales, Purchase, Payment, Receipt, Debit/Credit Note)
+ *  - Tally master data counts (Ledgers, Vendors, Clients, Items)
+ *  - ERP record counts (Invoices, POs, SalesOrders, WorkOrders)
+ *  - Sync health (connection status, last sync time, today's sync stats)
+ *  - Finance totals (AP, AR)
+ */
+export const getTallyDashboardStats = async (req, res) => {
+  try {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+
+    // ── Tally voucher aggregation ──────────────────────────────────────────
+    const [voucherAgg, voucherFinAgg] = await Promise.all([
+      // Count per type
+      TallyVoucher.aggregate([
+        { $group: { _id: '$voucherType', count: { $sum: 1 }, total: { $sum: '$amount' }, lastDate: { $max: '$voucherDate' } } },
+      ]),
+      // Recent 5 vouchers for activity feed (any type)
+      TallyVoucher.find({}).sort({ voucherDate: -1 }).limit(5).lean(),
+    ]);
+
+    const vMap = {};
+    for (const v of voucherAgg) if (v._id) vMap[v._id] = { count: v.count, total: Math.abs(v.total || 0), lastDate: v.lastDate };
+
+    const tallyVouchers = {
+      sales:      { count: vMap['Sales']?.count || 0,       total: vMap['Sales']?.total || 0,       last: vMap['Sales']?.lastDate },
+      purchase:   { count: vMap['Purchase']?.count || 0,    total: vMap['Purchase']?.total || 0,    last: vMap['Purchase']?.lastDate },
+      payment:    { count: vMap['Payment']?.count || 0,     total: vMap['Payment']?.total || 0,     last: vMap['Payment']?.lastDate },
+      receipt:    { count: vMap['Receipt']?.count || 0,     total: vMap['Receipt']?.total || 0,     last: vMap['Receipt']?.lastDate },
+      journal:    { count: vMap['Journal']?.count || 0,     total: vMap['Journal']?.total || 0,     last: vMap['Journal']?.lastDate },
+      contra:     { count: vMap['Contra']?.count || 0,      total: vMap['Contra']?.total || 0,      last: vMap['Contra']?.lastDate },
+      debitNote:  { count: vMap['Debit Note']?.count || 0,  total: vMap['Debit Note']?.total || 0,  last: vMap['Debit Note']?.lastDate },
+      creditNote: { count: vMap['Credit Note']?.count || 0, total: vMap['Credit Note']?.total || 0, last: vMap['Credit Note']?.lastDate },
+      totalCount: Object.values(vMap).reduce((s, v) => s + v.count, 0),
+      recent: voucherFinAgg.map(v => ({
+        id: v._id,
+        type: v.voucherType,
+        party: v.partyName || '—',
+        amount: v.amount || 0,
+        date: v.voucherDate,
+        number: v.voucherNumber || '—',
+      })),
+    };
+
+    // ── Tally master data counts ───────────────────────────────────────────
+    const [
+      ledgerTotal, ledgerSynced,
+      vendorTotal, vendorSynced,
+      clientTotal, clientSynced,
+      itemTotal,   itemSynced,
+    ] = await Promise.all([
+      AccountsLedger.countDocuments({}),
+      AccountsLedger.countDocuments({ tallyGuid: { $exists: true, $ne: null } }),
+      Vendor.countDocuments({}),
+      Vendor.countDocuments({ tallyGuid: { $exists: true, $ne: null } }),
+      Client.countDocuments({}),
+      Client.countDocuments({ tallyGuid: { $exists: true, $ne: null } }),
+      ItemMaster.countDocuments({ isActive: true }),
+      ItemMaster.countDocuments({ tallyGuid: { $exists: true, $ne: null } }),
+    ]);
+
+    const tallyMasters = {
+      ledgers:  { total: ledgerTotal, synced: ledgerSynced },
+      vendors:  { total: vendorTotal, synced: vendorSynced },
+      clients:  { total: clientTotal, synced: clientSynced },
+      items:    { total: itemTotal,   synced: itemSynced },
+    };
+
+    // ── ERP record counts ──────────────────────────────────────────────────
+    const WorkOrder = (await import('../models/WorkOrder.js')).default;
+    const SalesOrder = (await import('../models/SalesOrder.js')).default;
+    const InventoryItem = (await import('../models/InventoryItem.js')).default;
+
+    const [
+      invoiceTotal, invoicePaid, invoiceOverdue, invoiceSynced,
+      poTotal, poApproved, poSynced,
+      salesOrderTotal, salesOrderPending,
+      woTotal, woInProgress, woCompleted,
+      invItemTotal, invItemCritical,
+    ] = await Promise.all([
+      Invoice.countDocuments({}),
+      Invoice.countDocuments({ paymentStatus: 'Paid' }),
+      Invoice.countDocuments({ paymentStatus: 'Overdue' }),
+      Invoice.countDocuments({ tallySync: true }),
+      PurchaseOrder.countDocuments({}),
+      PurchaseOrder.countDocuments({ status: 'Approved' }),
+      PurchaseOrder.countDocuments({ tallyGuid: { $exists: true, $ne: null } }),
+      SalesOrder.countDocuments({}),
+      SalesOrder.countDocuments({ status: 'Pending Approval' }),
+      WorkOrder.countDocuments({}),
+      WorkOrder.countDocuments({ status: { $in: ['Released', 'In-Progress'] } }),
+      WorkOrder.countDocuments({ status: 'Completed' }),
+      InventoryItem.countDocuments({}),
+      InventoryItem.countDocuments({ status: 'Critical' }),
+    ]);
+
+    const erpStats = {
+      invoices:    { total: invoiceTotal, paid: invoicePaid, overdue: invoiceOverdue, syncedToTally: invoiceSynced },
+      purchaseOrders: { total: poTotal, approved: poApproved, syncedToTally: poSynced },
+      salesOrders: { total: salesOrderTotal, pendingApproval: salesOrderPending },
+      workOrders:  { total: woTotal, inProgress: woInProgress, completed: woCompleted },
+      inventory:   { total: invItemTotal, critical: invItemCritical },
+    };
+
+    // ── Finance totals (AP/AR) ─────────────────────────────────────────────
+    const AccountsPayable     = (await import('../models/AccountsPayable.js')).default;
+    const AccountsReceivable  = (await import('../models/AccountsReceivable.js')).default;
+    const [apAgg, arAgg] = await Promise.all([
+      AccountsPayable.aggregate([{ $group: { _id: null, total: { $sum: '$balanceAmount' }, count: { $sum: 1 } } }]),
+      AccountsReceivable.aggregate([{ $group: { _id: null, total: { $sum: '$balanceAmount' }, count: { $sum: 1 } } }]),
+    ]);
+    const financeStats = {
+      accountsPayable:    { total: apAgg[0]?.total || 0, count: apAgg[0]?.count || 0 },
+      accountsReceivable: { total: arAgg[0]?.total || 0, count: arAgg[0]?.count || 0 },
+    };
+
+    // ── Tally sync health ──────────────────────────────────────────────────
+    const [config, todayLogs, todaySuccess, todayFailed, recentSyncLogs] = await Promise.all([
+      TallyConfig.findOne({}, null, { sort: { _id: 1 } }),
+      TallySyncLog.countDocuments({ createdAt: { $gte: today } }),
+      TallySyncLog.countDocuments({ createdAt: { $gte: today }, status: 'Success' }),
+      TallySyncLog.countDocuments({ createdAt: { $gte: today }, status: 'Failed' }),
+      TallySyncLog.find({}).sort({ createdAt: -1 }).limit(5).lean(),
+    ]);
+
+    const syncHealth = {
+      connectionStatus: config?.connectionStatus || 'Unknown',
+      lastSyncAt: config?.lastSyncAt || null,
+      companyName: config?.companyName || '',
+      syncDirection: config?.syncDirection || 'Bi-directional',
+      autoSync: config?.autoSync || false,
+      syncInterval: config?.syncInterval || 'Every 15 minutes',
+      todayTotal: todayLogs,
+      todaySuccess,
+      todayFailed,
+      successRate: todayLogs > 0 ? ((todaySuccess / todayLogs) * 100).toFixed(1) : '0.0',
+      recentLogs: recentSyncLogs.map(l => ({
+        id: l._id, type: l.type, status: l.status, records: l.records, createdAt: l.createdAt,
+      })),
+    };
+
+    res.json({
+      success: true,
+      data: { tallyVouchers, tallyMasters, erpStats, financeStats, syncHealth },
+    });
+  } catch (e) {
+    console.error('[TallyDashboardStats] error:', e);
+    res.status(500).json({ success: false, message: e.message });
+  }
+};
+
 // ─── IMPORT FROM TALLY (Tally → ERP) — SSE streaming ────────────────────────
 /**
  * GET /api/tally/import-stream?type=Full&token=<jwt>

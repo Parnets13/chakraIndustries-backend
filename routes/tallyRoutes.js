@@ -7,6 +7,7 @@ import {
   getVouchers, getVoucherById, resetVoucherSyncStates, createVoucher, updateVoucher, deleteVoucher,
   fixBillToData,
   getGuidStatus,
+  getTallyDashboardStats,
   // Directional streams (legacy)
   importFromTallyStream,
   exportToTallyStream,
@@ -41,6 +42,7 @@ router.post('/test-connection',      protect, testConnection);
 // ── Stats & Logs ──────────────────────────────────────────────────────────────
 router.get('/logs',                  protect, getSyncLogs);
 router.get('/stats',                 protect, getSyncStats);
+router.get('/dashboard-stats',       protect, getTallyDashboardStats);
 router.get('/master-data',           protect, getMasterDataStatus);
 router.get('/transactions',          protect, getTransactionStatus);
 
