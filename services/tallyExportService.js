@@ -853,10 +853,77 @@ async function fetchTallyPOMap(cfg) {
 
 // ─── EXPORT TASK: SALES INVOICES ─────────────────────────────────────────────
 
-/** Map tax rate → Tally Output CGST ledger name */
-function cgstLedgerName(taxableBase, cgstAmt) {
-  if (!taxableBase || !cgstAmt) return 'Output CGST @ 9%';
+// ─── FETCH ACTUAL GST LEDGER NAMES FROM TALLY ────────────────────────────────
+// The #1 silent-EXCEPTIONS cause: code guesses "Output CGST @ 9%" but Tally
+// has it as "CGST", "Output CGST @9%", or something else entirely.
+// This function fetches ALL ledger names from the Duties & Taxes group and
+// returns a map so we can resolve the right name for each tax type + rate.
+async function fetchTallyGstLedgerNames(cfg) {
+  try {
+    const company = (cfg.companyName || '').trim().toUpperCase();
+    const coTag   = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE>
+<HEADER>
+  <VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE><ID>DutiesLedgers</ID>
+</HEADER>
+<BODY><DESC>
+  <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="DutiesLedgers">
+      <TYPE>Ledger</TYPE>
+      <FILTERS>IsDuties</FILTERS>
+      <FETCH>Name, TaxType</FETCH>
+    </COLLECTION>
+    <SYSTEM:FORMULA NAME="IsDuties">$Parent = "Duties &amp; Taxes"</SYSTEM:FORMULA>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
+</ENVELOPE>`;
+    const resp = await postXmlWithRetry(cfg, xml, (cfg.useConnector && cfg.connectorId) ? 60000 : 20000, 1);
+    if (!resp) return null;
+
+    // Build arrays of ledger names by tax type (from TaxType tag)
+    const cgstNames = [], sgstNames = [], igstNames = [], allGstNames = [];
+    for (const m of resp.matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
+      const block    = m[1];
+      const name     = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      const taxType  = (block.match(/<TAXTYPE>(.*?)<\/TAXTYPE>/i)?.[1] || '').trim().toLowerCase();
+      if (!name) continue;
+      const nameLow  = name.toLowerCase();
+      if (taxType === 'central tax'    || nameLow.includes('cgst')) cgstNames.push(name);
+      if (taxType === 'state tax'      || nameLow.includes('sgst')) sgstNames.push(name);
+      if (taxType === 'integrated tax' || nameLow.includes('igst')) igstNames.push(name);
+      if (nameLow.includes('cgst') || nameLow.includes('sgst') || nameLow.includes('igst')) allGstNames.push(name);
+    }
+    LOG(`fetchTallyGstLedgerNames: cgst=[${cgstNames.join(', ')}] sgst=[${sgstNames.join(', ')}] igst=[${igstNames.join(', ')}]`);
+    return { cgstNames, sgstNames, igstNames };
+  } catch (e) {
+    ERR('fetchTallyGstLedgerNames failed (non-fatal):', e.message);
+    return null;
+  }
+}
+
+/**
+ * Pick the best-matching GST ledger name from a list of actual Tally ledger names.
+ * Strategy: prefer the one whose name contains the rate closest to the computed rate.
+ * Falls back to the first available ledger of that type, then to the hardcoded default.
+ */
+function pickGstLedger(tallyNames, ratePercent, defaultName) {
+  if (!tallyNames || tallyNames.length === 0) return defaultName;
+  if (tallyNames.length === 1) return tallyNames[0];
+  // Try to find a name that contains the rate number
+  const rateStr = String(Math.round(ratePercent));
+  const match = tallyNames.find(n => n.includes(rateStr));
+  if (match) return match;
+  // Return the first one as best-effort
+  return tallyNames[0];
+}
+
+/** Map tax rate → Tally Output CGST ledger name (static fallback used when live fetch fails) */
+function cgstLedgerName(taxableBase, cgstAmt, tallyGstLedgers = null) {
+  if (!taxableBase || !cgstAmt) return tallyGstLedgers?.cgstNames?.[0] || 'Output CGST @ 9%';
   const r = +((cgstAmt / taxableBase) * 100).toFixed(2);
+  if (tallyGstLedgers?.cgstNames?.length) return pickGstLedger(tallyGstLedgers.cgstNames, r, 'Output CGST @ 9%');
   if (r <= 0.1)  return 'Output CGST 0%';
   if (r <= 1.5)  return 'Output CGST 1.5%';
   if (r <= 2.5)  return 'Output CGST @ 2.5%';
@@ -865,12 +932,16 @@ function cgstLedgerName(taxableBase, cgstAmt) {
   if (r <= 14)   return 'Output CGST @ 14%';
   return 'Output CGST @ 9%';
 }
-function sgstLedgerName(taxableBase, sgstAmt) {
+function sgstLedgerName(taxableBase, sgstAmt, tallyGstLedgers = null) {
+  if (!taxableBase || !sgstAmt) return tallyGstLedgers?.sgstNames?.[0] || 'Output SGST @ 9%';
+  const r = +((sgstAmt / taxableBase) * 100).toFixed(2);
+  if (tallyGstLedgers?.sgstNames?.length) return pickGstLedger(tallyGstLedgers.sgstNames, r, 'Output SGST @ 9%');
   return cgstLedgerName(taxableBase, sgstAmt).replace('CGST', 'SGST');
 }
-function igstLedgerName(taxableBase, igstAmt) {
-  if (!taxableBase || !igstAmt) return 'Output IGST @ 18%';
+function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
+  if (!taxableBase || !igstAmt) return tallyGstLedgers?.igstNames?.[0] || 'Output IGST @ 18%';
   const r = +((igstAmt / taxableBase) * 100).toFixed(2);
+  if (tallyGstLedgers?.igstNames?.length) return pickGstLedger(tallyGstLedgers.igstNames, r, 'Output IGST @ 18%');
   if (r <= 0.1)  return 'Out Put IGST 0.1%';
   if (r <= 3)    return 'Output IGST @ 3%';
   if (r <= 5)    return 'Output IGST @ 5%';
@@ -937,6 +1008,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     if (!cfg.companyName || !cfg.companyName.trim()) {
       ERR('exportSalesInvoices: companyName is empty — cannot export. Open Tally Settings and click "Test Connection" to auto-detect the company name, then retry.');
       return { ok: false, records: 0, error: 'Tally company name is not configured. Go to Tally Settings → Test Connection to auto-detect it, then retry the export.' };
+    }
+
+    // ── Step 0.5: Fetch ACTUAL GST ledger names from Tally ────────────────────
+    // This prevents the "silent EXCEPTIONS with no LINEERROR" issue caused by
+    // referencing a ledger name that doesn't exist in Tally (e.g., code says
+    // "Output CGST @ 9%" but Tally has it as "CGST" or "Output CGST @9%").
+    const tallyGstLedgers = await fetchTallyGstLedgerNames(cfg);
+    if (!tallyGstLedgers || (!tallyGstLedgers.cgstNames.length && !tallyGstLedgers.sgstNames.length && !tallyGstLedgers.igstNames.length)) {
+      LOG('⚠️ exportSalesInvoices: could not fetch GST ledger names from Tally — vouchers may be rejected if ledger names mismatch. Continuing with fallback names.');
     }
 
     // Only export invoices not yet synced to Tally.
@@ -1073,21 +1153,21 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
         const cgstEntry = totalCGST > 0 ? `
 <ALLLEDGERENTRIES.LIST>
-  <LEDGERNAME>${esc(cgstLedgerName(salesBase, totalCGST))}</LEDGERNAME>
+  <LEDGERNAME>${esc(cgstLedgerName(salesBase, totalCGST, tallyGstLedgers))}</LEDGERNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
   <AMOUNT>${totalCGST.toFixed(2)}</AMOUNT>
 </ALLLEDGERENTRIES.LIST>` : '';
 
         const sgstEntry = totalSGST > 0 ? `
 <ALLLEDGERENTRIES.LIST>
-  <LEDGERNAME>${esc(sgstLedgerName(salesBase, totalSGST))}</LEDGERNAME>
+  <LEDGERNAME>${esc(sgstLedgerName(salesBase, totalSGST, tallyGstLedgers))}</LEDGERNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
   <AMOUNT>${totalSGST.toFixed(2)}</AMOUNT>
 </ALLLEDGERENTRIES.LIST>` : '';
 
         const igstEntry = totalIGST > 0 ? `
 <ALLLEDGERENTRIES.LIST>
-  <LEDGERNAME>${esc(igstLedgerName(salesBase, totalIGST))}</LEDGERNAME>
+  <LEDGERNAME>${esc(igstLedgerName(salesBase, totalIGST, tallyGstLedgers))}</LEDGERNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
   <AMOUNT>${totalIGST.toFixed(2)}</AMOUNT>
 </ALLLEDGERENTRIES.LIST>` : '';
@@ -1107,7 +1187,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           inv.notes || null,
         ].filter(Boolean).join(' | ');
 
-        LOG(`Invoice ${inv.invoiceNo}: tallyDate=${tallyDate} grandTotal=${grandTotal} cgst=${totalCGST} sgst=${totalSGST} igst=${totalIGST}`);
+        LOG(`Invoice ${inv.invoiceNo}: tallyDate=${tallyDate} grandTotal=${grandTotal} cgst=${totalCGST}(${cgstLedgerName(salesBase, totalCGST, tallyGstLedgers)}) sgst=${totalSGST}(${sgstLedgerName(salesBase, totalSGST, tallyGstLedgers)}) igst=${totalIGST}(${igstLedgerName(salesBase, totalIGST, tallyGstLedgers)})`);
 
         // Balance check: party debit must equal sum of all credit entries.
         // Tally rejects imbalanced vouchers silently with EXCEPTIONS=1 and no LINEERROR.
@@ -1136,6 +1216,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
     <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
+    <BILLALLOCATIONS.LIST>
+      <NAME>${esc(inv.invoiceNo)}</NAME>
+      <BILLTYPE>New Ref</BILLTYPE>
+      <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
+      <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
+    </BILLALLOCATIONS.LIST>
   </ALLLEDGERENTRIES.LIST>
   ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}
 </VOUCHER>`;
