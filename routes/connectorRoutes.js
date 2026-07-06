@@ -294,7 +294,7 @@ router.delete('/remove/:connectorId', protect, async (req, res) => {
  */
 router.get('/poll-job', protectConnector, async (req, res) => {
   const connectorId    = req.connector.connectorId;
-  const LONG_POLL_MS   = 20000;
+  const LONG_POLL_MS   = 25000;  // server holds connection 25s — matches connector poll timeout
   const CHECK_INTERVAL = 300;
   let waited = 0;
   let done   = false;

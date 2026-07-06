@@ -37,7 +37,7 @@ const ENTITY_TIMEOUTS = {
   Journal:     600000,  // 10 min
   Contra:      600000,  // 10 min
 };
-const HEALTH_CHECK_TIMEOUT = 30000;  // 30s — allow for slow connector round-trip
+const HEALTH_CHECK_TIMEOUT = 90000;  // 90s — connector roundtrip + Tally processing time
 
 // === GLOBAL STATE ===
 let _tallyRequestLock = false;

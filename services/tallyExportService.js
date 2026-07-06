@@ -129,7 +129,7 @@ async function fetchTallyPeriodEnd(cfg) {
   </DESC>
 </BODY>
 </ENVELOPE>`;
-    const resp = await postXmlWithRetry(cfg, xml, 20000, 1);
+    const resp = await postXmlWithRetry(cfg, xml, cfg.useConnector && cfg.connectorId ? 90000 : 60000, 1);
     const m = resp.match(/<ENDINGAT[^>]*>(\d{8})<\/ENDINGAT>/i);
     if (m) {
       LOG(`Tally company period ends: ${m[1]}`);
@@ -309,7 +309,7 @@ export async function validateTallyConnection(cfg) {
   LOG('validateTallyConnection — connector:', cfg.useConnector, 'id:', cfg.connectorId || '(none)');
 
   try {
-    const body = await postXmlWithRetry(cfg, PING_XML, 20000);
+    const body = await postXmlWithRetry(cfg, PING_XML, cfg.useConnector && cfg.connectorId ? 90000 : 30000);
     LOG('Ping response:', body.slice(0, 400));
 
     // TDL Company collection returns <NAME> tags
@@ -879,7 +879,7 @@ async function fetchTallyGstLedgerNames(cfg) {
   </TDLMESSAGE></TDL>
 </DESC></BODY>
 </ENVELOPE>`;
-    const resp = await postXmlWithRetry(cfg, xml, (cfg.useConnector && cfg.connectorId) ? 60000 : 20000, 1);
+    const resp = await postXmlWithRetry(cfg, xml, (cfg.useConnector && cfg.connectorId) ? 90000 : 30000, 1);
     if (!resp) return null;
 
     // Build arrays of ledger names by tax type (from TaxType tag)

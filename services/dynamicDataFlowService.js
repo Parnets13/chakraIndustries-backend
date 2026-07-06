@@ -409,7 +409,7 @@ class DynamicDataFlowService {
           url: tallyEndpoint,
           data: tallyXML,
           headers: { 'Content-Type': 'text/xml', Accept: '*/*' },
-          timeout: 20000,
+          timeout: 120000,
           responseType: 'text',
           validateStatus: () => true,
         });

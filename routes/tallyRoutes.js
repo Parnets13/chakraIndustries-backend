@@ -103,6 +103,11 @@ router.get('/diagnose-vouchers', protect, async (req, res) => {
     const coTag   = company ? `<SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>` : '';
     const results = {};
 
+    // ── Connector-aware timeout helper ───────────────────────────────────────
+    const ct = (baseMs) => (cfg.useConnector && cfg.connectorId)
+      ? Math.max(baseMs * 3, 90000)
+      : baseMs;
+
     // ── 1. VoucherType names ─────────────────────────────────────────────────
     try {
       const xml = `<ENVELOPE>
@@ -113,7 +118,7 @@ router.get('/diagnose-vouchers', protect, async (req, res) => {
     <COLLECTION NAME="VTList"><TYPE>VoucherType</TYPE><FETCH>Name</FETCH></COLLECTION>
   </TDLMESSAGE></TDL>
 </DESC></BODY></ENVELOPE>`;
-      const resp  = await postXmlWithRetry(cfg, xml, 20000);
+      const resp  = await postXmlWithRetry(cfg, xml, ct(60000));
       const names = [...resp.matchAll(/<NAME>(.*?)<\/NAME>/gi)].map(m => m[1].trim());
       results.voucherTypes = names;
     } catch (e) { results.voucherTypesError = e.message; }
@@ -128,7 +133,7 @@ router.get('/diagnose-vouchers', protect, async (req, res) => {
     <COLLECTION NAME="LedList"><TYPE>Ledger</TYPE><FETCH>Name,Parent</FETCH></COLLECTION>
   </TDLMESSAGE></TDL>
 </DESC></BODY></ENVELOPE>`;
-      const resp    = await postXmlWithRetry(cfg, xml, 30000);
+      const resp    = await postXmlWithRetry(cfg, xml, ct(60000));
       const blocks  = [...resp.matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)].map(m => m[1]);
       const keywords = ['sales', 'purchase', 'cgst', 'sgst', 'igst', 'bi worldwide', 'debtor'];
       results.relevantLedgers = blocks
@@ -178,7 +183,7 @@ router.get('/diagnose-vouchers', protect, async (req, res) => {
     </VOUCHER>
   </TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
-      const resp = await postXmlWithRetry(cfg, xml, 20000);
+      const resp = await postXmlWithRetry(cfg, xml, ct(60000));
       results.testVoucherRaw      = resp.slice(0, 1000);
       results.testVoucherLineErrors = [...resp.matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m => m[1].trim());
       results.testVoucherCreated    = parseInt(resp.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
