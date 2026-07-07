@@ -1,5 +1,69 @@
 import mongoose from 'mongoose';
 
+// ─── TallyVoucher sub-document ────────────────────────────────────────────────
+// Mirrors Tally's Sales Voucher internal structure exactly.
+// Populated at write time by normalizeToTallyVoucher() so export is pure serialization.
+
+const billAllocationSchema = new mongoose.Schema({
+  name:     { type: String, default: '' },
+  billType: { type: String, default: 'New Ref' },
+  amount:   { type: Number, default: 0 },
+}, { _id: false });
+
+const accountingAllocationSchema = new mongoose.Schema({
+  ledgerName:          { type: String, required: true },
+  isDeemedPositive:    { type: Boolean, default: false },
+  isLastDeemedPositive:{ type: Boolean, default: false },
+  amount:              { type: Number, default: 0 },
+}, { _id: false });
+
+const ledgerEntrySchema = new mongoose.Schema({
+  ledgerName:          { type: String, required: true },
+  isDeemedPositive:    { type: Boolean, default: false },
+  isLastDeemedPositive:{ type: Boolean, default: false },
+  amount:              { type: Number, required: true },
+  billAllocations:     { type: [billAllocationSchema], default: [] },
+}, { _id: false });
+
+const inventoryEntrySchema = new mongoose.Schema({
+  stockItemName:        { type: String, required: true },
+  isDeemedPositive:     { type: Boolean, default: false },
+  isLastDeemedPositive: { type: Boolean, default: false },
+  rate:                 { type: String, default: '' },   // "100.00/Nos"
+  amount:               { type: Number, default: 0 },
+  actualQty:            { type: String, default: '' },   // "5 Nos"
+  billedQty:            { type: String, default: '' },   // "5 Nos"
+  accountingAllocations:{ type: [accountingAllocationSchema], default: [] },
+  // GST source fields — required by Tally for GST-enabled inventory vouchers
+  gstSourceType:        { type: String, default: 'Ledger' },   // GSTSOURCETYPE
+  gstLedgerSource:      { type: String, default: '' },          // GSTLEDGERSOURCE
+  hsnSourceType:        { type: String, default: 'Ledger' },   // HSNSOURCETYPE
+  hsnLedgerSource:      { type: String, default: '' },          // HSNLEDGERSOURCE
+  gstOverrideTaxability:{ type: String, default: 'Taxable' },  // GSTOVRDNTAXABILITY
+  gstOverrideSupplyType:{ type: String, default: 'Goods' },    // GSTOVRDNTYPEOFSUPPLY
+  gstHsnName:           { type: String, default: '' },          // GSTHSNNAME (HSN code)
+}, { _id: false });
+
+const tallyVoucherSchema = new mongoose.Schema({
+  voucherType:         { type: String, default: 'Sales' },
+  voucherNumber:       { type: String, required: true },
+  date:                { type: String, required: true },  // YYYYMMDD
+  effectiveDate:       { type: String, required: true },  // YYYYMMDD
+  partyLedgerName:     { type: String, required: true },
+  isinvoice:           { type: Boolean, default: true },
+  buyersOrderNo:       { type: String, default: '' },
+  narration:           { type: String, default: '' },
+  allLedgerEntries:    { type: [ledgerEntrySchema],    default: [] },
+  allInventoryEntries: { type: [inventoryEntrySchema], default: [] },
+  // Cached computed amounts — stored to avoid recomputation on export
+  _grandTotal:  { type: Number, default: 0 },
+  _totalCGST:   { type: Number, default: 0 },
+  _totalSGST:   { type: Number, default: 0 },
+  _totalIGST:   { type: Number, default: 0 },
+  _salesBase:   { type: Number, default: 0 },
+  _useInventory:{ type: Boolean, default: false },
+}, { _id: false });
+
 const invoiceItemSchema = new mongoose.Schema({
   description: { type: String, required: true },
   hsn:         { type: String, default: '' },
@@ -16,6 +80,9 @@ const invoiceItemSchema = new mongoose.Schema({
   cgst:        { type: Number, default: 0 },       // CGST amount
   sgst:        { type: Number, default: 0 },       // SGST amount
   igst:        { type: Number, default: 0 },       // IGST amount (inter-state)
+  // Tally-specific: per-item sales ledger name (e.g. "SS Bottle Sales Local 18%")
+  // Set from ItemMaster.tallySalesLedger at write time. Falls back to 'Sales Accounts'.
+  tallySalesLedger: { type: String, default: '' },
 }, { _id: false });
 
 const invoiceSchema = new mongoose.Schema({
@@ -164,6 +231,11 @@ const invoiceSchema = new mongoose.Schema({
     trim: true,
     default: ''
   },
+  // ── Tally-native voucher sub-document ────────────────────────────────────────
+  // Populated by normalizeToTallyVoucher() at write time (upload/create/update).
+  // Export path reads this directly — zero field mapping required.
+  // null = not yet normalized (legacy invoice or normalization failed).
+  tallyVoucher: { type: tallyVoucherSchema, default: null },
 }, { timestamps: true });
 
 invoiceSchema.index({ invoiceNo: 1 });

@@ -25,6 +25,8 @@ import {
   // Sales Register (April–June import + query)
   importSalesRegister,
   getSalesInvoices,
+  // GST fields migration
+  migrateGstFields,
 } from '../controllers/tallyController.js';
 import { tallyWebhook } from '../controllers/tallyWebhookController.js';
 import { protect } from '../middleware/authMiddleware.js';
@@ -86,6 +88,7 @@ router.delete('/vouchers/:id',             protect, deleteVoucher);
 router.post('/reset-voucher-sync-states',  protect, resetVoucherSyncStates);
 router.post('/reset-invoice-sync',         protect, resetInvoiceSyncFlags);
 router.post('/fix-bill-to-data',           protect, fixBillToData);
+router.post('/remigrate-gst-fields',       protect, migrateGstFields);
 
 // ── GUID / AlterID sync status ────────────────────────────────────────────────
 router.get('/guid-status',           protect, getGuidStatus);

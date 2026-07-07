@@ -29,6 +29,7 @@ import {
   runSelectiveExport,
 } from '../services/tallyExportService.js';
 import { importFromFiles } from '../services/tallyFileImporter.js';
+import { normalizeToTallyVoucher } from '../services/normalizeToTallyVoucher.js';
 
 // ── SSE helper ────────────────────────────────────────────────────────────────
 function sseSetup(res) {
@@ -1701,5 +1702,108 @@ export const getSalesInvoices = async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
+  }
+};
+
+// ─── MIGRATE: Re-normalize tallyVoucher GST fields ───────────────────────────
+/**
+ * POST /api/tally/remigrate-gst-fields
+ *
+ * Re-normalizes ALL Invoice.tallyVoucher sub-documents so every inventory
+ * entry has the correct GSTLEDGERSOURCE / HSNLEDGERSOURCE / GSTHSNNAME values.
+ *
+ * Steps:
+ *   1. Load all ItemMaster records (name → tallySalesLedger + hsn map)
+ *   2. Cursor through all exportable invoices
+ *   3. Enrich each invoice's items with ItemMaster data
+ *   4. Re-run normalizeToTallyVoucher and save updated tallyVoucher
+ *   5. Return stats: processed / succeeded / skipped / failed
+ *
+ * After running this, reset invoice tallySync flags and re-export to Tally.
+ */
+export const migrateGstFields = async (req, res) => {
+  const start = Date.now();
+  try {
+    const cfg        = await TallyConfig.findOne({}, 'tallyPeriodEnd').lean();
+    const periodEnd  = cfg?.tallyPeriodEnd || null;
+
+    // Load all ItemMaster records once into a name-keyed map
+    const allMasters = await ItemMaster.find({}, 'name hsn tallySalesLedger').lean();
+    const masterMap  = new Map(allMasters.map(m => [m.name, m]));
+
+    // Helper: stamp each invoice item with tallySalesLedger + hsn from ItemMaster
+    function enrichItems(items) {
+      return (items || []).map(item => {
+        const name = (item.description || item.name || '').trim();
+        const im   = masterMap.get(name);
+        return {
+          ...item,
+          hsn:              item.hsn              || im?.hsn              || '',
+          tallySalesLedger: item.tallySalesLedger  || im?.tallySalesLedger || '',
+        };
+      });
+    }
+
+    let processed = 0, succeeded = 0, failed = 0, skipped = 0;
+    const failures = [];
+    const SAMPLE_SIZE = 3;       // collect first N re-normalized entries for the response
+    const samples = [];
+
+    const cursor = Invoice.find({ invoiceNo: { $exists: true, $ne: '' } })
+      .select('-__v').lean().cursor();
+
+    for await (const inv of cursor) {
+      processed++;
+      try {
+        const grandTotal = +(inv.grandTotal || inv.totalAmount || 0);
+        if (!inv.partyName || grandTotal <= 0) { skipped++; continue; }
+
+        const enrichedItems = enrichItems(inv.items);
+        const tv = normalizeToTallyVoucher({ ...inv, items: enrichedItems }, { periodEnd });
+        await Invoice.updateOne({ _id: inv._id }, { $set: { tallyVoucher: tv } });
+        succeeded++;
+
+        // Collect a sample for the response so caller can verify without another DB query
+        if (samples.length < SAMPLE_SIZE && tv.allInventoryEntries?.length) {
+          const ie0 = tv.allInventoryEntries[0];
+          samples.push({
+            invoiceNo:      inv.invoiceNo,
+            itemName:       ie0.stockItemName,
+            gstLedgerSource: ie0.gstLedgerSource || '(empty)',
+            hsnLedgerSource: ie0.hsnLedgerSource || '(empty)',
+            gstHsnName:      ie0.gstHsnName      || '(empty)',
+            acctAlloc0:      ie0.accountingAllocations?.[0]?.ledgerName || '(none)',
+          });
+        }
+      } catch (err) {
+        failed++;
+        failures.push({ invoiceNo: inv.invoiceNo || String(inv._id), error: err.message });
+      }
+    }
+
+    const dur = ((Date.now() - start) / 1000).toFixed(1);
+    const withLedger = allMasters.filter(m => m.tallySalesLedger).length;
+
+    res.json({
+      success: true,
+      duration: `${dur}s`,
+      stats: { processed, succeeded, skipped, failed },
+      itemMasterSummary: {
+        total:       allMasters.length,
+        withLedger,
+        withoutLedger: allMasters.length - withLedger,
+        note: withLedger === 0
+          ? 'No ItemMaster records have tallySalesLedger set — gstLedgerSource will be "Sales Accounts" for all items. Set ItemMaster.tallySalesLedger via Tally sync or manually, then re-run this endpoint.'
+          : `${withLedger} items have item-specific sales ledger names.`,
+      },
+      samples,
+      failures: failures.slice(0, 20),
+      message: `Re-normalized ${succeeded} invoices in ${dur}. ` +
+               (failed > 0 ? `${failed} failed. ` : '') +
+               'Now reset tallySync on invoices and re-export to Tally.',
+    });
+  } catch (err) {
+    console.error('[migrateGstFields]', err.message);
+    res.status(500).json({ success: false, message: err.message });
   }
 };

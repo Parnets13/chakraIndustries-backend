@@ -2,8 +2,49 @@ import Invoice from '../models/Invoice.js';
 import SalesOrder from '../models/SalesOrder.js';
 import Dealer from '../models/Dealer.js';
 import AccountsReceivable from '../models/AccountsReceivable.js';
+import ItemMaster from '../models/ItemMaster.js';
 import { sendInvoiceEmail } from '../utils/emailService.js';
 import { pushSingleInvoiceToTally } from '../services/tallyService.js';
+import { normalizeToTallyVoucher } from '../services/normalizeToTallyVoucher.js';
+import TallyConfig from '../models/TallyConfig.js';
+
+// ── ItemMaster lookup: attach tallySalesLedger + hsn to each invoice item ─────
+// Runs one DB query for all item names in the invoice, then stamps each item
+// with ItemMaster.tallySalesLedger and ItemMaster.hsn so normalizeToTallyVoucher
+// can use the correct per-item sales ledger instead of the generic 'Sales Accounts'.
+async function enrichItemsFromItemMaster(items) {
+  if (!items || !items.length) return items;
+  const names = [...new Set(items.map(i => (i.description || i.name || '').trim()).filter(Boolean))];
+  if (!names.length) return items;
+  const masters = await ItemMaster.find({ name: { $in: names } }, 'name hsn tallySalesLedger').lean();
+  const masterMap = new Map(masters.map(m => [m.name, m]));
+  return items.map(item => {
+    const name = (item.description || item.name || '').trim();
+    const im   = masterMap.get(name);
+    return {
+      ...item,
+      // Only override hsn/tallySalesLedger if ItemMaster has them and item doesn't
+      hsn:             item.hsn             || im?.hsn             || '',
+      tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || '',
+    };
+  });
+}
+
+// ── Build Tally-native voucher sub-document (non-fatal) ───────────────────────
+// Called at every write. If normalization fails (e.g. zero grandTotal on a draft)
+// we store null and let the legacy export path handle it rather than blocking the save.
+async function buildTallyVoucher(invoiceData) {
+  try {
+    const cfg = await TallyConfig.findOne({}, 'tallyPeriodEnd').lean();
+    const periodEnd = cfg?.tallyPeriodEnd || null;
+    // Enrich items with ItemMaster data before normalizing
+    const enrichedItems = await enrichItemsFromItemMaster(invoiceData.items || []);
+    return normalizeToTallyVoucher({ ...invoiceData, items: enrichedItems }, { periodEnd });
+  } catch (err) {
+    console.warn('[Invoice] tallyVoucher normalization skipped:', err.message);
+    return null;
+  }
+}
 
 // ── ID generator ──────────────────────────────────────────────────────────────
 const genInvoiceNo = async () => {
@@ -136,7 +177,9 @@ export const create = async (req, res) => {
     const { items = [], ...rest } = req.body;
     const totals = computeTotals(items);
     const invoiceType = items.length > 1 ? 'multi' : 'single';
-    const inv = await Invoice.create({ invoiceNo, ...rest, ...totals, source: 'manual', invoiceType });
+    const invoiceData = { invoiceNo, ...rest, ...totals, source: 'manual', invoiceType };
+    invoiceData.tallyVoucher = await buildTallyVoucher(invoiceData);
+    const inv = await Invoice.create(invoiceData);
     await AccountsReceivable.create({
       dealer: inv.dealerId,
       salesOrder: inv.salesOrderId,
@@ -170,16 +213,21 @@ export const bulkUpload = async (req, res) => {
       .select('invoiceNo');
     const lastNum = last ? (parseInt(last.invoiceNo.split('-').pop()) || 0) : 0;
 
+    // Fetch TallyConfig once for period end (used by normalizer for all rows)
+    const cfg = await TallyConfig.findOne({}, 'tallyPeriodEnd').lean();
+    const periodEnd = cfg?.tallyPeriodEnd || null;
+
     // Build all docs in memory — no per-row DB calls
     const docs   = [];
     const errors = [];
 
-    invoices.forEach((inv, i) => {
+    for (let i = 0; i < invoices.length; i++) {
+      const inv = invoices[i];
       try {
-        const invoiceNo = `${prefix}${String(lastNum + i + 1).padStart(4, '0')}`;
+        const invoiceNo = `${prefix}${String(lastNum + docs.length + 1).padStart(4, '0')}`;
         const { items = [], ...rest } = inv;
         const totals = computeTotals(items);
-        docs.push({
+        const invoiceData = {
           invoiceNo,
           ...rest,
           ...totals,
@@ -188,11 +236,21 @@ export const bulkUpload = async (req, res) => {
           serialNo:    i + 1,
           status:      rest.status || 'Draft',
           invoiceType: items.length > 1 ? 'multi' : 'single',
-        });
+        };
+        // Normalize to Tally-native structure at write time.
+        // If it fails (e.g. missing partyName), exclude row with a reason.
+        try {
+          invoiceData.tallyVoucher = normalizeToTallyVoucher(invoiceData, { periodEnd });
+        } catch (normErr) {
+          // normalization failure → tallyVoucher = null (legacy export fallback)
+          invoiceData.tallyVoucher = null;
+          console.warn(`[bulkUpload] row ${i+1} tallyVoucher skipped: ${normErr.message}`);
+        }
+        docs.push(invoiceData);
       } catch (e) {
         errors.push({ row: i + 1, error: e.message });
       }
-    });
+    }
 
     if (!docs.length) {
       return res.status(400).json({ success: false, message: 'All rows failed validation', errors });
@@ -228,12 +286,45 @@ export const update = async (req, res) => {
     const { items = [], ...rest } = req.body;
     const totals = computeTotals(items);
     const invoiceType = items.length > 1 ? 'multi' : 'single';
+
+    // Re-normalize tallyVoucher on every save.
+    // If the invoice was previously exported to Tally (tallySync=true), clear
+    // it so the updated invoice will be re-exported on the next export run.
+    const existing = await Invoice.findById(req.params.id).lean();
+    if (!existing) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+    const updatedData = {
+      ...existing,
+      ...rest,
+      items: totals.items,
+      subtotal: totals.subtotal,
+      totalDiscount: totals.totalDiscount,
+      totalTax: totals.totalTax,
+      grandTotal: totals.grandTotal,
+      invoiceType,
+    };
+
+    // Re-normalize (non-fatal — preserve existing tallyVoucher on failure)
+    let newTallyVoucher = existing.tallyVoucher;
+    try {
+      const cfg = await TallyConfig.findOne({}, 'tallyPeriodEnd').lean();
+      newTallyVoucher = normalizeToTallyVoucher(updatedData, { periodEnd: cfg?.tallyPeriodEnd || null });
+    } catch (normErr) {
+      console.warn(`[update] tallyVoucher re-normalization failed for ${req.params.id}: ${normErr.message}`);
+    }
+
+    const updatePayload = { ...rest, ...totals, invoiceType, tallyVoucher: newTallyVoucher };
+    // Clear tallySync if the invoice was previously synced — it changed, needs re-export
+    if (existing.tallySync) {
+      updatePayload.tallySync = false;
+      updatePayload.tallySyncAt = null;
+    }
+
     const inv = await Invoice.findByIdAndUpdate(
       req.params.id,
-      { ...rest, ...totals, invoiceType },
+      updatePayload,
       { new: true, runValidators: true }
     );
-    if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
     res.json({ success: true, data: inv });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
@@ -382,7 +473,7 @@ export const createFromSalesOrder = async (req, res) => {
     const totals = computeTotals(items);
     
     // Create invoice
-    const invoice = await Invoice.create({
+    const invoiceData = {
       invoiceNo,
       invoiceDate: new Date(),
       dealerId: order.dealerId || null,
@@ -407,7 +498,9 @@ export const createFromSalesOrder = async (req, res) => {
       paymentStatus: 'Pending',
       source: 'manual',
       invoiceType: items.length > 1 ? 'multi' : 'single'
-    });
+    };
+    invoiceData.tallyVoucher = await buildTallyVoucher(invoiceData);
+    const invoice = await Invoice.create(invoiceData);
     
     await AccountsReceivable.create({
       dealer: invoice.dealerId,

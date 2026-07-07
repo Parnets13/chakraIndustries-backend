@@ -42,18 +42,19 @@ const xml = `<ENVELOPE>
   <TDL><TDLMESSAGE>
     <COLLECTION NAME="ERPSalesVoucherNumbers">
       <TYPE>Voucher</TYPE>
-      <FILTERS>IsSales</FILTERS>
-      <FETCH>VoucherNumber</FETCH>
+      <FETCH>VoucherNumber, VoucherTypeName</FETCH>
     </COLLECTION>
-    <SYSTEM:FORMULA NAME="IsSales">$VoucherTypeName = "Sales"</SYSTEM:FORMULA>
   </TDLMESSAGE></TDL>
 </DESC></BODY>
 </ENVELOPE>`;
 
 const resp = await postXmlWithRetry(cfg, xml, (cfg.useConnector && cfg.connectorId) ? 180000 : 30000);
 const existingInTally = new Set();
-for (const m of resp.matchAll(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/gi)) {
-  const vno = (m[1] || '').trim().toUpperCase();
+for (const m of resp.matchAll(/<VOUCHER[^>]*>([\s\S]*?)<\/VOUCHER>/gi)) {
+  const blk   = m[1];
+  const vtype = (blk.match(/<VOUCHERTYPENAME>(.*?)<\/VOUCHERTYPENAME>/i)?.[1] || '').trim().toLowerCase();
+  if (vtype !== 'sales') continue;
+  const vno = (blk.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/i)?.[1] || '').trim().toUpperCase();
   if (vno) existingInTally.add(vno);
 }
 console.log(`Tally has ${existingInTally.size} existing Sales vouchers`);

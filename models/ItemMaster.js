@@ -143,6 +143,14 @@ const itemMasterSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // ── Tally sales ledger override (GST-enabled vouchers) ────────────────────
+  // For GST-enabled inventory vouchers, each stock item must reference the
+  // EXACT sales ledger name defined in Tally (e.g., "SS Bottle Sales Local 5%").
+  // Store the ledger name here to override the computed default.
+  tallySalesLedger: {
+    type: String,
+    trim: true
+  },
   // Tally stock balance fields
   openingStock: {
     type: Number,

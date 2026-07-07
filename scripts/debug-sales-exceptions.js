@@ -29,20 +29,20 @@ const sv    = `<STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></
 
 // ── 1. Fetch actual GST ledger names from Tally ───────────────────────────────
 console.log('=== STEP 1: Fetching Duties & Taxes ledger names from Tally ===');
+// Using <SYSTEM:FORMULA> with $Parent filter crashes Tally Prime EDU.
+// Fetch all ledgers and filter client-side — works across all Tally editions.
 const dutiesXml = `<ENVELOPE>
 <HEADER>
   <VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>
-  <TYPE>Collection</TYPE><ID>DutiesLedgers</ID>
+  <TYPE>Collection</TYPE><ID>AllLedgers</ID>
 </HEADER>
 <BODY><DESC>
   <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
   <TDL><TDLMESSAGE>
-    <COLLECTION NAME="DutiesLedgers">
+    <COLLECTION NAME="AllLedgers">
       <TYPE>Ledger</TYPE>
-      <FILTERS>IsDuties</FILTERS>
-      <FETCH>Name, TaxType</FETCH>
+      <FETCH>Name, Parent, TaxType</FETCH>
     </COLLECTION>
-    <SYSTEM:FORMULA NAME="IsDuties">$Parent = "Duties &amp; Taxes"</SYSTEM:FORMULA>
   </TDLMESSAGE></TDL>
 </DESC></BODY>
 </ENVELOPE>`;
@@ -52,9 +52,16 @@ const cgstLedgers = [], sgstLedgers = [], igstLedgers = [], otherLedgers = [];
 for (const m of dutiesResp.matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
   const block   = m[1];
   const name    = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+  const parent  = (block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim().toLowerCase();
   const taxType = (block.match(/<TAXTYPE>(.*?)<\/TAXTYPE>/i)?.[1] || '').trim().toLowerCase();
   if (!name) continue;
   const nl = name.toLowerCase();
+  // Include if: parent is Duties & Taxes, OR TaxType is set, OR name contains gst keyword.
+  // Resilient to Tally not returning Parent tag in all collection responses.
+  const isDutiesParent = parent.includes('duties') || parent.includes('tax');
+  const hasTaxType     = !!taxType;
+  const hasGstName     = nl.includes('cgst') || nl.includes('sgst') || nl.includes('igst');
+  if (!isDutiesParent && !hasTaxType && !hasGstName) continue;
   if (taxType === 'central tax'    || nl.includes('cgst')) { cgstLedgers.push(name); continue; }
   if (taxType === 'state tax'      || nl.includes('sgst')) { sgstLedgers.push(name); continue; }
   if (taxType === 'integrated tax' || nl.includes('igst')) { igstLedgers.push(name); continue; }
@@ -99,17 +106,19 @@ const dedupeXml = `<ENVELOPE>
   <TDL><TDLMESSAGE>
     <COLLECTION NAME="ERPSalesVoucherNumbers">
       <TYPE>Voucher</TYPE>
-      <FILTERS>IsSales</FILTERS>
-      <FETCH>VoucherNumber</FETCH>
+      <FETCH>VoucherNumber, VoucherTypeName</FETCH>
     </COLLECTION>
-    <SYSTEM:FORMULA NAME="IsSales">$VoucherTypeName = "Sales"</SYSTEM:FORMULA>
   </TDLMESSAGE></TDL>
 </DESC></BODY>
 </ENVELOPE>`;
 const dedupeResp = await postXmlWithRetry(cfg, dedupeXml, 60000, 1);
 const existingNos = new Set();
-for (const m of dedupeResp.matchAll(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/gi)) {
-  existingNos.add((m[1] || '').trim().toUpperCase());
+for (const m of dedupeResp.matchAll(/<VOUCHER[^>]*>([\s\S]*?)<\/VOUCHER>/gi)) {
+  const blk   = m[1];
+  const vtype = (blk.match(/<VOUCHERTYPENAME>(.*?)<\/VOUCHERTYPENAME>/i)?.[1] || '').trim().toLowerCase();
+  if (vtype !== 'sales') continue;
+  const vno = (blk.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/i)?.[1] || '').trim().toUpperCase();
+  if (vno) existingNos.add(vno);
 }
 console.log(`Existing Sales voucher numbers in Tally: ${existingNos.size}`);
 const dupes = invoices.filter(inv => existingNos.has(String(inv.invoiceNo||'').trim().toUpperCase()));
