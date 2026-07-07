@@ -872,13 +872,20 @@ async function fetchTallyExistingVoucherNumbers(cfg) {
     if (!resp) return new Set();
 
     const existingNos = new Set();
+    const vtypesSeen = new Set(); // diagnostic: log all unique VoucherTypeNames from Tally
     for (const m of resp.matchAll(/<VOUCHER[^>]*>([\s\S]*?)<\/VOUCHER>/gi)) {
       const block = m[1];
-      const vtype = (block.match(/<VOUCHERTYPENAME>(.*?)<\/VOUCHERTYPENAME>/i)?.[1] || '').trim();
-      if (vtype.toLowerCase() !== 'sales') continue;
+      const vtype = (block.match(/<VOUCHERTYPENAME>(.*?)<\/VOUCHERTYPENAME>/i)?.[1] || '').trim().toLowerCase();
+      vtypesSeen.add(vtype || '(empty)');
+      // Accept "Sales", "Sales Invoice", "Sales Order" — all are Sales-type vouchers in Tally.
+      // Some Tally editions / custom voucher types use "Sales Invoice" rather than plain "Sales".
+      // Previously filtering only on exact "sales" was causing BIW01-style duplicates where
+      // the dedup set missed vouchers and Tally silently returned CREATED=0 for a re-Create.
+      if (!vtype.startsWith('sales')) continue;
       const vno = (block.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/i)?.[1] || '').trim().toUpperCase();
       if (vno) existingNos.add(vno);
     }
+    LOG(`fetchTallyExistingVoucherNumbers: unique VoucherTypeNames seen in response: [${[...vtypesSeen].join(', ')}]`);
     LOG(`fetchTallyExistingVoucherNumbers: ${existingNos.size} Sales voucher numbers found in Tally`);
     return existingNos;
   } catch (err) {
@@ -1521,6 +1528,10 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         // the invoice was already exported. Skip it and mark tallySync=true in
         // the ERP so it won't be attempted again on the next run.
         const invNoUpper = String(inv.invoiceNo).trim().toUpperCase();
+        // Diagnostic: log dedup result for first 5 invoices so we can confirm the set works
+        if (idx < 5) {
+          LOG(`DEDUP CHECK invoice[${idx}] "${invNoUpper}" — set has it: ${tallyVoucherNumbers.has(invNoUpper)} (set size: ${tallyVoucherNumbers.size})`);
+        }
         if (tallyVoucherNumbers.has(invNoUpper)) {
           LOG(`Invoice ${inv.invoiceNo}: SKIPPED — voucher number already exists in Tally (duplicate prevention)`);
           skippedItems.push({ id: inv.invoiceNo, reason: 'Already exists in Tally' });
@@ -1804,6 +1815,36 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       }
       const resp   = await postXml(cfg, singleEnvelope, 60000);
       const result = parseResponse(resp, `Sales Invoices batch ${batchNo}/${batchTot}`);
+
+      // ── SAFEGUARD: Detect "silent duplicate" — Tally returns all-zero when
+      // ACTION="Create" is sent for a voucher number that already exists in Tally.
+      // CREATED=0, ALTERED=0, ERRORS=0, EXCEPTIONS=0 with a single voucher means
+      // Tally knows this number but we sent Create instead of Alter.
+      // Re-send as ACTION="Alter" with the voucher number used as the alter key.
+      if (result.ok && (result.created || 0) === 0 && (result.altered || 0) === 0 && batch.length === 1) {
+        const v = batch[0];
+        LOG(`Sales batch ${batchNo}: CREATED=0, ALTERED=0 — voucher ${v.invoiceNo} already exists in Tally. Re-sending as Alter...`);
+        // Rebuild the XML with ACTION="Alter" by string-replacing the action attribute
+        const alterXml = v.xml.replace(/ACTION="Create"/, 'ACTION="Alter"');
+        const alterEnvelope = importEnvelope(cfg, 'Vouchers', alterXml);
+        const alterResp   = await postXml(cfg, alterEnvelope, 60000);
+        const alterResult = parseResponse(alterResp, `Sales Invoices batch ${batchNo}/${batchTot} [Alter retry]`);
+        if (alterResult.ok) {
+          totalCreated += alterResult.created || 0;
+          totalAltered += alterResult.altered || 0;
+          LOG(`Sales batch ${batchNo}: Alter retry succeeded — created:${alterResult.created} altered:${alterResult.altered}`);
+          successIds.push(v.id);
+          await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', 'Sent as Alter (was duplicate Create)');
+          // Also mark this number in the local set to prevent a repeated attempt
+          tallyVoucherNumbers.add(String(v.invoiceNo).trim().toUpperCase());
+        } else {
+          batchErrors.push(`Batch ${batchNo}: ${alterResult.error}`);
+          for (const bv of batch) {
+            await logInvoiceExportResult(syncId, bv.invoiceNo, bv.partyName, 'Failed', alterResult.error || 'Tally rejected Alter retry');
+          }
+        }
+        continue;
+      }
 
       if (result.ok) {
         totalCreated += result.created || 0;
