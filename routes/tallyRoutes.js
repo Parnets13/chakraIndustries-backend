@@ -8,6 +8,7 @@ import {
   fixBillToData,
   getGuidStatus,
   getTallyDashboardStats,
+  resetInvoiceSyncFlags,
   // Directional streams (legacy)
   importFromTallyStream,
   exportToTallyStream,
@@ -83,6 +84,7 @@ router.post('/vouchers',                   protect, createVoucher);
 router.patch('/vouchers/:id',              protect, updateVoucher);
 router.delete('/vouchers/:id',             protect, deleteVoucher);
 router.post('/reset-voucher-sync-states',  protect, resetVoucherSyncStates);
+router.post('/reset-invoice-sync',         protect, resetInvoiceSyncFlags);
 router.post('/fix-bill-to-data',           protect, fixBillToData);
 
 // ── GUID / AlterID sync status ────────────────────────────────────────────────

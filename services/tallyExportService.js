@@ -1268,6 +1268,85 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           continue;
         }
 
+        // ── Issue 1 fix: Build ALLINVENTORYENTRIES for each invoice line item ─
+        // Each item maps to a stock item line in the Tally Sales invoice.
+        // The Sales Accounts ledger allocation inside each inventory entry
+        // is what ties the item to the correct income ledger.
+        const inventoryEntries = (inv.items || []).map(item => {
+          const itemName   = (item.description || item.name || '').trim();
+          if (!itemName) return ''; // skip blank lines
+          const itemQty    = +(item.qty || 1);
+          const itemRate   = +(item.rate || 0);
+          const itemAmount = +(item.amount || item.basic || (itemQty * itemRate)).toFixed(2);
+          const itemUnit   = tallyUnit(item.unit || 'Nos');
+          // Each item's sales-account allocation amount must be NEGATIVE in Tally XML
+          // (credit to Sales Accounts from the inventory entry's perspective)
+          return `
+<ALLINVENTORYENTRIES.LIST>
+  <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
+  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+  <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+  <RATE>${itemRate.toFixed(2)} /${itemQty} ${itemUnit}</RATE>
+  <AMOUNT>-${itemAmount.toFixed(2)}</AMOUNT>
+  <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
+  <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
+  <ACCOUNTINGALLOCATIONS.LIST>
+    <LEDGERNAME>Sales Accounts</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <AMOUNT>-${itemAmount.toFixed(2)}</AMOUNT>
+  </ACCOUNTINGALLOCATIONS.LIST>
+</ALLINVENTORYENTRIES.LIST>`;
+        }).filter(Boolean).join('');
+
+        // When inventory entries are present, Tally derives the Sales Accounts credit
+        // from ACCOUNTINGALLOCATIONS inside each ALLINVENTORYENTRIES.LIST.
+        // Including a top-level Sales Accounts ALLLEDGERENTRIES.LIST on top of that
+        // would double-book it — so only add it when there are no item lines.
+        const hasItems = inventoryEntries.length > 0;
+        const salesAccLedgerEntry = hasItems ? '' : salesAccEntry;
+
+        // ── Issue 2 fix: Build ADDRESS.LIST blocks for Bill To and Ship To ──
+        // Bill To — use billToName/billToAddress fields; fall back to party fields
+        const billName    = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
+        const billAddr    = (inv.billToAddress || inv.partyAddress || '').trim();
+        const billCity    = (inv.billToCity || inv.partyCity || '').trim();
+        const billState   = (inv.billToState || inv.partyState || '').trim();
+        const billGST     = (inv.billToGST || inv.partyGST || '').trim();
+
+        // Ship To — use dedicated shipTo fields; only fall back to billTo if ALL ship fields are empty
+        const hasShipTo   = !!(inv.shipToName || inv.shipToAddress || inv.shipToMailingName);
+        const shipName    = hasShipTo ? (inv.shipToName || inv.shipToMailingName || billName).trim() : billName;
+        const shipAddr    = hasShipTo ? (inv.shipToAddress || '').trim() : billAddr;
+        const shipCity    = hasShipTo ? (inv.shipToCity    || billCity).trim() : billCity;
+        const shipState   = hasShipTo ? (inv.shipToState   || billState).trim() : billState;
+        const shipGST     = hasShipTo ? (inv.shipToGST     || billGST).trim() : billGST;
+
+        LOG(`Invoice ${inv.invoiceNo}: billTo="${billName}" shipTo="${shipName}" hasShipTo=${hasShipTo}`);
+
+        // Build address lines — include city+state on a second line only if present
+        const billAddrLines = [billAddr, [billCity, billState].filter(Boolean).join(', ')].filter(Boolean);
+        const shipAddrLines = [shipAddr, [shipCity, shipState].filter(Boolean).join(', ')].filter(Boolean);
+
+        const billToXml = `
+  <ADDRESS.LIST TYPE="Address">
+    <ADDRESS>${esc(billName)}</ADDRESS>
+    ${billAddrLines.map(l => `<ADDRESS>${esc(l)}</ADDRESS>`).join('\n    ')}
+    ${billGST ? `<ADDRESS>GSTIN: ${esc(billGST)}</ADDRESS>` : ''}
+  </ADDRESS.LIST>`;
+
+        const shipToXml = `
+  <BASICBASEPARTYDETAILS.LIST>
+    <BASICBUYERNAME>${esc(shipName)}</BASICBUYERNAME>
+    <BASICBUYERADDRESS.LIST>
+      <BASICBUYERADDRESS>${esc(shipAddr)}</BASICBUYERADDRESS>
+      ${shipCity  ? `<BASICBUYERADDRESS>${esc(shipCity)}</BASICBUYERADDRESS>` : ''}
+      ${shipState ? `<BASICBUYERADDRESS>${esc(shipState)}</BASICBUYERADDRESS>` : ''}
+    </BASICBUYERADDRESS.LIST>
+    ${shipState ? `<BASICBUYERSTATE>${esc(shipState)}</BASICBUYERSTATE>` : ''}
+    ${shipGST   ? `<BASICBUYERGSTIN>${esc(shipGST)}</BASICBUYERGSTIN>` : ''}
+  </BASICBASEPARTYDETAILS.LIST>`;
+
         const voucherXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}">
   <DATE>${tallyDate}</DATE>
@@ -1279,6 +1358,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <BUYERSORDERNO>${esc(inv.buyersOrderNo || inv.purchaseOrderRef || '')}</BUYERSORDERNO>
   <NARRATION>${esc(narration)}</NARRATION>
   <ISINVOICE>Yes</ISINVOICE>
+  ${billToXml}
+  ${shipToXml}
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
@@ -1291,7 +1372,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
     </BILLALLOCATIONS.LIST>
   </ALLLEDGERENTRIES.LIST>
-  ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}
+  ${cgstEntry}${sgstEntry}${igstEntry}${salesAccLedgerEntry}
+  ${inventoryEntries}
 </VOUCHER>`;
 
         if (idx === 0) LOG(`exportSalesInvoices: FIRST INVOICE XML:\n${voucherXml}`);

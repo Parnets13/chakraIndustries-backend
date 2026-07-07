@@ -528,6 +528,43 @@ export const deleteVoucher = async (req, res) => {
 
 // ─── GUID STATUS ──────────────────────────────────────────────────────────────
 
+// ─── RESET INVOICE TALLY-SYNC FLAGS ──────────────────────────────────────────
+/**
+ * POST /api/tally/reset-invoice-sync
+ * Clears tallySync=true on all ERP Invoices so they will be re-exported on
+ * the next Sales Invoice export run.
+ *
+ * The export uses ACTION="Alter" for any voucher whose number already exists
+ * in Tally, so re-exporting will UPDATE the existing Tally vouchers in-place
+ * (adding item lines + correct Ship To) without creating duplicates.
+ *
+ * Optional body: { invoiceNos: ['INV-001', 'INV-002'] }
+ * When invoiceNos is provided, only those specific invoices are reset.
+ * When omitted, ALL synced invoices are reset.
+ */
+export const resetInvoiceSyncFlags = async (req, res) => {
+  try {
+    const { invoiceNos } = req.body || {};
+    let filter = { tallySync: true };
+    if (Array.isArray(invoiceNos) && invoiceNos.length > 0) {
+      filter = { invoiceNo: { $in: invoiceNos } };
+    }
+    const result = await Invoice.updateMany(filter, {
+      $set: { tallySync: false },
+      $unset: { tallySyncAt: '' },
+    });
+    const count = result.modifiedCount || 0;
+    res.json({
+      success: true,
+      message: `Reset ${count} invoice(s). Run Sales Invoice export to update them in Tally.`,
+      data: { reset: count },
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+};
+
+
 export const getGuidStatus = async (req, res) => {
   try {
     const [items, vendors, clients, ledgers, invoices, pos] = await Promise.all([
