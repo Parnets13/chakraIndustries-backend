@@ -144,6 +144,13 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const igstLedger = totalIGST > 0 ? resolveGstLedgerName('igst', salesBase, totalIGST, gstLedgerNames) : '';
 
   // ── Inventory entries (only when item amounts balance against salesBase) ──
+  // IMPORTANT: Inventory entries require a valid GSTLEDGERSOURCE ledger name.
+  // "Sales Accounts" is Tally's built-in GROUP name (parent of all sales ledgers),
+  // NOT a ledger — referencing it as GSTLEDGERSOURCE causes Tally to silently
+  // reject the voucher with CREATED=0 and no error message.
+  // Only include inventory entries when we have a real, specific ledger name
+  // stored in item.tallySalesLedger (e.g. "SS Bottle Sales Local 5%").
+  // Otherwise fall back to pure-accounting format (ledger entries only).
   const validItems = items.filter(item => (item.description || item.name || '').toString().trim());
   const itemAmounts = validItems.map(item => {
     const qty  = +(item.qty || 1);
@@ -151,7 +158,14 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     return +(item.amount || item.basic || (qty * rate)).toFixed(2);
   });
   const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-  const useInventory = validItems.length > 0 && Math.abs(itemsTotal - salesBase) <= 0.01;
+  // useInventory requires: items exist, amounts balance, AND every item has a
+  // specific sales ledger (not the generic "Sales Accounts" group fallback).
+  const allItemsHaveSpecificLedger = validItems.length > 0 &&
+    validItems.every(item => (item.tallySalesLedger || '').toString().trim() &&
+      (item.tallySalesLedger || '').toString().trim().toLowerCase() !== 'sales accounts');
+  const useInventory = validItems.length > 0 &&
+    Math.abs(itemsTotal - salesBase) <= 0.01 &&
+    allItemsHaveSpecificLedger;
 
   const isInterstate = totalIGST > 0;
 
@@ -209,6 +223,10 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   });
 
   // 2. CGST
+  // Tally sign convention: ISDEEMEDPOSITIVE=No (credit) → AMOUNT is POSITIVE.
+  // ISDEEMEDPOSITIVE=Yes (debit) → AMOUNT is NEGATIVE.
+  // Party (debtor) is isDeemedPositive=true → amount=-grandTotal (negative).
+  // Tax and Sales ledgers are isDeemedPositive=false → amount POSITIVE.
   if (totalCGST > 0 && cgstLedger) {
     allLedgerEntries.push({
       ledgerName: cgstLedger,
@@ -241,13 +259,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     });
   }
 
-  // 5. Sales Accounts credit — ALWAYS required as an explicit ledger entry.
-  //
-  //    When useInventory=true, each inventory entry carries an accountingAllocation
-  //    pointing to Sales Accounts for the item amount. However, Tally's XML format
-  //    still requires a top-level ALLLEDGERENTRIES entry for Sales Accounts so that
-  //    sum(allLedgerEntries) = 0. Without it, the voucher is imbalanced.
-  //
+  // 5. Sales Accounts credit.
   //    salesBase = grandTotal - totalTax
   //    When there is no tax, salesBase === grandTotal (correct).
   allLedgerEntries.push({

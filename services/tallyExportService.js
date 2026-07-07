@@ -1253,9 +1253,17 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   }).join('');
 
   const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
-    // Tally Sales Invoice: inventory amounts are POSITIVE (credit side handled by
-    // accounting allocations). The manual Tally export confirms: AMOUNT=+219.05,
-    // and the corresponding ACCOUNTINGALLOCATIONS.LIST AMOUNT is also +219.05.
+    // Guard: if GSTLEDGERSOURCE is "Sales Accounts" (a Tally group, not a ledger),
+    // skip this inventory entry — Tally silently rejects vouchers that
+    // reference a group name as GSTLEDGERSOURCE with CREATED=0 and no error.
+    // "Sales Accounts" is Tally's built-in sales PARENT GROUP, not a ledger.
+    // A voucher with GSTLEDGERSOURCE="Sales Accounts" looks valid but Tally drops it.
+    const gstLedgerSrc = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
+    if (!gstLedgerSrc || gstLedgerSrc.toLowerCase() === 'sales accounts') {
+      // Log this — caller will see pure-accounting fallback was triggered
+      return '';
+    }
+
     const absAmount = Math.abs(item.amount || 0);
     const acctAllocsXml = (item.accountingAllocations || []).map(aa => `
       <ACCOUNTINGALLOCATIONS.LIST>
@@ -1265,8 +1273,6 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
         <AMOUNT>${Math.abs(aa.amount || 0).toFixed(2)}</AMOUNT>
       </ACCOUNTINGALLOCATIONS.LIST>`).join('');
 
-    // Resolve GST ledger source: use stored field, or fall back to first accountingAllocation ledger
-    const gstLedgerSrc = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
     const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
     const gstHsnName   = (item.gstHsnName || '').trim();
 
@@ -1564,7 +1570,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const guidTag  = existingByPO?.guid ? `<GUID>${esc(existingByPO.guid)}</GUID>`
                          : inv.tallyGuid      ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
           const cappedDate = capTallyDate(tv.date || freshToday, periodEnd);
-          LOG(`Invoice ${inv.invoiceNo}: PRIMARY path — stored tallyVoucher (action=${action} date=${cappedDate})`);
+          // Diagnostic: log whether inventory entries will be included or stripped
+          const hasInventory = (tv.allInventoryEntries || []).length > 0;
+          const willUseInventory = hasInventory && (tv.allInventoryEntries || []).some(
+            item => {
+              const src = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
+              return src && src.toLowerCase() !== 'sales accounts';
+            }
+          );
+          LOG(`Invoice ${inv.invoiceNo}: PRIMARY path — stored tallyVoucher (action=${action} date=${cappedDate} inventoryEntries=${hasInventory ? (tv.allInventoryEntries||[]).length : 0} willUseInventory=${willUseInventory})`);
           voucherXml = serializeTallyVoucher({ ...tv, date: cappedDate, effectiveDate: cappedDate }, action, guidTag);
 
         } else {
