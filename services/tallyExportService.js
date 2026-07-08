@@ -1233,32 +1233,28 @@ function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
 function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const v = tallyVoucher;
 
-  // ── Determine whether any inventory entries will be emitted ──────────────
-  // When inventory entries ARE present, the "Sales Accounts" ledger entry must
-  // be OMITTED from LEDGERENTRIES.LIST. Tally books the sales value implicitly
-  // through the inventory entries' ACCOUNTINGALLOCATIONS (or its own internal
-  // logic). Keeping Sales Accounts in both LEDGERENTRIES and ALLINVENTORYENTRIES
-  // causes a double-booking that Tally silently rejects with EXCEPTIONS=1 and
-  // zero diagnostic tags — the most confusing failure mode possible.
-  //
-  // ADDITIONAL RULE: Only emit inventory entries that have a SPECIFIC accounting
-  // ledger (not "Sales Accounts" group). An inventory entry with no
-  // ACCOUNTINGALLOCATIONS, or with "Sales Accounts" as its ledger, causes Tally
-  // to try to book through a group name → silent EXCEPTIONS=1.
-  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
-    if (!item.stockItemName) return false;
-    const acctLedger = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
-    // Only include if the accounting ledger is a real specific ledger (not a group name)
-    return acctLedger && acctLedger.toLowerCase() !== 'sales accounts';
-  });
+  // ── Inventory entries: include ALL items so item name always shows in Tally ─
+  // Items with a specific sales ledger → emit with ACCOUNTINGALLOCATIONS (GST-enabled)
+  // Items with only 'Sales Accounts' → emit without ACCOUNTINGALLOCATIONS
+  //   (Tally shows item name in the voucher; Sales Accounts stays in LEDGERENTRIES
+  //    for the accounting balance — no double-booking, no EXCEPTIONS)
+  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => !!item.stockItemName);
   const hasInventoryEntries = validInventoryEntries.length > 0;
+  // When ALL items use 'Sales Accounts' (no specific ledger), keep Sales Accounts
+  // in LEDGERENTRIES for the credit side. When at least one item has a specific
+  // ledger, Sales Accounts is omitted from LEDGERENTRIES (handled by ACCOUNTINGALLOCATIONS).
+  const allItemsUseSalesAccounts = validInventoryEntries.every(item => {
+    const acct = (item.accountingAllocations?.[0]?.ledgerName || '').trim().toLowerCase();
+    return !acct || acct === 'sales accounts';
+  });
 
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
-    // When inventory entries are present, skip the Sales Accounts ledger entry.
-    // The sales value is carried by the inventory entries, not ledger entries.
-    if (hasInventoryEntries) {
+    // Only skip Sales Accounts from LEDGERENTRIES when items have specific ledgers
+    // (those items carry the credit via ACCOUNTINGALLOCATIONS).
+    // When items use Sales Accounts (no specific ledger), keep it in LEDGERENTRIES.
+    if (hasInventoryEntries && !allItemsUseSalesAccounts) {
       const name = (entry.ledgerName || '').toLowerCase().trim();
-      if (name === 'sales accounts') return '';   // skip — handled by inventory entries
+      if (name === 'sales accounts') return '';   // carried by inventory ACCOUNTINGALLOCATIONS
     }
 
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
@@ -1284,15 +1280,15 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     const acctLedger   = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
     const absAmount    = Math.abs(item.amount || 0);
 
-    if (!item.stockItemName) return ''; // skip blank items
+    if (!item.stockItemName) return '';
 
     const hasSpecificLedger = acctLedger && acctLedger.toLowerCase() !== 'sales accounts';
     const hasSpecificGst    = gstLedgerSrc && gstLedgerSrc.toLowerCase() !== 'sales accounts';
     const hsnLedgerSrc      = (item.hsnLedgerSource || gstLedgerSrc).trim();
     const gstHsnName        = (item.gstHsnName || '').trim();
 
-    // Only include ACCOUNTINGALLOCATIONS when we have a real specific ledger
-    // (not 'Sales Accounts' group — that causes EXCEPTIONS=1)
+    // ACCOUNTINGALLOCATIONS: only when specific ledger exists
+    // (Sales Accounts group → omit; credit stays in LEDGERENTRIES)
     const acctAllocsXml = hasSpecificLedger ? `
       <ACCOUNTINGALLOCATIONS.LIST>
         <LEDGERNAME>${esc(acctLedger)}</LEDGERNAME>
@@ -1765,7 +1761,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             // Only emit inventory entry when salesLedger is a specific ledger,
             // NOT 'Sales Accounts' — Tally rejects inventory entries with group names
             const hasSpecificLedger = salesLedger && salesLedger.toLowerCase() !== 'sales accounts';
-            if (!hasSpecificLedger) return ''; // skip — ledger entries handle this
+            // Always emit the item (so item name shows in Tally).
+            // Only include GST source tags when we have a specific ledger.
 
             LOG(`Invoice ${inv.invoiceNo}: item "${itemName}" → salesLedger="${salesLedger}" hsn="${itemHSN}" gst=${itemGSTRate}%`);
             
@@ -1778,24 +1775,32 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <AMOUNT>${itemAmount.toFixed(2)}</AMOUNT>
   <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
   <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
-  <GSTSOURCETYPE>Ledger</GSTSOURCETYPE>
+  ${hasSpecificLedger ? `<GSTSOURCETYPE>Ledger</GSTSOURCETYPE>
   <GSTLEDGERSOURCE>${esc(salesLedger)}</GSTLEDGERSOURCE>
   <HSNSOURCETYPE>Ledger</HSNSOURCETYPE>
-  <HSNLEDGERSOURCE>${esc(salesLedger)}</HSNLEDGERSOURCE>
+  <HSNLEDGERSOURCE>${esc(salesLedger)}</HSNLEDGERSOURCE>` : ''}
   <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
   <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
   ${itemHSN ? `<GSTHSNNAME>${esc(itemHSN)}</GSTHSNNAME>` : ''}
-  <ACCOUNTINGALLOCATIONS.LIST>
+  ${hasSpecificLedger ? `<ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>${esc(salesLedger)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <AMOUNT>${itemAmount.toFixed(2)}</AMOUNT>
-  </ACCOUNTINGALLOCATIONS.LIST>
+  </ACCOUNTINGALLOCATIONS.LIST>` : ''}
 </ALLINVENTORYENTRIES.LIST>`;
           }).join('') : '';
 
-          const hasItems = inventoryEntries.length > 0;
-          const salesAccLedgerEntry = hasItems ? '' : salesAccEntry;
+          // hasItems: true when at least one inventory entry was emitted (non-empty string)
+          const hasItems = inventoryEntries.trim().length > 0;
+          // Keep Sales Accounts in ledger entries when items don't have specific ledgers
+          // (Sales Accounts handles the credit side; inventory entries just show the item names)
+          const allLegacyItemsUseSalesAccounts = useInventory && rawItems.every(item => {
+            const im = itemMasterMap.get((item.description || item.name || '').trim());
+            const ledger = resolveSalesLedger(tallySalesLedgers, (item.description || item.name || '').trim(), im?.gst || 0, im?.tallySalesLedger || null, totalIGST > 0);
+            return !ledger || ledger.toLowerCase() === 'sales accounts';
+          });
+          const salesAccLedgerEntry = (hasItems && !allLegacyItemsUseSalesAccounts) ? '' : salesAccEntry;
 
           const billName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
           const billAddr  = (inv.billToAddress || inv.partyAddress || '').trim();

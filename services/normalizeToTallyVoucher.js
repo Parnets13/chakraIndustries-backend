@@ -314,12 +314,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const origDateFmt = invoiceData.invoiceDate
     ? new Date(invoiceData.invoiceDate).toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'numeric' })
     : '';
-  const itemSummary = validItems.map(i => `${(i.description||i.name||'')} x${i.qty||1}`).join(', ');
   const narration = [
     `ERP Inv: ${invoiceNo}`,
     origDateFmt ? `Invoice Date: ${origDateFmt}` : null,
-    itemSummary || null,
-    invoiceData.purchaseOrderRef ? `PO: ${invoiceData.purchaseOrderRef}` : null,
     invoiceData.notes || null,
   ].filter(Boolean).join(' | ');
 
