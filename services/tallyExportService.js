@@ -1295,6 +1295,40 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
 
+  const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
+  const billToAddress = (v.billToAddress || '').trim();
+  const billToCity    = (v.billToCity    || '').trim();
+  const billToState   = (v.billToState   || '').trim();
+  const billToGST     = (v.billToGST     || '').trim();
+
+  const billAddrLines = [billToAddress, [billToCity, billToState].filter(Boolean).join(', ')].filter(Boolean);
+  const billToXml = (billToName || billToAddress) ? `
+  <ADDRESS.LIST TYPE="Address">
+    <ADDRESS>${esc(billToName)}</ADDRESS>
+    ${billAddrLines.map(l => `<ADDRESS>${esc(l)}</ADDRESS>`).join('\n    ')}
+    ${billToGST ? `<ADDRESS>GSTIN: ${esc(billToGST)}</ADDRESS>` : ''}
+  </ADDRESS.LIST>` : '';
+
+  const shipToName    = (v.shipToName    || v.partyLedgerName || '').trim();
+  const shipToAddress = (v.shipToAddress || billToAddress).trim();
+  const shipToCity    = (v.shipToCity    || billToCity).trim();
+  const shipToState   = (v.shipToState   || billToState).trim();
+  const shipToGST     = (v.shipToGST     || billToGST).trim();
+
+  const shipToXml = (shipToName || shipToAddress) ? `
+  <BASICBASEPARTYDETAILS.LIST>
+    <BASICBUYERNAME>${esc(shipToName)}</BASICBUYERNAME>
+    <BASICBUYERADDRESS.LIST>
+      <BASICBUYERADDRESS>${esc(shipToAddress)}</BASICBUYERADDRESS>
+      ${shipToCity  ? `<BASICBUYERADDRESS>${esc(shipToCity)}</BASICBUYERADDRESS>` : ''}
+      ${shipToState ? `<BASICBUYERADDRESS>${esc(shipToState)}</BASICBUYERADDRESS>` : ''}
+    </BASICBUYERADDRESS.LIST>
+    ${shipToState ? `<BASICBUYERSTATE>${esc(shipToState)}</BASICBUYERSTATE>` : ''}
+    ${shipToGST   ? `<BASICBUYERGSTIN>${esc(shipToGST)}</BASICBUYERGSTIN>` : ''}
+  </BASICBASEPARTYDETAILS.LIST>` : '';
+
+  const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
+
   return `
 <VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
   <DATE>${esc(v.date || '')}</DATE>
@@ -1305,7 +1339,8 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
-  <NARRATION>${esc(v.narration || '')}</NARRATION>${ledgerEntriesXml}${inventoryEntriesXml}
+  ${poDateXml}
+  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
 </VOUCHER>`;
 }
 
@@ -1662,7 +1697,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             return +(item.amount || item.basic || (qty * rate)).toFixed(2);
           });
           const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-          const useInventory = rawItems.length > 0 && Math.abs(itemsTotal - salesBase) <= 0.01;
+          const useInventory = rawItems.length > 0 && Math.abs(itemsTotal - salesBase) <= 0.10;
           if (!useInventory && rawItems.length > 0) {
             LOG(`Invoice ${inv.invoiceNo}: items total ${itemsTotal} ≠ salesBase ${salesBase} — falling back to pure-accounting format`);
           }

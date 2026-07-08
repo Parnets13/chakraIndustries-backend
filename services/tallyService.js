@@ -921,6 +921,40 @@ function buildSingleVoucherXml(inv, cfg) {
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
 
+  const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
+  const billToAddress = (v.billToAddress || '').trim();
+  const billToCity    = (v.billToCity    || '').trim();
+  const billToState   = (v.billToState   || '').trim();
+  const billToGST     = (v.billToGST     || '').trim();
+
+  const billAddrLines = [billToAddress, [billToCity, billToState].filter(Boolean).join(', ')].filter(Boolean);
+  const billToXml = (billToName || billToAddress) ? `
+  <ADDRESS.LIST TYPE="Address">
+    <ADDRESS>${esc(billToName)}</ADDRESS>
+    ${billAddrLines.map(l => `<ADDRESS>${esc(l)}</ADDRESS>`).join('\n    ')}
+    ${billToGST ? `<ADDRESS>GSTIN: ${esc(billToGST)}</ADDRESS>` : ''}
+  </ADDRESS.LIST>` : '';
+
+  const shipToName    = (v.shipToName    || v.partyLedgerName || '').trim();
+  const shipToAddress = (v.shipToAddress || billToAddress).trim();
+  const shipToCity    = (v.shipToCity    || billToCity).trim();
+  const shipToState   = (v.shipToState   || billToState).trim();
+  const shipToGST     = (v.shipToGST     || billToGST).trim();
+
+  const shipToXml = (shipToName || shipToAddress) ? `
+  <BASICBASEPARTYDETAILS.LIST>
+    <BASICBUYERNAME>${esc(shipToName)}</BASICBUYERNAME>
+    <BASICBUYERADDRESS.LIST>
+      <BASICBUYERADDRESS>${esc(shipToAddress)}</BASICBUYERADDRESS>
+      ${shipToCity  ? `<BASICBUYERADDRESS>${esc(shipToCity)}</BASICBUYERADDRESS>` : ''}
+      ${shipToState ? `<BASICBUYERADDRESS>${esc(shipToState)}</BASICBUYERADDRESS>` : ''}
+    </BASICBUYERADDRESS.LIST>
+    ${shipToState ? `<BASICBUYERSTATE>${esc(shipToState)}</BASICBUYERSTATE>` : ''}
+    ${shipToGST   ? `<BASICBUYERGSTIN>${esc(shipToGST)}</BASICBUYERGSTIN>` : ''}
+  </BASICBASEPARTYDETAILS.LIST>` : '';
+
+  const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
+
   return `
 <VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
   <DATE>${esc(v.date || '')}</DATE>
@@ -931,7 +965,8 @@ function buildSingleVoucherXml(inv, cfg) {
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
-  <NARRATION>${esc(v.narration || '')}</NARRATION>${ledgerEntriesXml}${inventoryEntriesXml}
+  ${poDateXml}
+  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
 </VOUCHER>`;
 }
 

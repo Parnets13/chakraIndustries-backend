@@ -164,7 +164,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     validItems.every(item => (item.tallySalesLedger || '').toString().trim() &&
       (item.tallySalesLedger || '').toString().trim().toLowerCase() !== 'sales accounts');
   const useInventory = validItems.length > 0 &&
-    Math.abs(itemsTotal - salesBase) <= 0.01 &&
+    Math.abs(itemsTotal - salesBase) <= 0.10 &&
     allItemsHaveSpecificLedger;
 
   const isInterstate = totalIGST > 0;
@@ -315,6 +315,31 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   ].filter(Boolean).join(' | ');
 
   // ── Assemble sub-document ─────────────────────────────────────────────────
+  // ── PO Date → YYYYMMDD ────────────────────────────────────────────────────
+  const rawPoDate = invoiceData.poDate || '';
+  const poDateTally = rawPoDate ? (toTallyDate(rawPoDate) || '') : '';
+
+  // ── Ship To fields ────────────────────────────────────────────────────────
+  const shipToName    = (invoiceData.shipToName    || invoiceData.shipToMailingName || '').toString().trim();
+  const shipToAddress = (invoiceData.shipToAddress || '').toString().trim();
+  const shipToCity    = (invoiceData.shipToCity    || '').toString().trim();
+  const shipToState   = (invoiceData.shipToState   || '').toString().trim();
+  const shipToGST     = (invoiceData.shipToGST     || '').toString().trim();
+
+  // ── Bill To fields ────────────────────────────────────────────────────────
+  const billToName    = (invoiceData.billToName    || invoiceData.billToMailingName || partyLedgerName).toString().trim();
+  const billToAddress = (invoiceData.billToAddress || invoiceData.partyAddress || '').toString().trim();
+  const billToCity    = (invoiceData.billToCity    || invoiceData.partyCity    || '').toString().trim();
+  const billToState   = (invoiceData.billToState   || invoiceData.partyState   || '').toString().trim();
+  const billToGST     = (invoiceData.billToGST     || invoiceData.partyGST     || '').toString().trim();
+
+  console.log(`[normalizeToTallyVoucher] DEBUG extra fields for invoice ${invoiceNo}`);
+  console.log(`  poDate       : "${rawPoDate}" → tally="${poDateTally}"`);
+  console.log(`  shipToName   : "${shipToName}"`);
+  console.log(`  shipToAddress: "${shipToAddress}"`);
+  console.log(`  billToName   : "${billToName}"`);
+  console.log(`  buyersOrderNo: "${(invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '')}"`);
+
   return {
     voucherType:      'Sales',
     voucherNumber:    invoiceNo,
@@ -323,7 +348,20 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     partyLedgerName,
     isinvoice:        true,
     buyersOrderNo:    (invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '').toString().trim(),
+    poDate:           poDateTally,
     narration,
+    // Ship To — written to BASICBASEPARTYDETAILS.LIST in Tally XML
+    shipToName,
+    shipToAddress,
+    shipToCity,
+    shipToState,
+    shipToGST,
+    // Bill To — written to ADDRESS.LIST in Tally XML
+    billToName,
+    billToAddress,
+    billToCity,
+    billToState,
+    billToGST,
     allLedgerEntries,
     allInventoryEntries,
     // Snapshot amounts — stored so export doesn't recompute

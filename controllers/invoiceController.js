@@ -217,6 +217,22 @@ export const bulkUpload = async (req, res) => {
     const cfg = await TallyConfig.findOne({}, 'tallyPeriodEnd').lean();
     const periodEnd = cfg?.tallyPeriodEnd || null;
 
+    // ── Pre-fetch ItemMaster for all item names across all uploaded rows ──────
+    // Avoids per-row DB queries and ensures tallySalesLedger + hsn are stamped
+    // on every item so normalizeToTallyVoucher can emit ALLINVENTORYENTRIES.
+    const allItemNames = [...new Set(
+      invoices.flatMap(inv => (inv.items || []).map(i => (i.description || i.name || '').trim()).filter(Boolean))
+    )];
+    const itemMasterDocs = allItemNames.length
+      ? await ItemMaster.find({ name: { $in: allItemNames } }, 'name hsn tallySalesLedger').lean()
+      : [];
+    const itemMasterMap = new Map(itemMasterDocs.map(m => [m.name, m]));
+    console.log(`[bulkUpload] DEBUG: ${allItemNames.length} unique item names, ${itemMasterDocs.length} found in ItemMaster`);
+    allItemNames.forEach(n => {
+      const im = itemMasterMap.get(n);
+      console.log(`[bulkUpload] DEBUG item "${n}": hsn="${im?.hsn || ''}" tallySalesLedger="${im?.tallySalesLedger || ''}"`);
+    });
+
     // Build all docs in memory — no per-row DB calls
     const docs   = [];
     const errors = [];
@@ -237,6 +253,21 @@ export const bulkUpload = async (req, res) => {
           status:      rest.status || 'Draft',
           invoiceType: items.length > 1 ? 'multi' : 'single',
         };
+        // Enrich items with ItemMaster tallySalesLedger + hsn using the pre-fetched map.
+        // This ensures normalizeToTallyVoucher can populate ALLINVENTORYENTRIES
+        // (item name, HSN, unit rate) in the Tally voucher sub-document.
+        const enrichedItems = (invoiceData.items || []).map(item => {
+          const name = (item.description || item.name || '').trim();
+          const im   = itemMasterMap.get(name);
+          return {
+            ...item,
+            hsn:              item.hsn              || im?.hsn              || '',
+            tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || '',
+          };
+        });
+        console.log(`[bulkUpload] DEBUG row ${i+1}: invoiceNo=${invoiceNo} partyName="${invoiceData.partyName}" purchaseOrderRef="${invoiceData.purchaseOrderRef}" poDate="${invoiceData.poDate}" shipToName="${invoiceData.shipToName}" shipToAddress="${invoiceData.shipToAddress}" items=${enrichedItems.length}`);
+        enrichedItems.forEach((it, j) => console.log(`[bulkUpload] DEBUG  item[${j}]: "${it.description}" qty=${it.qty} rate=${it.rate} cgst=${it.cgst} sgst=${it.sgst} igst=${it.igst} tallySalesLedger="${it.tallySalesLedger}"`));
+        invoiceData.items = enrichedItems;
         // Normalize to Tally-native structure at write time.
         // If it fails (e.g. missing partyName), exclude row with a reason.
         try {

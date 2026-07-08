@@ -52,7 +52,21 @@ const tallyVoucherSchema = new mongoose.Schema({
   partyLedgerName:     { type: String, required: true },
   isinvoice:           { type: Boolean, default: true },
   buyersOrderNo:       { type: String, default: '' },
+  // PO Date — YYYYMMDD format, written to BASICORDERDATE in Tally XML
+  poDate:              { type: String, default: '' },
   narration:           { type: String, default: '' },
+  // Ship To fields — written to BASICBASEPARTYDETAILS.LIST in Tally XML
+  shipToName:          { type: String, default: '' },
+  shipToAddress:       { type: String, default: '' },
+  shipToCity:          { type: String, default: '' },
+  shipToState:         { type: String, default: '' },
+  shipToGST:           { type: String, default: '' },
+  // Bill To fields — written to ADDRESS.LIST in Tally XML
+  billToName:          { type: String, default: '' },
+  billToAddress:       { type: String, default: '' },
+  billToCity:          { type: String, default: '' },
+  billToState:         { type: String, default: '' },
+  billToGST:           { type: String, default: '' },
   allLedgerEntries:    { type: [ledgerEntrySchema],    default: [] },
   allInventoryEntries: { type: [inventoryEntrySchema], default: [] },
   // Cached computed amounts — stored to avoid recomputation on export
