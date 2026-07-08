@@ -23,9 +23,8 @@ async function enrichItemsFromItemMaster(items) {
     const im   = masterMap.get(name);
     return {
       ...item,
-      // Only override hsn/tallySalesLedger if ItemMaster has them and item doesn't
       hsn:             item.hsn             || im?.hsn             || '',
-      tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || '',
+      tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || name,
     };
   });
 }
@@ -308,10 +307,16 @@ export const bulkUpload = async (req, res) => {
         const enrichedItems = (invoiceData.items || []).map(item => {
           const name = (item.description || item.name || '').trim();
           const im   = itemMasterMap.get(name);
+          // tallySalesLedger priority:
+          // 1. What's already on the item (from previous upload)
+          // 2. What's stored in ItemMaster (manually set)
+          // 3. The item description itself — use it directly as the Tally stock item name
+          //    so item name always appears in Tally without manual ledger setup
+          const tallySalesLedger = item.tallySalesLedger || im?.tallySalesLedger || name;
           return {
             ...item,
-            hsn:              item.hsn              || im?.hsn              || '',
-            tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || '',
+            hsn:             item.hsn || im?.hsn || '',
+            tallySalesLedger,
           };
         });
         console.log(`[bulkUpload] DEBUG row ${i+1}: invoiceNo=${invoiceNo} partyName="${invoiceData.partyName}" purchaseOrderRef="${invoiceData.purchaseOrderRef}" poDate="${invoiceData.poDate}" shipToName="${invoiceData.shipToName}" shipToAddress="${invoiceData.shipToAddress}" items=${enrichedItems.length}`);

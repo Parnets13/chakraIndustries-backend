@@ -82,7 +82,7 @@ async function main() {
           return {
             ...item,
             hsn:              item.hsn              || im?.hsn              || '',
-            tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || '',
+            tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || name,
           };
         });
 
