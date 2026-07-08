@@ -1479,17 +1479,25 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     )];
 
     // ── CRITICAL: Auto-create item-specific sales ledgers ─────────────────────
-    // GST-enabled vouchers require each stock item to have a dedicated sales ledger
-    // (e.g., "SS Bottle Sales Local 5%", not generic "Sales Accounts").
-    // Fetch ItemMaster records to get HSN and GST rate for each item, then build
-    // the ledger names following Tally's naming pattern.
+    // GST-enabled vouchers require each stock item to have a dedicated sales ledger.
+    // Collect the ACTUAL tallySalesLedger names used in each invoice item —
+    // these are the exact names sent in GSTLEDGERSOURCE and must exist in Tally.
+    const salesLedgerNames = new Set(['Sales Accounts']);  // fallback always created
+
+    for (const inv of invoices) {
+      for (const item of (inv.items || [])) {
+        const ledger = (item.tallySalesLedger || '').trim();
+        if (ledger && ledger.toLowerCase() !== 'sales accounts') {
+          salesLedgerNames.add(ledger);
+        }
+      }
+    }
+
+    // Also add computed names from ItemMaster for items without a stored ledger
     const itemMasters = await ItemMaster.find({ name: { $in: stockNames } }).lean();
-    const salesLedgerNames = new Set(['Sales Accounts']);  // fallback ledger always created
-    
     for (const im of itemMasters) {
       if (im.gst > 0) {
         const baseName = im.name.replace(/\d+ML|\d+L|\d+G/gi, '').trim();
-        // Create both Local and Interstate variants — invoices may use either
         salesLedgerNames.add(`${baseName} Sales Local ${im.gst}%`);
         salesLedgerNames.add(`${baseName} Sales Interstate`);
       }
