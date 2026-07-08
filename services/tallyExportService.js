@@ -1528,8 +1528,14 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // These are the ACTUAL ledger names as they exist in Tally (or as we compute them).
       // ACTION="Create" — Tally skips any that already exist.
       // Only create ledgers that we didn't find in Tally's live ledger list.
+      //
+      // CRITICAL: Do NOT set AFFECTSSTOCK=Yes on sales ledgers.
+      // AFFECTSSTOCK=Yes tells Tally this ledger moves inventory, which causes
+      // EXCEPTIONS=1 (silent) when the voucher ALSO has ALLINVENTORYENTRIES.LIST
+      // that already track the stock movement. Double-booking = silent rejection.
+      // Pure accounting sales ledgers (AFFECTSSTOCK=No, the default) are correct.
       ...(tallySalesLedgers.length === 0 ? [...salesLedgerNames].map(name =>
-        `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sales Accounts</PARENT><ISREVENUE>Yes</ISREVENUE><AFFECTSSTOCK>Yes</AFFECTSSTOCK></LEDGER>`
+        `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sales Accounts</PARENT><ISREVENUE>Yes</ISREVENUE></LEDGER>`
       ) : []),
     ].join('');
 
@@ -1564,24 +1570,44 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // Cap all dates to period end.
     let periodEnd = await fetchTallyPeriodEnd(cfg);
     if (!periodEnd) {
-      // Fallback: use the last day of the current financial year quarter
-      // as a conservative cap — better than sending a date Tally will reject.
-      // Save it to TallyConfig so subsequent runs use the same value.
+      // Fallback: use a cached value from TallyConfig if available.
+      // Do NOT fall back to "yesterday" — that silently caps all invoice dates
+      // to the wrong date and causes EXCEPTIONS=1 with no LINEERROR in Tally.
+      // Better to send the actual invoice date and let Tally reject explicitly
+      // (it will then show a LINEERROR we can read) than silently cap to a wrong date.
       const saved = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
-      if (saved?.tallyPeriodEnd) {
-        periodEnd = saved.tallyPeriodEnd;
+      const cachedPeriodEnd = saved?.tallyPeriodEnd;
+      // Guard against a stale "yesterday" cached value (written by the old fallback logic).
+      // A valid Tally period end is always a financial year end:
+      //   March 31 (MMDD=0331) or sometimes Sep 30 (0930).
+      // Any cached value that is within the last 30 days is almost certainly wrong.
+      const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      const thirtyDaysAgoStr = `${thirtyDaysAgo.getFullYear()}${String(thirtyDaysAgo.getMonth()+1).padStart(2,'0')}${String(thirtyDaysAgo.getDate()).padStart(2,'0')}`;
+      if (cachedPeriodEnd && cachedPeriodEnd < thirtyDaysAgoStr) {
+        // Value is more than 30 days ago — could be a stale financial-year-end or wrong "yesterday" value
+        // Only use it if it looks like a genuine FY end (MMDD = 0331 or 0930 or 1231)
+        const mmdd = cachedPeriodEnd.slice(4); // MMDD portion
+        if (mmdd === '0331' || mmdd === '0930' || mmdd === '1231') {
+          periodEnd = cachedPeriodEnd;
+          LOG(`exportSalesInvoices: using cached periodEnd from DB: ${periodEnd}`);
+        } else {
+          // Looks like a wrong "yesterday"-style cached value — clear it and don't cap
+          LOG(`exportSalesInvoices: cached tallyPeriodEnd "${cachedPeriodEnd}" looks stale/wrong (not a FY end) — clearing and using actual invoice dates`);
+          await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
+          periodEnd = null;
+        }
+      } else if (cachedPeriodEnd) {
+        periodEnd = cachedPeriodEnd;
         LOG(`exportSalesInvoices: using cached periodEnd from DB: ${periodEnd}`);
       } else {
-        // Last resort: use today minus 1 day (safe fallback)
-        const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
-        periodEnd = `${yesterday.getFullYear()}${String(yesterday.getMonth()+1).padStart(2,'0')}${String(yesterday.getDate()).padStart(2,'0')}`;
-        LOG(`exportSalesInvoices: ⚠ periodEnd unknown — using yesterday ${periodEnd} as safe cap`);
+        periodEnd = null; // No capping — use actual invoice dates
+        LOG(`exportSalesInvoices: ⚠ periodEnd unknown — sending actual invoice dates (no capping). If Tally rejects, open Tally Settings → Test Connection to cache the period end.`);
       }
     } else {
       // Cache the period end in TallyConfig for fallback use
       await TallyConfig.findOneAndUpdate({}, { tallyPeriodEnd: periodEnd }, { sort: { _id: 1 } });
     }
-    LOG(`exportSalesInvoices: voucher dates will be capped to ${periodEnd}`);
+    LOG(`exportSalesInvoices: voucher dates will be capped to ${periodEnd || '(none — actual dates will be used)'}`);
 
     const failedItems  = [];
     const skippedItems = [];   // invoices skipped due to validation failure or dedup
@@ -1902,6 +1928,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       }
       const resp   = await postXml(cfg, singleEnvelope, 60000);
       const result = parseResponse(resp, `Sales Invoices batch ${batchNo}/${batchTot}`);
+
+      // If this batch gets EXCEPTIONS=1 and it's not the first (already logged), log the XML too
+      // so we can diagnose which invoice is different. Only log on first failure to avoid log spam.
+      if (!result.ok && b > 0 && batchErrors.length === 0) {
+        LOG(`Sales DEBUG — first FAILING batch (${batchNo}/${batchTot}) full XML:\n${singleEnvelope}`);
+      }
 
       // ── SAFEGUARD: Detect "silent duplicate" — Tally returns all-zero when
       // ACTION="Create" is sent for a voucher number that already exists in Tally.
