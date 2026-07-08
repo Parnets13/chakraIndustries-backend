@@ -1233,7 +1233,34 @@ function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
 function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const v = tallyVoucher;
 
+  // ── Determine whether any inventory entries will be emitted ──────────────
+  // When inventory entries ARE present, the "Sales Accounts" ledger entry must
+  // be OMITTED from LEDGERENTRIES.LIST. Tally books the sales value implicitly
+  // through the inventory entries' ACCOUNTINGALLOCATIONS (or its own internal
+  // logic). Keeping Sales Accounts in both LEDGERENTRIES and ALLINVENTORYENTRIES
+  // causes a double-booking that Tally silently rejects with EXCEPTIONS=1 and
+  // zero diagnostic tags — the most confusing failure mode possible.
+  //
+  // ADDITIONAL RULE: Only emit inventory entries that have a SPECIFIC accounting
+  // ledger (not "Sales Accounts" group). An inventory entry with no
+  // ACCOUNTINGALLOCATIONS, or with "Sales Accounts" as its ledger, causes Tally
+  // to try to book through a group name → silent EXCEPTIONS=1.
+  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
+    if (!item.stockItemName) return false;
+    const acctLedger = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
+    // Only include if the accounting ledger is a real specific ledger (not a group name)
+    return acctLedger && acctLedger.toLowerCase() !== 'sales accounts';
+  });
+  const hasInventoryEntries = validInventoryEntries.length > 0;
+
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
+    // When inventory entries are present, skip the Sales Accounts ledger entry.
+    // The sales value is carried by the inventory entries, not ledger entries.
+    if (hasInventoryEntries) {
+      const name = (entry.ledgerName || '').toLowerCase().trim();
+      if (name === 'sales accounts') return '';   // skip — handled by inventory entries
+    }
+
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
       <BILLALLOCATIONS.LIST>
         <NAME>${esc(ba.name || '')}</NAME>
@@ -1252,7 +1279,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   </LEDGERENTRIES.LIST>`;
   }).join('');
 
-  const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
+  const inventoryEntriesXml = validInventoryEntries.map(item => {
     const gstLedgerSrc = (item.gstLedgerSource || '').trim();
     const acctLedger   = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
     const absAmount    = Math.abs(item.amount || 0);
@@ -1675,8 +1702,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const narration = [
             `ERP Inv: ${inv.invoiceNo}`,
             origDateFmt ? `Original Invoice Date: ${origDateFmt}` : null,
-            (inv.items||[]).length > 0 ? (inv.items||[]).map(i=>`${i.description||i.name||''} x${i.qty||1}`).join(', ') : null,
-            inv.purchaseOrderRef ? `PO: ${inv.purchaseOrderRef}` : null,
             inv.notes || null,
           ].filter(Boolean).join(' | ');
 
@@ -1815,6 +1840,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <PARTYLEDGERNAME>${esc(inv.partyName)}</PARTYLEDGERNAME>
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(inv.buyersOrderNo || inv.purchaseOrderRef || '')}</BUYERSORDERNO>
+  ${inv.poDate || inv.orderDate ? `<BASICORDERDATE>${esc(td(inv.poDate || inv.orderDate))}</BASICORDERDATE>` : ''}
   <NARRATION>${esc(narration)}</NARRATION>
   ${billToXml}
   ${shipToXml}
@@ -2119,6 +2145,10 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
 </ALLINVENTORYENTRIES.LIST>`;
       }).join('');
 
+      // PO date for Tally BASICORDERDATE field (YYYYMMDD format)
+      const poOrderDate = td(po.orderDate || po.poDate || po.createdAt);
+      const poOrderDateXml = poOrderDate ? `<BASICORDERDATE>${esc(poOrderDate)}</BASICORDERDATE>` : '';
+
       return `
 <VOUCHER VCHTYPE="Purchase" ACTION="${action}">
   <DATE>${voucherDate}</DATE>
@@ -2128,7 +2158,8 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
   <VOUCHERNUMBER>${esc(po.poId)}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(vendorName)}</PARTYLEDGERNAME>
   <BUYERSORDERNO>${esc(po.poId)}</BUYERSORDERNO>
-  <NARRATION>PO: ${esc(po.poId)} | ${esc(vendorName)}</NARRATION>
+  ${poOrderDateXml}
+  <NARRATION></NARRATION>
   <ISINVOICE>Yes</ISINVOICE>
   <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(vendorName)}</LEDGERNAME>

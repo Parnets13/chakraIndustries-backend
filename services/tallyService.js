@@ -869,7 +869,24 @@ function buildSingleVoucherXml(inv, cfg) {
   const action  = inv.tallyGuid ? 'Alter' : 'Create';
   const guidTag = inv.tallyGuid ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
 
+  // ── Only emit inventory entries that have a specific accounting ledger ────
+  // "Sales Accounts" is a Tally GROUP (parent), not a ledger. Referencing it as
+  // ACCOUNTINGALLOCATIONS.LEDGERNAME causes silent EXCEPTIONS=1 with no error tags.
+  // Filter those out here and fall back to pure-accounting format for those items.
+  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
+    if (!item.stockItemName) return false;
+    const acctLedger = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
+    return acctLedger && acctLedger.toLowerCase() !== 'sales accounts';
+  });
+  const hasInventoryEntries = validInventoryEntries.length > 0;
+
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
+    // When inventory entries are present, omit the Sales Accounts ledger entry to
+    // prevent double-booking (inventory entries carry the sales value).
+    if (hasInventoryEntries) {
+      const name = (entry.ledgerName || '').toLowerCase().trim();
+      if (name === 'sales accounts') return '';
+    }
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
     <BILLALLOCATIONS.LIST>
       <NAME>${esc(ba.name || '')}</NAME>
@@ -887,7 +904,7 @@ function buildSingleVoucherXml(inv, cfg) {
   </LEDGERENTRIES.LIST>`;
   }).join('');
 
-  const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
+  const inventoryEntriesXml = validInventoryEntries.map(item => {
     const absAmount = Math.abs(item.amount || 0);
     const acctAllocsXml = (item.accountingAllocations || []).map(aa => `
       <ACCOUNTINGALLOCATIONS.LIST>
