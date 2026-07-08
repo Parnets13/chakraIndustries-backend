@@ -1254,27 +1254,25 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
 
   const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
     const gstLedgerSrc = (item.gstLedgerSource || '').trim();
-    const acctLedger = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
+    const acctLedger   = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
+    const absAmount    = Math.abs(item.amount || 0);
 
-    // Only include inventory entry when the accounting ledger is a specific ledger,
-    // NOT 'Sales Accounts' (which is a Tally group, not a ledger — causes EXCEPTIONS=1)
-    const effectiveLedger = gstLedgerSrc || acctLedger;
-    if (!effectiveLedger || effectiveLedger.toLowerCase() === 'sales accounts') {
-      return ''; // skip — pure accounting format handles this via LEDGERENTRIES.LIST
-    }
+    if (!item.stockItemName) return ''; // skip blank items
 
-    const absAmount = Math.abs(item.amount || 0);
-    const hasSpecificGst = gstLedgerSrc && gstLedgerSrc.toLowerCase() !== 'sales accounts';
-    const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
-    const gstHsnName   = (item.gstHsnName || '').trim();
+    const hasSpecificLedger = acctLedger && acctLedger.toLowerCase() !== 'sales accounts';
+    const hasSpecificGst    = gstLedgerSrc && gstLedgerSrc.toLowerCase() !== 'sales accounts';
+    const hsnLedgerSrc      = (item.hsnLedgerSource || gstLedgerSrc).trim();
+    const gstHsnName        = (item.gstHsnName || '').trim();
 
-    const acctAllocsXml = `
+    // Only include ACCOUNTINGALLOCATIONS when we have a real specific ledger
+    // (not 'Sales Accounts' group — that causes EXCEPTIONS=1)
+    const acctAllocsXml = hasSpecificLedger ? `
       <ACCOUNTINGALLOCATIONS.LIST>
-        <LEDGERNAME>${esc(effectiveLedger)}</LEDGERNAME>
+        <LEDGERNAME>${esc(acctLedger)}</LEDGERNAME>
         <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
         <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
         <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
-      </ACCOUNTINGALLOCATIONS.LIST>`;
+      </ACCOUNTINGALLOCATIONS.LIST>` : '';
 
     return `
   <ALLINVENTORYENTRIES.LIST>
