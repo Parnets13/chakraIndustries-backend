@@ -157,6 +157,14 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const rate = +(item.rate || 0);
     return +(item.amount || item.basic || (qty * rate)).toFixed(2);
   });
+  // Fix rounding: force the last item amount to absorb any 1-paisa discrepancy
+  // so sum of items always exactly equals salesBase. This prevents Tally EXCEPTIONS
+  // caused by a ±0.01 mismatch between inventory entries and ledger entries.
+  const rawItemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
+  if (itemAmounts.length > 0 && Math.abs(rawItemsTotal - salesBase) <= 0.10 && rawItemsTotal !== salesBase) {
+    const diff = +(salesBase - rawItemsTotal).toFixed(2);
+    itemAmounts[itemAmounts.length - 1] = +(itemAmounts[itemAmounts.length - 1] + diff).toFixed(2);
+  }
   const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
   // useInventory: send items as ALLINVENTORYENTRIES.LIST when items exist and amounts balance.
   // Item-level ledger names are set inside the inventory builder — if no specific ledger

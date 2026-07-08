@@ -1254,22 +1254,23 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
 
   const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
     const gstLedgerSrc = (item.gstLedgerSource || '').trim();
-    
-    // Skip inventory entries where gstLedgerSource is empty string (meaning item
-    // had no specific ledger and we intentionally blanked it in normalizer to avoid
-    // sending GSTLEDGERSOURCE='Sales Accounts' which Tally rejects)
-    if (!gstLedgerSrc) {
-      return ''; // This item will go as pure accounting entry instead
-    }
-
     const absAmount = Math.abs(item.amount || 0);
-    const acctAllocsXml = (item.accountingAllocations || []).map(aa => `
+
+    // Accounting ledger: use gstLedgerSource if specific, else fall back to
+    // accountingAllocations[0] or 'Sales Accounts'
+    const acctLedger = gstLedgerSrc ||
+      (item.accountingAllocations?.[0]?.ledgerName || 'Sales Accounts');
+
+    const hasSpecificGst = gstLedgerSrc &&
+      gstLedgerSrc.toLowerCase() !== 'sales accounts';
+
+    const acctAllocsXml = `
       <ACCOUNTINGALLOCATIONS.LIST>
-        <LEDGERNAME>${esc(aa.ledgerName || '')}</LEDGERNAME>
-        <ISDEEMEDPOSITIVE>${aa.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
-        <ISLASTDEEMEDPOSITIVE>${aa.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-        <AMOUNT>${Math.abs(aa.amount || 0).toFixed(2)}</AMOUNT>
-      </ACCOUNTINGALLOCATIONS.LIST>`).join('');
+        <LEDGERNAME>${esc(acctLedger)}</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+        <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+        <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
+      </ACCOUNTINGALLOCATIONS.LIST>`;
 
     const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
     const gstHsnName   = (item.gstHsnName || '').trim();
@@ -1277,16 +1278,16 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(item.stockItemName || '')}</STOCKITEMNAME>
-    <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <RATE>${esc(item.rate || '')}</RATE>
     <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
     <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
-    <GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
+    ${hasSpecificGst ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
     <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>
     <HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
-    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>
+    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : ''}
     <GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
     <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>
     ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
