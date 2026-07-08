@@ -1253,6 +1253,15 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   }).join('');
 
   const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
+    const gstLedgerSrc = (item.gstLedgerSource || '').trim();
+    
+    // Skip inventory entries where gstLedgerSource is empty string (meaning item
+    // had no specific ledger and we intentionally blanked it in normalizer to avoid
+    // sending GSTLEDGERSOURCE='Sales Accounts' which Tally rejects)
+    if (!gstLedgerSrc) {
+      return ''; // This item will go as pure accounting entry instead
+    }
+
     const absAmount = Math.abs(item.amount || 0);
     const acctAllocsXml = (item.accountingAllocations || []).map(aa => `
       <ACCOUNTINGALLOCATIONS.LIST>
@@ -1262,13 +1271,8 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
         <AMOUNT>${Math.abs(aa.amount || 0).toFixed(2)}</AMOUNT>
       </ACCOUNTINGALLOCATIONS.LIST>`).join('');
 
-    const gstLedgerSrc = (item.gstLedgerSource || '').trim();
     const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
     const gstHsnName   = (item.gstHsnName || '').trim();
-
-    // Only emit GST/HSN source tags when a specific (non-empty) sales ledger is set.
-    // Sending GSTLEDGERSOURCE="Sales Accounts" causes Tally to silently drop the voucher.
-    const hasGstSrc = gstLedgerSrc && gstLedgerSrc.toLowerCase() !== 'sales accounts';
 
     return `
   <ALLINVENTORYENTRIES.LIST>
@@ -1279,10 +1283,10 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
     <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
-    ${hasGstSrc ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
-    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : ''}
-    ${hasGstSrc && hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
-    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : ''}
+    <GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
+    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>
+    <HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
+    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>
     <GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
     <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>
     ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
@@ -1595,31 +1599,22 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         let voucherXml;
 
         if (inv.tallyVoucher && inv.tallyVoucher.voucherNumber) {
-          let tv = inv.tallyVoucher.toObject ? inv.tallyVoucher.toObject() : inv.tallyVoucher;
-
-          // ── Re-normalize if stored inventory entries are empty but invoice has items ──
-          // This handles invoices saved before the useInventory fix — their tallyVoucher
-          // sub-doc has allInventoryEntries:[] because the old guard blocked them.
-          // Re-run normalizeToTallyVoucher so items are included in this export.
-          if ((tv.allInventoryEntries || []).length === 0 && (inv.items || []).length > 0) {
-            LOG(`Invoice ${inv.invoiceNo}: stored tallyVoucher has 0 inventory entries but invoice has ${inv.items.length} items — re-normalizing`);
-            try {
-              const { normalizeToTallyVoucher } = await import('./normalizeToTallyVoucher.js');
-              tv = normalizeToTallyVoucher(inv, { periodEnd });
-              LOG(`Invoice ${inv.invoiceNo}: re-normalized — inventoryEntries=${tv.allInventoryEntries.length} useInventory=${tv._useInventory}`);
-            } catch (normErr) {
-              LOG(`Invoice ${inv.invoiceNo}: re-normalize failed (${normErr.message}) — using stored sub-doc`);
-            }
-          }
-
-          const poNumber = (tv.buyersOrderNo || inv.buyersOrderNo || inv.purchaseOrderRef || '').toUpperCase().trim();
+          const tv = inv.tallyVoucher.toObject ? inv.tallyVoucher.toObject() : inv.tallyVoucher;
+          const poNumber = (tv.buyersOrderNo || inv.buyersOrderNo || '').toUpperCase().trim();
           const existingByPO = poNumber ? tallyPOMap.get(poNumber) : null;
           const action   = (existingByPO || inv.tallyGuid) ? 'Alter' : 'Create';
           const guidTag  = existingByPO?.guid ? `<GUID>${esc(existingByPO.guid)}</GUID>`
                          : inv.tallyGuid      ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
           const cappedDate = capTallyDate(tv.date || freshToday, periodEnd);
+          // Diagnostic: log whether inventory entries will be included or stripped
           const hasInventory = (tv.allInventoryEntries || []).length > 0;
-          LOG(`Invoice ${inv.invoiceNo}: PRIMARY path — action=${action} date=${cappedDate} inventoryEntries=${hasInventory ? (tv.allInventoryEntries||[]).length : 0} buyersOrderNo="${tv.buyersOrderNo || ''}" shipToName="${tv.shipToName || ''}"`);
+          const willUseInventory = hasInventory && (tv.allInventoryEntries || []).some(
+            item => {
+              const src = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
+              return src && src.toLowerCase() !== 'sales accounts';
+            }
+          );
+          LOG(`Invoice ${inv.invoiceNo}: PRIMARY path — stored tallyVoucher (action=${action} date=${cappedDate} inventoryEntries=${hasInventory ? (tv.allInventoryEntries||[]).length : 0} willUseInventory=${willUseInventory})`);
           voucherXml = serializeTallyVoucher({ ...tv, date: cappedDate, effectiveDate: cappedDate }, action, guidTag);
 
         } else {
@@ -1724,20 +1719,27 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             const itemAmount = itemAmounts[i];
             const itemUnit   = tallyUnit(item.unit || 'Nos');
             
-            const im           = itemMasterMap.get(itemName);
-            const itemHSN      = im?.hsn || '';
-            const itemGSTRate  = im?.gst || 0;
-            const storedLedger = im?.tallySalesLedger || null;
+            // Look up the item in ItemMaster to get HSN, GST rate, and stored ledger name
+            const im             = itemMasterMap.get(itemName);
+            const itemHSN        = im?.hsn || '';
+            const itemGSTRate    = im?.gst || 0;
+            // tallySalesLedger: exact Tally sales ledger name stored per item
+            const storedLedger   = im?.tallySalesLedger || null;
 
-            // Resolve sales ledger — if none found, use 'Sales Accounts' but
-            // DO NOT emit GSTLEDGERSOURCE for it (Tally rejects that silently)
+            // Resolve the correct item-specific sales ledger using the live Tally ledger list.
+            // Falls back to a computed name (or stored override) if Tally list is unavailable.
             const salesLedger = resolveSalesLedger(
-              tallySalesLedgers, itemName, itemGSTRate, storedLedger, isInterstate
+              tallySalesLedgers,
+              itemName,
+              itemGSTRate,
+              storedLedger,
+              isInterstate
             );
-            const hasSpecificLedger = salesLedger &&
-              salesLedger.toLowerCase() !== 'sales accounts';
+            
+            // Only emit GSTLEDGERSOURCE when salesLedger is a specific ledger, not 'Sales Accounts'
+            const hasSpecificLedger = salesLedger && salesLedger.toLowerCase() !== 'sales accounts';
 
-            LOG(`Invoice ${inv.invoiceNo}: item "${itemName}" → salesLedger="${salesLedger}" hsn="${itemHSN}" gst=${itemGSTRate}% hasSpecific=${hasSpecificLedger}`);
+            LOG(`Invoice ${inv.invoiceNo}: item "${itemName}" → salesLedger="${salesLedger}" hasSpecific=${hasSpecificLedger} hsn="${itemHSN}" gst=${itemGSTRate}%`);
             
             return `
 <ALLINVENTORYENTRIES.LIST>

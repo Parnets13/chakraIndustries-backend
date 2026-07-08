@@ -158,12 +158,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     return +(item.amount || item.basic || (qty * rate)).toFixed(2);
   });
   const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-  // useInventory: include items in Tally voucher as ALLINVENTORYENTRIES.LIST whenever
-  // items exist and their amounts balance against salesBase.
-  // We no longer block on tallySalesLedger — items always show in Tally.
-  // When no specific sales ledger is stored, ACCOUNTINGALLOCATIONS will reference
-  // 'Sales Accounts' (the standard Tally group) and GST source tags are omitted so
-  // Tally derives GST from the stock item master itself.
+  // useInventory: send items as ALLINVENTORYENTRIES.LIST when items exist and amounts balance.
+  // Item-level ledger names are set inside the inventory builder — if no specific ledger
+  // is known, we'll use 'Sales Accounts' and omit GSTLEDGERSOURCE tags there.
   const useInventory = validItems.length > 0 &&
     Math.abs(itemsTotal - salesBase) <= 0.10;
 
@@ -176,14 +173,15 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const itemAmount = itemAmounts[i];
     const itemUnit   = tallyUnit(item.unit || 'Nos');
     const itemHSN    = (item.hsn || '').toString().trim();
-    // Sales ledger: use item.tallySalesLedger if it's a real specific ledger name.
-    // Otherwise fall back to 'Sales Accounts'. Either way the item shows in Tally.
-    const TALLY_VOUCHER_TYPES = new Set(['sales', 'purchase', 'receipt', 'payment', 'journal', 'contra', 'debit note', 'credit note', 'stock journal', 'vouchers']);
+    // Sales ledger: prefer item.tallySalesLedger if set, else 'Sales Accounts'
+    const TALLY_VOUCHER_TYPES = ['sales', 'purchase', 'receipt', 'payment', 'journal', 'contra', 'debit note', 'credit note', 'stock journal', 'vouchers'];
     const rawLedger = (item.tallySalesLedger || '').toString().trim();
-    const hasSpecificLedger = rawLedger &&
-      rawLedger.toLowerCase() !== 'sales accounts' &&
-      !TALLY_VOUCHER_TYPES.has(rawLedger.toLowerCase());
-    const salesLedger = hasSpecificLedger ? rawLedger : 'Sales Accounts';
+    const isVoucherType = TALLY_VOUCHER_TYPES.includes(rawLedger.toLowerCase());
+    const salesLedger = (rawLedger && !isVoucherType) ? rawLedger : 'Sales Accounts';
+    
+    // Only emit GSTLEDGERSOURCE when salesLedger is NOT 'Sales Accounts'
+    // (Tally rejects vouchers that reference the group name as GSTLEDGERSOURCE)
+    const hasSpecificLedger = salesLedger.toLowerCase() !== 'sales accounts';
 
     return {
       stockItemName:  itemName,
@@ -193,10 +191,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       amount:  -itemAmount,
       actualQty: `${itemQty} ${itemUnit}`,
       billedQty:  `${itemQty} ${itemUnit}`,
-      // Only set GST source fields when we have a specific (non-generic) sales ledger.
-      // When using 'Sales Accounts' as fallback, omit these — Tally derives GST
-      // from the stock item master. Sending GSTLEDGERSOURCE='Sales Accounts' causes
-      // Tally to silently reject the voucher.
+      // GST source fields: only include when we have a specific (non-group) ledger
       gstSourceType:         hasSpecificLedger ? 'Ledger' : '',
       gstLedgerSource:       hasSpecificLedger ? salesLedger : '',
       hsnSourceType:         hasSpecificLedger ? 'Ledger' : '',
