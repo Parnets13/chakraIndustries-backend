@@ -159,10 +159,16 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   });
   const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
   // useInventory requires: items exist, amounts balance, AND every item has a
-  // specific sales ledger (not the generic "Sales Accounts" group fallback).
+  // specific sales ledger (not the generic "Sales Accounts" group fallback, and
+  // not a Tally voucher-type name like "Sales" or "Purchase" which are not ledgers).
+  const _TALLY_VOUCHER_TYPES_SET = new Set(['sales', 'purchase', 'receipt', 'payment', 'journal', 'contra', 'debit note', 'credit note', 'stock journal', 'vouchers']);
   const allItemsHaveSpecificLedger = validItems.length > 0 &&
-    validItems.every(item => (item.tallySalesLedger || '').toString().trim() &&
-      (item.tallySalesLedger || '').toString().trim().toLowerCase() !== 'sales accounts');
+    validItems.every(item => {
+      const v = (item.tallySalesLedger || '').toString().trim();
+      return v &&
+        v.toLowerCase() !== 'sales accounts' &&
+        !_TALLY_VOUCHER_TYPES_SET.has(v.toLowerCase());
+    });
   const useInventory = validItems.length > 0 &&
     Math.abs(itemsTotal - salesBase) <= 0.10 &&
     allItemsHaveSpecificLedger;
@@ -180,7 +186,13 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     // The correct per-item name (if known) should be passed via item.tallySalesLedger
     // at the time normalizeToTallyVoucher is called. Falls back to 'Sales Accounts'
     // which is the universal default Tally sales group ledger.
-    const salesLedger = (item.tallySalesLedger || '').toString().trim() || 'Sales Accounts';
+    // ── GUARD: reject Tally voucher-type names (not ledgers) ──────────────────
+    // If tallySalesLedger is a Tally voucher type (e.g., "Sales", "Purchase"),
+    // reject it and use the fallback. This prevents Tally's cryptic rejection error.
+    const rawLedger = (item.tallySalesLedger || '').toString().trim();
+    const TALLY_VOUCHER_TYPES = ['sales', 'purchase', 'receipt', 'payment', 'journal', 'contra', 'debit note', 'credit note', 'stock journal', 'vouchers'];
+    const isVoucherType = TALLY_VOUCHER_TYPES.includes(rawLedger.toLowerCase());
+    const salesLedger = (rawLedger && !isVoucherType) ? rawLedger : 'Sales Accounts';
     return {
       stockItemName:  itemName,
       isDeemedPositive: false,
