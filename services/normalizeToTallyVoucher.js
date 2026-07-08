@@ -181,14 +181,13 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const itemAmount = itemAmounts[i];
     const itemUnit   = tallyUnit(item.unit || 'Nos');
     const itemHSN    = (item.hsn || '').toString().trim();
-    // Sales ledger: prefer item.tallySalesLedger if set, else 'Sales Accounts'
+    // Sales ledger: use item.tallySalesLedger if set, else 'Sales Accounts'
     const TALLY_VOUCHER_TYPES = ['sales', 'purchase', 'receipt', 'payment', 'journal', 'contra', 'debit note', 'credit note', 'stock journal', 'vouchers'];
     const rawLedger = (item.tallySalesLedger || '').toString().trim();
     const isVoucherType = TALLY_VOUCHER_TYPES.includes(rawLedger.toLowerCase());
     const salesLedger = (rawLedger && !isVoucherType) ? rawLedger : 'Sales Accounts';
     
     // Only emit GSTLEDGERSOURCE when salesLedger is NOT 'Sales Accounts'
-    // (Tally rejects vouchers that reference the group name as GSTLEDGERSOURCE)
     const hasSpecificLedger = salesLedger.toLowerCase() !== 'sales accounts';
 
     return {

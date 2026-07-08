@@ -1254,26 +1254,27 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
 
   const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
     const gstLedgerSrc = (item.gstLedgerSource || '').trim();
+    const acctLedger = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
+
+    // Only include inventory entry when the accounting ledger is a specific ledger,
+    // NOT 'Sales Accounts' (which is a Tally group, not a ledger — causes EXCEPTIONS=1)
+    const effectiveLedger = gstLedgerSrc || acctLedger;
+    if (!effectiveLedger || effectiveLedger.toLowerCase() === 'sales accounts') {
+      return ''; // skip — pure accounting format handles this via LEDGERENTRIES.LIST
+    }
+
     const absAmount = Math.abs(item.amount || 0);
-
-    // Accounting ledger: use gstLedgerSource if specific, else fall back to
-    // accountingAllocations[0] or 'Sales Accounts'
-    const acctLedger = gstLedgerSrc ||
-      (item.accountingAllocations?.[0]?.ledgerName || 'Sales Accounts');
-
-    const hasSpecificGst = gstLedgerSrc &&
-      gstLedgerSrc.toLowerCase() !== 'sales accounts';
+    const hasSpecificGst = gstLedgerSrc && gstLedgerSrc.toLowerCase() !== 'sales accounts';
+    const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
+    const gstHsnName   = (item.gstHsnName || '').trim();
 
     const acctAllocsXml = `
       <ACCOUNTINGALLOCATIONS.LIST>
-        <LEDGERNAME>${esc(acctLedger)}</LEDGERNAME>
+        <LEDGERNAME>${esc(effectiveLedger)}</LEDGERNAME>
         <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
         <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
         <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
       </ACCOUNTINGALLOCATIONS.LIST>`;
-
-    const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
-    const gstHsnName   = (item.gstHsnName || '').trim();
 
     return `
   <ALLINVENTORYENTRIES.LIST>
@@ -1308,12 +1309,14 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     ${billToGST ? `<ADDRESS>GSTIN: ${esc(billToGST)}</ADDRESS>` : ''}
   </ADDRESS.LIST>` : '';
 
-  const shipToName    = (v.shipToName    || v.partyLedgerName || '').trim();
-  const shipToAddress = (v.shipToAddress || billToAddress).trim();
-  const shipToCity    = (v.shipToCity    || billToCity).trim();
-  const shipToState   = (v.shipToState   || billToState).trim();
-  const shipToGST     = (v.shipToGST     || billToGST).trim();
+  const shipToName    = (v.shipToName    || '').trim();
+  const shipToAddress = (v.shipToAddress || '').trim();
+  const shipToCity    = (v.shipToCity    || '').trim();
+  const shipToState   = (v.shipToState   || '').trim();
+  const shipToGST     = (v.shipToGST     || '').trim();
 
+  // Only emit ship-to block when we have actual ship-to data (name or address)
+  // Do NOT fall back to bill-to values — ship-to is a different physical location
   const shipToXml = (shipToName || shipToAddress) ? `
   <BASICBASEPARTYDETAILS.LIST>
     <BASICBUYERNAME>${esc(shipToName)}</BASICBUYERNAME>
@@ -1323,7 +1326,6 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
       ${shipToState ? `<BASICBUYERADDRESS>${esc(shipToState)}</BASICBUYERADDRESS>` : ''}
     </BASICBUYERADDRESS.LIST>
     ${shipToState ? `<BASICBUYERSTATE>${esc(shipToState)}</BASICBUYERSTATE>` : ''}
-    ${shipToGST   ? `<BASICBUYERGSTIN>${esc(shipToGST)}</BASICBUYERGSTIN>` : ''}
   </BASICBASEPARTYDETAILS.LIST>` : '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
@@ -1737,10 +1739,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
               isInterstate
             );
             
-            // Only emit GSTLEDGERSOURCE when salesLedger is a specific ledger, not 'Sales Accounts'
+            // Only emit inventory entry when salesLedger is a specific ledger,
+            // NOT 'Sales Accounts' — Tally rejects inventory entries with group names
             const hasSpecificLedger = salesLedger && salesLedger.toLowerCase() !== 'sales accounts';
+            if (!hasSpecificLedger) return ''; // skip — ledger entries handle this
 
-            LOG(`Invoice ${inv.invoiceNo}: item "${itemName}" → salesLedger="${salesLedger}" hasSpecific=${hasSpecificLedger} hsn="${itemHSN}" gst=${itemGSTRate}%`);
+            LOG(`Invoice ${inv.invoiceNo}: item "${itemName}" → salesLedger="${salesLedger}" hsn="${itemHSN}" gst=${itemGSTRate}%`);
             
             return `
 <ALLINVENTORYENTRIES.LIST>
@@ -1751,10 +1755,10 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <AMOUNT>${itemAmount.toFixed(2)}</AMOUNT>
   <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
   <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
-  ${hasSpecificLedger ? `<GSTSOURCETYPE>Ledger</GSTSOURCETYPE>
+  <GSTSOURCETYPE>Ledger</GSTSOURCETYPE>
   <GSTLEDGERSOURCE>${esc(salesLedger)}</GSTLEDGERSOURCE>
   <HSNSOURCETYPE>Ledger</HSNSOURCETYPE>
-  <HSNLEDGERSOURCE>${esc(salesLedger)}</HSNLEDGERSOURCE>` : ''}
+  <HSNLEDGERSOURCE>${esc(salesLedger)}</HSNLEDGERSOURCE>
   <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
   <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
   ${itemHSN ? `<GSTHSNNAME>${esc(itemHSN)}</GSTHSNNAME>` : ''}

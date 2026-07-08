@@ -227,6 +227,55 @@ export const bulkUpload = async (req, res) => {
       ? await ItemMaster.find({ name: { $in: allItemNames } }, 'name hsn tallySalesLedger').lean()
       : [];
     const itemMasterMap = new Map(itemMasterDocs.map(m => [m.name, m]));
+
+    // ── Auto-create ItemMaster entries for any new item names ─────────────────
+    // If an item from the Excel doesn't exist in ItemMaster yet, create it now.
+    // This ensures:
+    //  1. Item name is registered in ERP item catalog automatically
+    //  2. Once a Tally Sales Ledger is later set on the item, all future uploads
+    //     of the same item will immediately pick it up — no manual work needed
+    //  3. Second upload of the same item → no duplicate (upsert by name)
+    const existingNames = new Set(itemMasterDocs.map(m => m.name));
+    const newItemNames  = allItemNames.filter(n => !existingNames.has(n));
+    if (newItemNames.length > 0) {
+      console.log(`[bulkUpload] Auto-creating ${newItemNames.length} new ItemMaster entries: ${newItemNames.slice(0, 5).join(', ')}${newItemNames.length > 5 ? '...' : ''}`);
+      // Build upsert ops — ordered:false means all succeed even if some clash
+      const upsertOps = newItemNames.map(name => {
+        const cleanName = name.trim();
+        // Generate a stable SKU from the name
+        const sku = 'AUTO-' + cleanName.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 25) + '-' + Date.now().toString(36).slice(-4).toUpperCase();
+        return {
+          updateOne: {
+            filter: { name: cleanName },
+            update: {
+              $setOnInsert: {
+                name:        cleanName,
+                itemId:      sku,
+                sku:         sku,
+                unit:        'Nos',
+                unitPrice:   0,
+                costPrice:   0,
+                sellingPrice:0,
+                isActive:    true,
+                dataSource:  'excel_upload',
+                tallySalesLedger: '', // blank — user can fill in from Item Master UI
+              },
+            },
+            upsert: true,
+          },
+        };
+      });
+      try {
+        await ItemMaster.bulkWrite(upsertOps, { ordered: false });
+        // Re-fetch so new items are in the map for this upload
+        const newDocs = await ItemMaster.find({ name: { $in: newItemNames } }, 'name hsn tallySalesLedger').lean();
+        newDocs.forEach(m => itemMasterMap.set(m.name, m));
+        console.log(`[bulkUpload] Auto-created ${newDocs.length} ItemMaster entries`);
+      } catch (imErr) {
+        console.warn('[bulkUpload] ItemMaster auto-create partial error (non-fatal):', imErr.message);
+      }
+    }
+
     console.log(`[bulkUpload] DEBUG: ${allItemNames.length} unique item names, ${itemMasterDocs.length} found in ItemMaster`);
     allItemNames.forEach(n => {
       const im = itemMasterMap.get(n);
