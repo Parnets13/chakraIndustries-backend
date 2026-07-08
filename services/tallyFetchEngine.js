@@ -3171,6 +3171,14 @@ async function tryFullFetch(cfg, state, entityType, timeoutMs, startDate = null,
   const effectiveFrom = startDate || new Date(HISTORY_START_DATE);
   const effectiveTo   = endDate   || new Date();
   LOG(`${entityType} full fetch date range: ${td(effectiveFrom)} → ${td(effectiveTo)}`);
+
+  // Safety net: never send an inverted date range to Tally.
+  // An inverted range (from > to) causes Tally to return ALL vouchers regardless of
+  // the filter, which can produce a 19MB+ response that OOMs the server.
+  if (effectiveFrom > effectiveTo) {
+    LOG(`${entityType} full fetch skipped — date range is inverted (${td(effectiveFrom)} > ${td(effectiveTo)}). Nothing new to sync.`);
+    return { ok: true, records: 0, created: 0, updated: 0, skipped: 0, failed: 0, totalFound: 0 };
+  }
   try {
     const { records, created, updated, skipped, failed, totalFound } = await fetchAndSave(cfg, entityType, effectiveFrom, effectiveTo, timeoutMs);
     state.usedFullFetch = true;
@@ -3394,7 +3402,16 @@ export async function pullEntityFromTally(entityType, options = {}) {
       if (state.lastSyncedDate && !options.forceRefresh) {
         startDate = new Date(state.lastSyncedDate);
         startDate.setDate(startDate.getDate() + 1);
-        LOG(`${entityType} incremental sync from ${td(startDate)}`);
+        // Guard: if the computed startDate is after endDate (happens when the last sync
+        // completed on the same day as today), clamp it back to endDate so the date
+        // range is never inverted.  An inverted range causes Tally to return ALL
+        // vouchers instead of zero, which OOMs the server on large datasets.
+        if (startDate > endDate) {
+          LOG(`${entityType} incremental startDate ${td(startDate)} > endDate ${td(endDate)} — clamping to endDate (nothing new to sync)`);
+          startDate = new Date(endDate);
+        } else {
+          LOG(`${entityType} incremental sync from ${td(startDate)}`);
+        }
       } else {
         // Always start from April 1, 2024 (HISTORY_START_DATE) to ensure
         // complete historical data is fetched across all FY periods.
