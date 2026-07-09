@@ -1250,9 +1250,16 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   // (i.e. Name of Item / Quantity / Rate columns are populated) rather than a bare
   // Accounting Invoice. The matching Sales Accounts ledger entry is suppressed below
   // to prevent double-booking.
-  const validInventoryEntries = (v.allInventoryEntries || []).filter(item =>
-    !!(item.stockItemName)
-  );
+  // Only include inventory entries that have a real (non-group) sales ledger in
+  // their accountingAllocations. "Sales Accounts" is a Tally group — referencing
+  // it as LEDGERNAME in ACCOUNTINGALLOCATIONS causes silent EXCEPTIONS=1.
+  // Items without a specific ledger fall back to the plain ledger-only format
+  // (their credit is handled by the LEDGERENTRIES.LIST Sales Accounts entry).
+  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
+    if (!item.stockItemName) return false;
+    const allocLedger = (item.accountingAllocations?.[0]?.ledgerName || '').toLowerCase().trim();
+    return allocLedger && allocLedger !== 'sales accounts';
+  });
   const hasInventoryEntries = validInventoryEntries.length > 0;
 
   const inventoryEntriesXml = validInventoryEntries.map(item => {
@@ -1283,6 +1290,12 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
       ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
     <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>`
       : '';
+    // Only emit GST override tags when we have a specific (non-group) ledger source.
+    // Emitting GSTOVRDNTAXABILITY without a GSTLEDGERSOURCE causes silent EXCEPTIONS=1.
+    const gstOverrideXml = !isGenericLedger
+      ? `<GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
+    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`
+      : '';
 
     return `
   <ALLINVENTORYENTRIES.LIST>
@@ -1295,8 +1308,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
     ${gstSourceXml}
     ${hsnSourceXml}
-    <GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>
+    ${gstOverrideXml}
     ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
@@ -1725,6 +1737,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
           const legacyPoRef = (inv.buyersOrderNo || inv.purchaseOrderRef || '').trim();
 
+          // ── Inventory entries ─────────────────────────────────────────────
+          // Only build ALLINVENTORYENTRIES.LIST when we have a real sales ledger per item.
+          // The legacy fallback has no per-item ledger names, so all items would fall
+          // back to "Sales Accounts" in ACCOUNTINGALLOCATIONS — which Tally rejects
+          // (it's a group, not a ledger). Use pure-accounting format in that case.
+          // Items get into Tally as line items only when item.tallySalesLedger is set.
           const rawItems = (inv.items || []).filter(item => (item.description || item.name || '').trim());
           const itemAmounts = rawItems.map(item => {
             const qty  = +(item.qty || 1);
@@ -1732,27 +1750,24 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             return +(item.amount || item.basic || (qty * rate)).toFixed(2);
           });
           const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-          const useInventory = rawItems.length > 0 && Math.abs(itemsTotal - salesBase) <= 0.10;
+          const useInventory = rawItems.length > 0 && Math.abs(itemsTotal - salesBase) <= 0.10
+            && rawItems.some(i => {
+              const l = (i.tallySalesLedger || '').trim().toLowerCase();
+              return l && l !== 'sales accounts';
+            });
 
-          // ── Inventory entries ─────────────────────────────────────────────
-          // Build ALLINVENTORYENTRIES.LIST for each invoice line item.
-          // ISDEEMEDPOSITIVE=No (credit/sales direction), positive amount.
-          // ACCOUNTINGALLOCATIONS links each line to the sales ledger credit.
-          // When inventory entries are present, suppress the "Sales Accounts"
-          // plain ledger entry to prevent double-booking.
-          const legacyRawItems = rawItems;
           let legacyAllocated = 0;
-          const inventoryEntries = useInventory ? legacyRawItems.map((item, i) => {
-            const itemName = (item.description || item.name || '').trim();
-            const itemQty  = +(item.qty || 1);
-            const itemRate = +(item.rate || 0);
-            const isLast   = i === legacyRawItems.length - 1;
-            // Last item absorbs any rounding so sum == salesBase
-            const itemAmt  = isLast
+          const inventoryEntries = useInventory ? rawItems.map((item, i) => {
+            const itemName   = (item.description || item.name || '').trim();
+            const itemQty    = +(item.qty || 1);
+            const itemRate   = +(item.rate || 0);
+            const isLast     = i === rawItems.length - 1;
+            const itemAmt    = isLast
               ? +(salesBase - legacyAllocated).toFixed(2)
               : itemAmounts[i];
-            legacyAllocated = +(legacyAllocated + (isLast ? itemAmt : itemAmounts[i])).toFixed(2);
-            const itemUnit = 'Nos';
+            legacyAllocated  = +(legacyAllocated + (isLast ? itemAmt : itemAmounts[i])).toFixed(2);
+            const itemUnit   = 'Nos';
+            const salesLedger = (item.tallySalesLedger || '').trim();
             return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
@@ -1762,17 +1777,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
     <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
-    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
     <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>Sales Accounts</LEDGERNAME>
+      <LEDGERNAME>${esc(salesLedger)}</LEDGERNAME>
       <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
       <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
       <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
     </ACCOUNTINGALLOCATIONS.LIST>
   </ALLINVENTORYENTRIES.LIST>`;
           }).join('') : '';
-          const hasLegacyInventory = useInventory && legacyRawItems.length > 0;
+          const hasLegacyInventory = useInventory && rawItems.length > 0;
 
           // Narration: free text only — item names and PO are now in structured XML fields
           const narration = [

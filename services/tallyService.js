@@ -751,7 +751,9 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
         inv.notes || null,
       ].filter(Boolean).join(' | ');
 
-      // Build ALLINVENTORYENTRIES.LIST for each line item
+      // Build ALLINVENTORYENTRIES.LIST — only when items have a real sales ledger.
+      // "Sales Accounts" is a Tally group, not a ledger: using it in ACCOUNTINGALLOCATIONS
+      // causes silent EXCEPTIONS=1. Skip inventory when no specific ledger is set.
       const batchInvItems = (inv.items || []).filter(i => (i.description || i.name || '').trim());
       const batchItemAmounts = batchInvItems.map(i => {
         const qty  = +(i.qty || 1);
@@ -759,18 +761,24 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
         return +(i.amount || i.basic || (qty * rate)).toFixed(2);
       });
       const batchItemsTotal = +batchItemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-      const useBatchInventory = batchInvItems.length > 0 && Math.abs(batchItemsTotal - salesBase) <= 0.10;
+      const useBatchInventory = batchInvItems.length > 0
+        && Math.abs(batchItemsTotal - salesBase) <= 0.10
+        && batchInvItems.some(i => {
+          const l = (i.tallySalesLedger || '').trim().toLowerCase();
+          return l && l !== 'sales accounts';
+        });
       let batchInvAllocated = 0;
       const batchInventoryXml = useBatchInventory ? batchInvItems.map((item, i) => {
-        const itemName = (item.description || item.name || '').trim();
-        const itemQty  = +(item.qty || 1);
-        const itemRate = +(item.rate || 0);
-        const isLast   = i === batchInvItems.length - 1;
-        const itemAmt  = isLast
+        const itemName    = (item.description || item.name || '').trim();
+        const itemQty     = +(item.qty || 1);
+        const itemRate    = +(item.rate || 0);
+        const isLast      = i === batchInvItems.length - 1;
+        const itemAmt     = isLast
           ? +(salesBase - batchInvAllocated).toFixed(2)
           : batchItemAmounts[i];
         batchInvAllocated = +(batchInvAllocated + (isLast ? itemAmt : batchItemAmounts[i])).toFixed(2);
-        const itemUnit = 'Nos';
+        const itemUnit    = 'Nos';
+        const salesLedger = (item.tallySalesLedger || '').trim();
         return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
@@ -780,10 +788,8 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
     <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
     <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
-    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
     <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>Sales Accounts</LEDGERNAME>
+      <LEDGERNAME>${esc(salesLedger)}</LEDGERNAME>
       <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
       <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
       <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
@@ -913,16 +919,15 @@ function buildSingleVoucherXml(inv, cfg) {
   const action  = inv.tallyGuid ? 'Alter' : 'Create';
   const guidTag = inv.tallyGuid ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
 
-  // ── All inventory entries with a stock item name are included ────────────
-  // We always emit ALLINVENTORYENTRIES.LIST for every item — the item name MUST
-  // appear in Tally XML. The ACCOUNTINGALLOCATIONS ledger falls back to
-  // "Sales Accounts" when no specific ledger is configured; Tally accepts this
-  // in the accounting allocations block (it only rejects it as GSTLEDGERSOURCE).
-  // We suppress GSTLEDGERSOURCE/HSNLEDGERSOURCE when the ledger is "Sales Accounts"
-  // (handled below in inventoryEntriesXml) to avoid the EXCEPTIONS=1 silent error.
-  const validInventoryEntries = (v.allInventoryEntries || []).filter(item =>
-    !!(item.stockItemName)
-  );
+  // Only include inventory entries that have a real (non-group) sales ledger.
+  // "Sales Accounts" in ACCOUNTINGALLOCATIONS causes silent EXCEPTIONS=1 because
+  // it's a Tally group, not a ledger. Items without a specific ledger fall through
+  // to the plain ledger-only format — their credit is in LEDGERENTRIES.LIST.
+  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
+    if (!item.stockItemName) return false;
+    const allocLedger = (item.accountingAllocations?.[0]?.ledgerName || '').toLowerCase().trim();
+    return allocLedger && allocLedger !== 'sales accounts';
+  });
   const hasInventoryEntries = validInventoryEntries.length > 0;
 
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
@@ -959,15 +964,9 @@ function buildSingleVoucherXml(inv, cfg) {
         <AMOUNT>${Math.abs(aa.amount || 0).toFixed(2)}</AMOUNT>
       </ACCOUNTINGALLOCATIONS.LIST>`).join('');
 
-    // Resolve GST ledger source: use stored field, or fall back to first accountingAllocation ledger
     const gstLedgerSrc = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
     const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
     const gstHsnName   = (item.gstHsnName || '').trim();
-
-    // Only emit GSTLEDGERSOURCE / HSNLEDGERSOURCE when the ledger is a specific
-    // sales ledger — NOT "Sales Accounts" (which is a Tally group, not a ledger).
-    // Also suppress if gstLedgerSource equals the stockItemName itself (was set as
-    // item-name fallback, not a real ledger). Both cases cause silent EXCEPTIONS=1.
     const isGenericLedger = !gstLedgerSrc
       || gstLedgerSrc.toLowerCase() === 'sales accounts'
       || gstLedgerSrc === (item.stockItemName || '').trim();
@@ -975,6 +974,12 @@ function buildSingleVoucherXml(inv, cfg) {
     <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : '';
     const hsnSourceXml = !isGenericLedger && hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
     <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : '';
+    // Only emit GST override tags alongside a real GSTLEDGERSOURCE.
+    // Emitting them without a source causes silent EXCEPTIONS=1.
+    const gstOverrideXml = !isGenericLedger
+      ? `<GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
+    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`
+      : '';
 
     return `
   <ALLINVENTORYENTRIES.LIST>
@@ -987,8 +992,7 @@ function buildSingleVoucherXml(inv, cfg) {
     <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
     ${gstSourceXml}
     ${hsnSourceXml}
-    <GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>
+    ${gstOverrideXml}
     ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
@@ -1120,7 +1124,9 @@ export async function pushSingleInvoiceToTally(invoiceId) {
         inv.notes || null,
       ].filter(Boolean).join(' | ');
 
-      // Build ALLINVENTORYENTRIES.LIST for each line item
+      // Build ALLINVENTORYENTRIES.LIST — only when items have a real sales ledger.
+      // "Sales Accounts" is a Tally group, not a ledger: using it in ACCOUNTINGALLOCATIONS
+      // causes silent EXCEPTIONS=1. Skip inventory when no specific ledger is set.
       const invItems = (inv.items || []).filter(i => (i.description || i.name || '').trim());
       const invItemAmounts = invItems.map(i => {
         const qty  = +(i.qty || 1);
@@ -1128,18 +1134,24 @@ export async function pushSingleInvoiceToTally(invoiceId) {
         return +(i.amount || i.basic || (qty * rate)).toFixed(2);
       });
       const invItemsTotal = +invItemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-      const useLegacyInventory = invItems.length > 0 && Math.abs(invItemsTotal - salesBase) <= 0.10;
+      const useLegacyInventory = invItems.length > 0
+        && Math.abs(invItemsTotal - salesBase) <= 0.10
+        && invItems.some(i => {
+          const l = (i.tallySalesLedger || '').trim().toLowerCase();
+          return l && l !== 'sales accounts';
+        });
       let legacyInvAllocated = 0;
       const legacyInventoryXml = useLegacyInventory ? invItems.map((item, i) => {
-        const itemName = (item.description || item.name || '').trim();
-        const itemQty  = +(item.qty || 1);
-        const itemRate = +(item.rate || 0);
-        const isLast   = i === invItems.length - 1;
-        const itemAmt  = isLast
+        const itemName    = (item.description || item.name || '').trim();
+        const itemQty     = +(item.qty || 1);
+        const itemRate    = +(item.rate || 0);
+        const isLast      = i === invItems.length - 1;
+        const itemAmt     = isLast
           ? +(salesBase - legacyInvAllocated).toFixed(2)
           : invItemAmounts[i];
         legacyInvAllocated = +(legacyInvAllocated + (isLast ? itemAmt : invItemAmounts[i])).toFixed(2);
-        const itemUnit = 'Nos';
+        const itemUnit    = 'Nos';
+        const salesLedger = (item.tallySalesLedger || '').trim();
         return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
@@ -1149,10 +1161,8 @@ export async function pushSingleInvoiceToTally(invoiceId) {
     <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
     <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
-    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
     <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>Sales Accounts</LEDGERNAME>
+      <LEDGERNAME>${esc(salesLedger)}</LEDGERNAME>
       <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
       <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
       <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
