@@ -791,31 +791,9 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   </ALLINVENTORYENTRIES.LIST>`;
       }).join('') : '';
 
-      // ── Bill To / Ship To address blocks ──────────────────────────────────
-      const batchBillName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
-      const batchBillAddr  = (inv.billToAddress || inv.partyAddress || '').trim();
-      const batchBillCity  = (inv.billToCity || inv.partyCity || '').trim();
-      const batchBillState = (inv.billToState || inv.partyState || '').trim();
-      const batchBillGST   = (inv.billToGST || inv.partyGST || '').trim();
-      const batchBillToXml = batchBillName ? `
-  <BILLTONAME>${esc(batchBillName)}</BILLTONAME>
-  ${batchBillAddr  ? `<BILLTOADDRESS>${esc(batchBillAddr)}</BILLTOADDRESS>` : ''}
-  ${batchBillCity  ? `<BILLTOCITY>${esc(batchBillCity)}</BILLTOCITY>`       : ''}
-  ${batchBillState ? `<BILLTOSTATE>${esc(batchBillState)}</BILLTOSTATE>`     : ''}
-  ${batchBillGST   ? `<BILLTOGSTIN>${esc(batchBillGST)}</BILLTOGSTIN>`       : ''}` : '';
-
-      const batchShipName  = (inv.shipToName || inv.shipToMailingName || '').trim();
-      const batchShipAddr  = (inv.shipToAddress || '').trim();
-      const batchShipCity  = (inv.shipToCity  || '').trim();
-      const batchShipState = (inv.shipToState || '').trim();
-      const batchShipGST   = (inv.shipToGST   || '').trim();
-      const hasBatchShipTo = !!(batchShipName || batchShipAddr);
-      const batchShipToXml = hasBatchShipTo ? `
-  <CONSIGNEEMAILINGNAME>${esc(batchShipName || batchBillName)}</CONSIGNEEMAILINGNAME>
-  ${batchShipAddr  ? `<CONSIGNEEADDRESS>${esc(batchShipAddr)}</CONSIGNEEADDRESS>` : ''}
-  ${batchShipCity  ? `<CONSIGNEECITY>${esc(batchShipCity)}</CONSIGNEECITY>`       : ''}
-  ${batchShipState ? `<CONSIGNEESTATE>${esc(batchShipState)}</CONSIGNEESTATE>`     : ''}
-  ${batchShipGST   ? `<CONSIGNEEGSTIN>${esc(batchShipGST)}</CONSIGNEEGSTIN>`       : ''}` : '';
+      // ── Bill To / Ship To — stripped pending confirmed-working test ──────────
+      const batchBillToXml = '';
+      const batchShipToXml = '';
 
       const vXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
@@ -1015,30 +993,10 @@ function buildSingleVoucherXml(inv, cfg) {
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
 
-  const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
-  const billToAddress = (v.billToAddress || '').trim();
-  const billToCity    = (v.billToCity    || '').trim();
-  const billToState   = (v.billToState   || '').trim();
-  const billToGST     = (v.billToGST     || '').trim();
-  const billToXml = billToName ? `
-  <BILLTONAME>${esc(billToName)}</BILLTONAME>
-  ${billToAddress ? `<BILLTOADDRESS>${esc(billToAddress)}</BILLTOADDRESS>` : ''}
-  ${billToCity    ? `<BILLTOCITY>${esc(billToCity)}</BILLTOCITY>`         : ''}
-  ${billToState   ? `<BILLTOSTATE>${esc(billToState)}</BILLTOSTATE>`       : ''}
-  ${billToGST     ? `<BILLTOGSTIN>${esc(billToGST)}</BILLTOGSTIN>`         : ''}` : '';
-
-  const shipToName    = (v.shipToName    || '').trim();
-  const shipToAddress = (v.shipToAddress || '').trim();
-  const shipToCity    = (v.shipToCity    || '').trim();
-  const shipToState   = (v.shipToState   || '').trim();
-  const shipToGST     = (v.shipToGST     || '').trim();
-  const hasShipTo     = !!(v.shipToName?.trim() || v.shipToAddress?.trim());
-  const shipToXml = hasShipTo ? `
-  <CONSIGNEEMAILINGNAME>${esc(shipToName || billToName)}</CONSIGNEEMAILINGNAME>
-  ${shipToAddress ? `<CONSIGNEEADDRESS>${esc(shipToAddress)}</CONSIGNEEADDRESS>` : ''}
-  ${shipToCity    ? `<CONSIGNEECITY>${esc(shipToCity)}</CONSIGNEECITY>`           : ''}
-  ${shipToState   ? `<CONSIGNEESTATE>${esc(shipToState)}</CONSIGNEESTATE>`         : ''}
-  ${shipToGST     ? `<CONSIGNEEGSTIN>${esc(shipToGST)}</CONSIGNEEGSTIN>`           : ''}` : '';
+  // ── Bill-to / Ship-to — stripped pending confirmed-working test ────────────
+  const billToName = (v.billToName || v.partyLedgerName || '').trim(); // kept for reference only
+  const billToXml  = '';
+  const shipToXml  = '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
@@ -1213,35 +1171,7 @@ export async function pushSingleInvoiceToTally(invoiceId) {
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(inv.purchaseOrderRef || inv.buyersOrderNo || '')}</BUYERSORDERNO>
   <NARRATION>${esc(narration)}</NARRATION>
-  ${(() => {
-    const sBillName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
-    const sBillAddr  = (inv.billToAddress || inv.partyAddress || '').trim();
-    const sBillCity  = (inv.billToCity || inv.partyCity || '').trim();
-    const sBillState = (inv.billToState || inv.partyState || '').trim();
-    const sBillGST   = (inv.billToGST || inv.partyGST || '').trim();
-    if (!sBillName) return '';
-    return `
-  <BILLTONAME>${esc(sBillName)}</BILLTONAME>
-  ${sBillAddr  ? `<BILLTOADDRESS>${esc(sBillAddr)}</BILLTOADDRESS>` : ''}
-  ${sBillCity  ? `<BILLTOCITY>${esc(sBillCity)}</BILLTOCITY>`       : ''}
-  ${sBillState ? `<BILLTOSTATE>${esc(sBillState)}</BILLTOSTATE>`     : ''}
-  ${sBillGST   ? `<BILLTOGSTIN>${esc(sBillGST)}</BILLTOGSTIN>`       : ''}`;
-  })()}
-  ${(() => {
-    const sShipName  = (inv.shipToName || inv.shipToMailingName || '').trim();
-    const sShipAddr  = (inv.shipToAddress || '').trim();
-    const sShipCity  = (inv.shipToCity  || '').trim();
-    const sShipState = (inv.shipToState || '').trim();
-    const sShipGST   = (inv.shipToGST   || '').trim();
-    if (!(sShipName || sShipAddr)) return '';
-    const sBillName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
-    return `
-  <CONSIGNEEMAILINGNAME>${esc(sShipName || sBillName)}</CONSIGNEEMAILINGNAME>
-  ${sShipAddr  ? `<CONSIGNEEADDRESS>${esc(sShipAddr)}</CONSIGNEEADDRESS>` : ''}
-  ${sShipCity  ? `<CONSIGNEECITY>${esc(sShipCity)}</CONSIGNEECITY>`       : ''}
-  ${sShipState ? `<CONSIGNEESTATE>${esc(sShipState)}</CONSIGNEESTATE>`     : ''}
-  ${sShipGST   ? `<CONSIGNEEGSTIN>${esc(sShipGST)}</CONSIGNEEGSTIN>`       : ''}`;
-  })()}
+  ${/* bill-to / ship-to stripped pending confirmed-working test */ ''}
   <LEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>

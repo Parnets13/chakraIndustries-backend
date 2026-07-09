@@ -1332,36 +1332,11 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   </LEDGERENTRIES.LIST>`;
   }).join('');
 
-  // ── Bill-to address ───────────────────────────────────────────────────────
-  // Use flat scalar tags (BILLTONAME, BILLTOADDRESS, etc.) — these are the correct
-  // Tally import tags for voucher buyer address. ADDRESS.LIST is a ledger master tag
-  // and causes silent EXCEPTIONS=1 when placed inside a VOUCHER import block.
-  const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
-  const billToAddress = (v.billToAddress || '').trim();
-  const billToCity    = (v.billToCity    || '').trim();
-  const billToState   = (v.billToState   || '').trim();
-  const billToGST     = (v.billToGST     || '').trim();
-  const billToXml = billToName ? `
-  <BILLTONAME>${esc(billToName)}</BILLTONAME>
-  ${billToAddress ? `<BILLTOADDRESS>${esc(billToAddress)}</BILLTOADDRESS>` : ''}
-  ${billToCity    ? `<BILLTOCITY>${esc(billToCity)}</BILLTOCITY>`         : ''}
-  ${billToState   ? `<BILLTOSTATE>${esc(billToState)}</BILLTOSTATE>`       : ''}
-  ${billToGST     ? `<BILLTOGSTIN>${esc(billToGST)}</BILLTOGSTIN>`         : ''}` : '';
-
-  // ── Ship-to (consignee) — separate from Bill To ──────────────────────────
-  // Flat scalar consignee tags — correct Tally import format.
-  const shipToName    = (v.shipToName    || '').trim();
-  const shipToAddress = (v.shipToAddress || '').trim();
-  const shipToCity    = (v.shipToCity    || '').trim();
-  const shipToState   = (v.shipToState   || '').trim();
-  const shipToGST     = (v.shipToGST     || '').trim();
-  const hasShipTo     = !!(shipToName || shipToAddress);
-  const shipToXml = hasShipTo ? `
-  <CONSIGNEEMAILINGNAME>${esc(shipToName || billToName)}</CONSIGNEEMAILINGNAME>
-  ${shipToAddress ? `<CONSIGNEEADDRESS>${esc(shipToAddress)}</CONSIGNEEADDRESS>` : ''}
-  ${shipToCity    ? `<CONSIGNEECITY>${esc(shipToCity)}</CONSIGNEECITY>`           : ''}
-  ${shipToState   ? `<CONSIGNEESTATE>${esc(shipToState)}</CONSIGNEESTATE>`         : ''}
-  ${shipToGST     ? `<CONSIGNEEGSTIN>${esc(shipToGST)}</CONSIGNEEGSTIN>`           : ''}` : '';
+  // ── Bill-to / Ship-to — stripped pending confirmed-working test ────────────
+  // Address tags removed while ship-to approach is being validated against Tally.
+  // Restore once CREATED=1 confirmed with the flat scalar tag format.
+  const billToXml = '';
+  const shipToXml = '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
@@ -1831,20 +1806,9 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const shipGST   = (inv.shipToGST   || '').trim();
 
           const hasLegacyShipTo = !!(shipName || shipAddr);
-          const shipToXml = hasLegacyShipTo ? `
-  <CONSIGNEEMAILINGNAME>${esc(shipName || billName)}</CONSIGNEEMAILINGNAME>
-  ${shipAddr  ? `<CONSIGNEEADDRESS>${esc(shipAddr)}</CONSIGNEEADDRESS>`   : ''}
-  ${shipCity  ? `<CONSIGNEECITY>${esc(shipCity)}</CONSIGNEECITY>`         : ''}
-  ${shipState ? `<CONSIGNEESTATE>${esc(shipState)}</CONSIGNEESTATE>`       : ''}
-  ${shipGST   ? `<CONSIGNEEGSTIN>${esc(shipGST)}</CONSIGNEEGSTIN>`         : ''}` : '';
-
-          const billAddrLines = [billAddr, [billCity, billState].filter(Boolean).join(', ')].filter(Boolean);
-          const billToXml = billName ? `
-  <BILLTONAME>${esc(billName)}</BILLTONAME>
-  ${billAddr  ? `<BILLTOADDRESS>${esc(billAddr)}</BILLTOADDRESS>` : ''}
-  ${billCity  ? `<BILLTOCITY>${esc(billCity)}</BILLTOCITY>`       : ''}
-  ${billState ? `<BILLTOSTATE>${esc(billState)}</BILLTOSTATE>`     : ''}
-  ${billGST   ? `<BILLTOGSTIN>${esc(billGST)}</BILLTOGSTIN>`       : ''}` : '';
+          // Address tags removed pending confirmed-working test — same as serializeTallyVoucher.
+          const billToXml = '';
+          const shipToXml = '';
 
           voucherXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
