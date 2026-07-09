@@ -1333,37 +1333,35 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   }).join('');
 
   // ── Bill-to address ───────────────────────────────────────────────────────
+  // Use flat scalar tags (BILLTONAME, BILLTOADDRESS, etc.) — these are the correct
+  // Tally import tags for voucher buyer address. ADDRESS.LIST is a ledger master tag
+  // and causes silent EXCEPTIONS=1 when placed inside a VOUCHER import block.
   const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
   const billToAddress = (v.billToAddress || '').trim();
   const billToCity    = (v.billToCity    || '').trim();
   const billToState   = (v.billToState   || '').trim();
   const billToGST     = (v.billToGST     || '').trim();
-  const billAddrLines = [billToAddress, [billToCity, billToState].filter(Boolean).join(', ')].filter(Boolean);
-  const billToXml = (billToName || billToAddress) ? `
-  <ADDRESS.LIST TYPE="Address">
-    <ADDRESS>${esc(billToName)}</ADDRESS>
-    ${billAddrLines.map(l => `<ADDRESS>${esc(l)}</ADDRESS>`).join('\n    ')}
-    ${billToGST ? `<ADDRESS>GSTIN: ${esc(billToGST)}</ADDRESS>` : ''}
-  </ADDRESS.LIST>` : '';
+  const billToXml = billToName ? `
+  <BILLTONAME>${esc(billToName)}</BILLTONAME>
+  ${billToAddress ? `<BILLTOADDRESS>${esc(billToAddress)}</BILLTOADDRESS>` : ''}
+  ${billToCity    ? `<BILLTOCITY>${esc(billToCity)}</BILLTOCITY>`         : ''}
+  ${billToState   ? `<BILLTOSTATE>${esc(billToState)}</BILLTOSTATE>`       : ''}
+  ${billToGST     ? `<BILLTOGSTIN>${esc(billToGST)}</BILLTOGSTIN>`         : ''}` : '';
 
   // ── Ship-to (consignee) — separate from Bill To ──────────────────────────
-  // Tally's consignee block uses CONSIGNEEMAILINGNAME + CONSIGNEEADDRESS tags.
-  // BASICBASEPARTYDETAILS.LIST / BASICBUYERNAME is the buyer (bill-to) detail
-  // block — using it for ship-to was the root cause of Ship To being wrong.
+  // Flat scalar consignee tags — correct Tally import format.
   const shipToName    = (v.shipToName    || '').trim();
   const shipToAddress = (v.shipToAddress || '').trim();
   const shipToCity    = (v.shipToCity    || '').trim();
   const shipToState   = (v.shipToState   || '').trim();
   const shipToGST     = (v.shipToGST     || '').trim();
-  // Only emit consignee block when ship-to is genuinely different from bill-to.
-  // If no ship-to data at all, skip (Tally defaults to bill-to internally).
-  const hasShipTo = !!(shipToName || shipToAddress);
-  const shipAddrLines = [shipToAddress, [shipToCity, shipToState].filter(Boolean).join(', ')].filter(Boolean);
+  const hasShipTo     = !!(shipToName || shipToAddress);
   const shipToXml = hasShipTo ? `
   <CONSIGNEEMAILINGNAME>${esc(shipToName || billToName)}</CONSIGNEEMAILINGNAME>
-  ${shipAddrLines.map(l => `<CONSIGNEEADDRESS>${esc(l)}</CONSIGNEEADDRESS>`).join('\n  ')}
-  ${shipToState ? `<CONSIGNEESTATE>${esc(shipToState)}</CONSIGNEESTATE>` : ''}
-  ${shipToGST   ? `<CONSIGNEEGSTIN>${esc(shipToGST)}</CONSIGNEEGSTIN>` : ''}` : '';
+  ${shipToAddress ? `<CONSIGNEEADDRESS>${esc(shipToAddress)}</CONSIGNEEADDRESS>` : ''}
+  ${shipToCity    ? `<CONSIGNEECITY>${esc(shipToCity)}</CONSIGNEECITY>`           : ''}
+  ${shipToState   ? `<CONSIGNEESTATE>${esc(shipToState)}</CONSIGNEESTATE>`         : ''}
+  ${shipToGST     ? `<CONSIGNEEGSTIN>${esc(shipToGST)}</CONSIGNEEGSTIN>`           : ''}` : '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
@@ -1833,20 +1831,20 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const shipGST   = (inv.shipToGST   || '').trim();
 
           const hasLegacyShipTo = !!(shipName || shipAddr);
-          const legacyShipAddrLines = [shipAddr, [shipCity, shipState].filter(Boolean).join(', ')].filter(Boolean);
           const shipToXml = hasLegacyShipTo ? `
   <CONSIGNEEMAILINGNAME>${esc(shipName || billName)}</CONSIGNEEMAILINGNAME>
-  ${legacyShipAddrLines.map(l => `<CONSIGNEEADDRESS>${esc(l)}</CONSIGNEEADDRESS>`).join('\n  ')}
-  ${shipState ? `<CONSIGNEESTATE>${esc(shipState)}</CONSIGNEESTATE>` : ''}
-  ${shipGST   ? `<CONSIGNEEGSTIN>${esc(shipGST)}</CONSIGNEEGSTIN>` : ''}` : '';
+  ${shipAddr  ? `<CONSIGNEEADDRESS>${esc(shipAddr)}</CONSIGNEEADDRESS>`   : ''}
+  ${shipCity  ? `<CONSIGNEECITY>${esc(shipCity)}</CONSIGNEECITY>`         : ''}
+  ${shipState ? `<CONSIGNEESTATE>${esc(shipState)}</CONSIGNEESTATE>`       : ''}
+  ${shipGST   ? `<CONSIGNEEGSTIN>${esc(shipGST)}</CONSIGNEEGSTIN>`         : ''}` : '';
 
           const billAddrLines = [billAddr, [billCity, billState].filter(Boolean).join(', ')].filter(Boolean);
-          const billToXml = `
-  <ADDRESS.LIST TYPE="Address">
-    <ADDRESS>${esc(billName)}</ADDRESS>
-    ${billAddrLines.map(l => `<ADDRESS>${esc(l)}</ADDRESS>`).join('\n    ')}
-    ${billGST ? `<ADDRESS>GSTIN: ${esc(billGST)}</ADDRESS>` : ''}
-  </ADDRESS.LIST>`;
+          const billToXml = billName ? `
+  <BILLTONAME>${esc(billName)}</BILLTONAME>
+  ${billAddr  ? `<BILLTOADDRESS>${esc(billAddr)}</BILLTOADDRESS>` : ''}
+  ${billCity  ? `<BILLTOCITY>${esc(billCity)}</BILLTOCITY>`       : ''}
+  ${billState ? `<BILLTOSTATE>${esc(billState)}</BILLTOSTATE>`     : ''}
+  ${billGST   ? `<BILLTOGSTIN>${esc(billGST)}</BILLTOGSTIN>`       : ''}` : '';
 
           voucherXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">

@@ -797,13 +797,12 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
       const batchBillCity  = (inv.billToCity || inv.partyCity || '').trim();
       const batchBillState = (inv.billToState || inv.partyState || '').trim();
       const batchBillGST   = (inv.billToGST || inv.partyGST || '').trim();
-      const batchBillAddrLines = [batchBillAddr, [batchBillCity, batchBillState].filter(Boolean).join(', ')].filter(Boolean);
-      const batchBillToXml = (batchBillName || batchBillAddr) ? `
-  <ADDRESS.LIST TYPE="Address">
-    <ADDRESS>${esc(batchBillName)}</ADDRESS>
-    ${batchBillAddrLines.map(l => `<ADDRESS>${esc(l)}</ADDRESS>`).join('\n    ')}
-    ${batchBillGST ? `<ADDRESS>GSTIN: ${esc(batchBillGST)}</ADDRESS>` : ''}
-  </ADDRESS.LIST>` : '';
+      const batchBillToXml = batchBillName ? `
+  <BILLTONAME>${esc(batchBillName)}</BILLTONAME>
+  ${batchBillAddr  ? `<BILLTOADDRESS>${esc(batchBillAddr)}</BILLTOADDRESS>` : ''}
+  ${batchBillCity  ? `<BILLTOCITY>${esc(batchBillCity)}</BILLTOCITY>`       : ''}
+  ${batchBillState ? `<BILLTOSTATE>${esc(batchBillState)}</BILLTOSTATE>`     : ''}
+  ${batchBillGST   ? `<BILLTOGSTIN>${esc(batchBillGST)}</BILLTOGSTIN>`       : ''}` : '';
 
       const batchShipName  = (inv.shipToName || inv.shipToMailingName || '').trim();
       const batchShipAddr  = (inv.shipToAddress || '').trim();
@@ -811,12 +810,12 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
       const batchShipState = (inv.shipToState || '').trim();
       const batchShipGST   = (inv.shipToGST   || '').trim();
       const hasBatchShipTo = !!(batchShipName || batchShipAddr);
-      const batchShipAddrLines = [batchShipAddr, [batchShipCity, batchShipState].filter(Boolean).join(', ')].filter(Boolean);
       const batchShipToXml = hasBatchShipTo ? `
   <CONSIGNEEMAILINGNAME>${esc(batchShipName || batchBillName)}</CONSIGNEEMAILINGNAME>
-  ${batchShipAddrLines.map(l => `<CONSIGNEEADDRESS>${esc(l)}</CONSIGNEEADDRESS>`).join('\n  ')}
-  ${batchShipState ? `<CONSIGNEESTATE>${esc(batchShipState)}</CONSIGNEESTATE>` : ''}
-  ${batchShipGST   ? `<CONSIGNEEGSTIN>${esc(batchShipGST)}</CONSIGNEEGSTIN>` : ''}` : '';
+  ${batchShipAddr  ? `<CONSIGNEEADDRESS>${esc(batchShipAddr)}</CONSIGNEEADDRESS>` : ''}
+  ${batchShipCity  ? `<CONSIGNEECITY>${esc(batchShipCity)}</CONSIGNEECITY>`       : ''}
+  ${batchShipState ? `<CONSIGNEESTATE>${esc(batchShipState)}</CONSIGNEESTATE>`     : ''}
+  ${batchShipGST   ? `<CONSIGNEEGSTIN>${esc(batchShipGST)}</CONSIGNEEGSTIN>`       : ''}` : '';
 
       const vXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
@@ -1021,28 +1020,25 @@ function buildSingleVoucherXml(inv, cfg) {
   const billToCity    = (v.billToCity    || '').trim();
   const billToState   = (v.billToState   || '').trim();
   const billToGST     = (v.billToGST     || '').trim();
-
-  const billAddrLines = [billToAddress, [billToCity, billToState].filter(Boolean).join(', ')].filter(Boolean);
-  const billToXml = (billToName || billToAddress) ? `
-  <ADDRESS.LIST TYPE="Address">
-    <ADDRESS>${esc(billToName)}</ADDRESS>
-    ${billAddrLines.map(l => `<ADDRESS>${esc(l)}</ADDRESS>`).join('\n    ')}
-    ${billToGST ? `<ADDRESS>GSTIN: ${esc(billToGST)}</ADDRESS>` : ''}
-  </ADDRESS.LIST>` : '';
+  const billToXml = billToName ? `
+  <BILLTONAME>${esc(billToName)}</BILLTONAME>
+  ${billToAddress ? `<BILLTOADDRESS>${esc(billToAddress)}</BILLTOADDRESS>` : ''}
+  ${billToCity    ? `<BILLTOCITY>${esc(billToCity)}</BILLTOCITY>`         : ''}
+  ${billToState   ? `<BILLTOSTATE>${esc(billToState)}</BILLTOSTATE>`       : ''}
+  ${billToGST     ? `<BILLTOGSTIN>${esc(billToGST)}</BILLTOGSTIN>`         : ''}` : '';
 
   const shipToName    = (v.shipToName    || '').trim();
-  const shipToAddress = (v.shipToAddress || billToAddress).trim();
-  const shipToCity    = (v.shipToCity    || billToCity).trim();
-  const shipToState   = (v.shipToState   || billToState).trim();
-  const shipToGST     = (v.shipToGST     || billToGST).trim();
-
-  const hasShipTo = !!(v.shipToName?.trim() || v.shipToAddress?.trim());
-  const shipAddrLines = [shipToAddress, [shipToCity, shipToState].filter(Boolean).join(', ')].filter(Boolean);
+  const shipToAddress = (v.shipToAddress || '').trim();
+  const shipToCity    = (v.shipToCity    || '').trim();
+  const shipToState   = (v.shipToState   || '').trim();
+  const shipToGST     = (v.shipToGST     || '').trim();
+  const hasShipTo     = !!(v.shipToName?.trim() || v.shipToAddress?.trim());
   const shipToXml = hasShipTo ? `
   <CONSIGNEEMAILINGNAME>${esc(shipToName || billToName)}</CONSIGNEEMAILINGNAME>
-  ${shipAddrLines.map(l => `<CONSIGNEEADDRESS>${esc(l)}</CONSIGNEEADDRESS>`).join('\n  ')}
-  ${shipToState ? `<CONSIGNEESTATE>${esc(shipToState)}</CONSIGNEESTATE>` : ''}
-  ${shipToGST   ? `<CONSIGNEEGSTIN>${esc(shipToGST)}</CONSIGNEEGSTIN>` : ''}` : '';
+  ${shipToAddress ? `<CONSIGNEEADDRESS>${esc(shipToAddress)}</CONSIGNEEADDRESS>` : ''}
+  ${shipToCity    ? `<CONSIGNEECITY>${esc(shipToCity)}</CONSIGNEECITY>`           : ''}
+  ${shipToState   ? `<CONSIGNEESTATE>${esc(shipToState)}</CONSIGNEESTATE>`         : ''}
+  ${shipToGST     ? `<CONSIGNEEGSTIN>${esc(shipToGST)}</CONSIGNEEGSTIN>`           : ''}` : '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
@@ -1223,13 +1219,13 @@ export async function pushSingleInvoiceToTally(invoiceId) {
     const sBillCity  = (inv.billToCity || inv.partyCity || '').trim();
     const sBillState = (inv.billToState || inv.partyState || '').trim();
     const sBillGST   = (inv.billToGST || inv.partyGST || '').trim();
-    const sBillLines = [sBillAddr, [sBillCity, sBillState].filter(Boolean).join(', ')].filter(Boolean);
-    return (sBillName || sBillAddr) ? `
-  <ADDRESS.LIST TYPE="Address">
-    <ADDRESS>${esc(sBillName)}</ADDRESS>
-    ${sBillLines.map(l => `<ADDRESS>${esc(l)}</ADDRESS>`).join('\n    ')}
-    ${sBillGST ? `<ADDRESS>GSTIN: ${esc(sBillGST)}</ADDRESS>` : ''}
-  </ADDRESS.LIST>` : '';
+    if (!sBillName) return '';
+    return `
+  <BILLTONAME>${esc(sBillName)}</BILLTONAME>
+  ${sBillAddr  ? `<BILLTOADDRESS>${esc(sBillAddr)}</BILLTOADDRESS>` : ''}
+  ${sBillCity  ? `<BILLTOCITY>${esc(sBillCity)}</BILLTOCITY>`       : ''}
+  ${sBillState ? `<BILLTOSTATE>${esc(sBillState)}</BILLTOSTATE>`     : ''}
+  ${sBillGST   ? `<BILLTOGSTIN>${esc(sBillGST)}</BILLTOGSTIN>`       : ''}`;
   })()}
   ${(() => {
     const sShipName  = (inv.shipToName || inv.shipToMailingName || '').trim();
@@ -1239,12 +1235,12 @@ export async function pushSingleInvoiceToTally(invoiceId) {
     const sShipGST   = (inv.shipToGST   || '').trim();
     if (!(sShipName || sShipAddr)) return '';
     const sBillName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
-    const sShipLines = [sShipAddr, [sShipCity, sShipState].filter(Boolean).join(', ')].filter(Boolean);
     return `
   <CONSIGNEEMAILINGNAME>${esc(sShipName || sBillName)}</CONSIGNEEMAILINGNAME>
-  ${sShipLines.map(l => `<CONSIGNEEADDRESS>${esc(l)}</CONSIGNEEADDRESS>`).join('\n  ')}
-  ${sShipState ? `<CONSIGNEESTATE>${esc(sShipState)}</CONSIGNEESTATE>` : ''}
-  ${sShipGST   ? `<CONSIGNEEGSTIN>${esc(sShipGST)}</CONSIGNEEGSTIN>` : ''}`;
+  ${sShipAddr  ? `<CONSIGNEEADDRESS>${esc(sShipAddr)}</CONSIGNEEADDRESS>` : ''}
+  ${sShipCity  ? `<CONSIGNEECITY>${esc(sShipCity)}</CONSIGNEECITY>`       : ''}
+  ${sShipState ? `<CONSIGNEESTATE>${esc(sShipState)}</CONSIGNEESTATE>`     : ''}
+  ${sShipGST   ? `<CONSIGNEEGSTIN>${esc(sShipGST)}</CONSIGNEEGSTIN>`       : ''}`;
   })()}
   <LEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
