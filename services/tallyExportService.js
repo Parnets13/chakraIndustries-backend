@@ -1259,34 +1259,12 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   </ALLLEDGERENTRIES.LIST>`;
   }).join('');
 
-  // ── Inventory entries — items with ACCOUNTINGALLOCATIONS → Sales Accounts ─
-  // Only emit when we have real stock items. Always use "Sales Accounts" as the
-  // accounting ledger (it exists in every Tally installation). This populates the
-  // item details in the Sales Register without any ledger-lookup risk.
-  const inventoryEntriesXml = (v.allInventoryEntries || [])
-    .filter(item => item.stockItemName && item.stockItemName.trim())
-    .map(item => {
-      const absAmt = Math.abs(item.amount || 0);
-      return `
-  <ALLINVENTORYENTRIES.LIST>
-    <STOCKITEMNAME>${esc(item.stockItemName)}</STOCKITEMNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-    <RATE>${esc(item.rate || '')}</RATE>
-    <AMOUNT>${absAmt.toFixed(2)}</AMOUNT>
-    <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
-    <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
-    <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>Sales Accounts</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>${absAmt.toFixed(2)}</AMOUNT>
-    </ACCOUNTINGALLOCATIONS.LIST>
-  </ALLINVENTORYENTRIES.LIST>`;
-    }).join('');
+  // ── Item names go in narration only — no ALLINVENTORYENTRIES ────────────
+  // Adding ALLINVENTORYENTRIES.LIST to ALLLEDGERENTRIES-format vouchers causes
+  // Tally to reject them silently (EXCEPTIONS=1). Items appear in the Narration.
+  const inventoryEntriesXml = ''; // intentionally empty
 
   // ── Bill-to address ───────────────────────────────────────────────────────
-  const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
   const billToAddress = (v.billToAddress || '').trim();
   const billToCity    = (v.billToCity    || '').trim();
   const billToState   = (v.billToState   || '').trim();
@@ -1707,9 +1685,19 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <AMOUNT>${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
 </ALLLEDGERENTRIES.LIST>`;
 
+          const legacyItemSummary = rawItems.length > 0
+            ? rawItems.map(i => {
+                const nm = (i.description || i.name || '').trim();
+                const q  = +(i.qty || 1);
+                return q > 1 ? `${nm} x${q}` : nm;
+              }).join(', ')
+            : '';
+          const legacyPoRef = (inv.buyersOrderNo || inv.purchaseOrderRef || '').trim();
           const narration = [
-            `ERP Inv: ${inv.invoiceNo}`,
-            origDateFmt ? `Original Invoice Date: ${origDateFmt}` : null,
+            `Inv: ${inv.invoiceNo}`,
+            origDateFmt || null,
+            legacyItemSummary || null,
+            legacyPoRef ? `PO: ${legacyPoRef}` : null,
             inv.notes || null,
           ].filter(Boolean).join(' | ');
 
@@ -1732,35 +1720,9 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             return +(item.amount || item.basic || (qty * rate)).toFixed(2);
           });
           const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-          const useInventory = rawItems.length > 0 && Math.abs(itemsTotal - salesBase) <= 0.10;
 
-          // ── Inventory entries — always use "Sales Accounts" as accounting ledger ──
-          // This is safe for all Tally installations. Item names appear in the
-          // sales register. No per-item ledger lookup needed.
-          const inventoryEntries = useInventory ? rawItems.map((item, i) => {
-            const itemName   = (item.description || item.name || '').trim();
-            const itemQty    = +(item.qty || 1);
-            const itemRate   = +(item.rate || 0);
-            const itemAmount = itemAmounts[i];
-            const itemUnit   = tallyUnit(item.unit || 'Nos');
-
-            return `
-<ALLINVENTORYENTRIES.LIST>
-  <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
-  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-  <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-  <RATE>${itemRate.toFixed(2)}/${itemUnit}</RATE>
-  <AMOUNT>${itemAmount.toFixed(2)}</AMOUNT>
-  <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
-  <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
-  <ACCOUNTINGALLOCATIONS.LIST>
-    <LEDGERNAME>Sales Accounts</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-    <AMOUNT>${itemAmount.toFixed(2)}</AMOUNT>
-  </ACCOUNTINGALLOCATIONS.LIST>
-</ALLINVENTORYENTRIES.LIST>`;
-          }).join('') : '';
+          // Item names appear in the Narration — no ALLINVENTORYENTRIES needed
+          // (mixing ALLINVENTORYENTRIES with ALLLEDGERENTRIES causes EXCEPTIONS=1)
 
           const billName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
           const billAddr  = (inv.billToAddress || inv.partyAddress || '').trim();
@@ -1822,7 +1784,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     </BILLALLOCATIONS.LIST>
   </ALLLEDGERENTRIES.LIST>
   ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}
-  ${inventoryEntries}
 </VOUCHER>`;
         } // end fallback (legacy mapper)
 
