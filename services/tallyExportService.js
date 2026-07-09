@@ -1233,66 +1233,36 @@ function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
 function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const v = tallyVoucher;
 
-  // ── Tally Sales Invoice format ────────────────────────────────────────────
-  // Uses OBJVIEW="Invoice Voucher View" with:
-  //   LEDGERENTRIES.LIST  — for party (debit) + GST + Sales Accounts (credits)
-  //   ALLINVENTORYENTRIES.LIST — for stock items (qty, rate, item name)
+  // ── ALLLEDGERENTRIES.LIST format — proven to work on this Tally installation ─
+  // OBJVIEW="Invoice Voucher View" with LEDGERENTRIES.LIST was tested extensively
+  // and causes EXCEPTIONS=1 on this Tally. ALLLEDGERENTRIES.LIST (same as the
+  // purchase voucher format that creates successfully) is used instead.
   //
-  // LEDGERENTRIES.LIST sign convention (Invoice Voucher View):
-  //   All amounts are POSITIVE. ISDEEMEDPOSITIVE controls direction:
-  //     Party  → ISDEEMEDPOSITIVE=Yes  (Dr)  AMOUNT=+grandTotal
-  //     Credit → ISDEEMEDPOSITIVE=No   (Cr)  AMOUNT=+creditAmount
-  //
-  // ALLINVENTORYENTRIES.LIST:
-  //   Always ISDEEMEDPOSITIVE=No (stock going out on sales)
-  //   ACCOUNTINGALLOCATIONS must reference "Sales Accounts" (always exists)
-  //   AMOUNT = positive item amount
+  // Sign convention for ALLLEDGERENTRIES.LIST:
+  //   Party (debtor) → ISDEEMEDPOSITIVE=Yes, AMOUNT = negative
+  //   GST / Sales    → ISDEEMEDPOSITIVE=No,  AMOUNT = positive
 
-  // ── Ledger entries ────────────────────────────────────────────────────────
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
       <BILLALLOCATIONS.LIST>
         <NAME>${esc(ba.name || '')}</NAME>
         <BILLTYPE>${esc(ba.billType || 'New Ref')}</BILLTYPE>
         <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
-        <AMOUNT>${Math.abs(ba.amount || 0).toFixed(2)}</AMOUNT>
+        <AMOUNT>${(-Math.abs(ba.amount || 0)).toFixed(2)}</AMOUNT>
       </BILLALLOCATIONS.LIST>`).join('');
 
-    // In Invoice Voucher View, ALL amounts in LEDGERENTRIES.LIST are positive.
-    const amt = Math.abs(entry.amount || 0).toFixed(2);
+    const amt = entry.isDeemedPositive
+      ? (-Math.abs(entry.amount || 0)).toFixed(2)   // party → negative
+      : Math.abs(entry.amount || 0).toFixed(2);      // GST/Sales → positive
 
     return `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(entry.ledgerName || '')}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${entry.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-    <ISPARTYLEDGER>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISPARTYLEDGER>
     <AMOUNT>${amt}</AMOUNT>${billAllocsXml}
-  </LEDGERENTRIES.LIST>`;
+  </ALLLEDGERENTRIES.LIST>`;
   }).join('');
-
-  // ── Inventory entries — item names show in Tally sales register ──────────
-  const inventoryEntriesXml = (v.allInventoryEntries || [])
-    .filter(item => (item.stockItemName || '').trim())
-    .map(item => {
-      const amt = Math.abs(item.amount || 0).toFixed(2);
-      return `
-  <ALLINVENTORYENTRIES.LIST>
-    <STOCKITEMNAME>${esc(item.stockItemName)}</STOCKITEMNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-    <RATE>${esc(item.rate || '')}</RATE>
-    <AMOUNT>${amt}</AMOUNT>
-    <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
-    <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
-    <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>Sales Accounts</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>${amt}</AMOUNT>
-    </ACCOUNTINGALLOCATIONS.LIST>
-  </ALLINVENTORYENTRIES.LIST>`;
-    }).join('');
 
   // ── Bill-to address ───────────────────────────────────────────────────────
   const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
@@ -1308,13 +1278,12 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     ${billToGST ? `<ADDRESS>GSTIN: ${esc(billToGST)}</ADDRESS>` : ''}
   </ADDRESS.LIST>` : '';
 
-  // ── Ship-to details ───────────────────────────────────────────────────────
+  // ── Ship-to (falls back to bill-to) ──────────────────────────────────────
   const shipToName    = (v.shipToName    || '').trim();
   const shipToAddress = (v.shipToAddress || '').trim();
   const shipToCity    = (v.shipToCity    || '').trim();
   const shipToState   = (v.shipToState   || '').trim();
   const shipToGST     = (v.shipToGST     || '').trim();
-  // Fall back to bill-to when ship-to is empty
   const effShipName  = shipToName    || billToName;
   const effShipAddr  = shipToAddress || billToAddress;
   const effShipCity  = shipToCity    || billToCity;
@@ -1335,7 +1304,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
   return `
-<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
+<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}">
   <DATE>${esc(v.date || '')}</DATE>
   <EFFECTIVEDATE>${esc(v.effectiveDate || v.date || '')}</EFFECTIVEDATE>
   ${guidTag}
@@ -1345,7 +1314,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
   ${poDateXml}
-  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
+  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}
 </VOUCHER>`;
 }
 
@@ -1685,32 +1654,32 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const salesBase   = +(grandTotal - totalTax).toFixed(2);
 
           const cgstEntry = totalCGST > 0 ? `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(cgstLedgerName(salesBase, totalCGST, tallyGstLedgers))}</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <AMOUNT>${totalCGST.toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>` : '';
+  </ALLLEDGERENTRIES.LIST>` : '';
 
           const sgstEntry = totalSGST > 0 ? `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(sgstLedgerName(salesBase, totalSGST, tallyGstLedgers))}</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <AMOUNT>${totalSGST.toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>` : '';
+  </ALLLEDGERENTRIES.LIST>` : '';
 
           const igstEntry = totalIGST > 0 ? `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(igstLedgerName(salesBase, totalIGST, tallyGstLedgers))}</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <AMOUNT>${totalIGST.toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>` : '';
+  </ALLLEDGERENTRIES.LIST>` : '';
 
           const salesAccEntry = `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>Sales Accounts</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <AMOUNT>${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>`;
+  </ALLLEDGERENTRIES.LIST>`;
 
           const legacyPoRef = (inv.buyersOrderNo || inv.purchaseOrderRef || '').trim();
 
@@ -1806,7 +1775,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   </BASICBASEPARTYDETAILS.LIST>`;
 
           voucherXml = `
-<VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
+<VOUCHER VCHTYPE="Sales" ACTION="${action}">
   <DATE>${tallyDate}</DATE>
   <EFFECTIVEDATE>${tallyDate}</EFFECTIVEDATE>
   ${guidTag}
@@ -1819,20 +1788,19 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <NARRATION>${esc(narration)}</NARRATION>
   ${billToXml}
   ${shipToXml}
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
-    <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
-    <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
+    <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
     <BILLALLOCATIONS.LIST>
       <NAME>${esc(inv.invoiceNo)}</NAME>
       <BILLTYPE>New Ref</BILLTYPE>
       <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
-      <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
+      <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
     </BILLALLOCATIONS.LIST>
-  </LEDGERENTRIES.LIST>
-  ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}${inventoryEntries}
+  </ALLLEDGERENTRIES.LIST>
+  ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}
 </VOUCHER>`;
         } // end fallback (legacy mapper)
 
