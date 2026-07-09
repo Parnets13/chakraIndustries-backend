@@ -218,6 +218,14 @@ export const bulkUpload = async (req, res) => {
     const cfg = await TallyConfig.findOne({}, 'tallyPeriodEnd').lean();
     const periodEnd = cfg?.tallyPeriodEnd || null;
 
+    // ── Log what the frontend actually sent — confirms tallySalesLedger arrives ──
+    console.log(`[bulkUpload] INCOMING: ${invoices.length} invoices from frontend`);
+    invoices.slice(0, 3).forEach((inv, ii) => {
+      (inv.items || []).forEach((it, j) => {
+        console.log(`[bulkUpload] INCOMING inv[${ii}] item[${j}]: "${it.description || it.name}" tallySalesLedger="${it.tallySalesLedger || ''}" hsn="${it.hsn || ''}"`);
+      });
+    });
+
     // ── Pre-fetch ItemMaster for all item names across all uploaded rows ──────
     // Avoids per-row DB queries and ensures tallySalesLedger + hsn are stamped
     // on every item so normalizeToTallyVoucher can emit ALLINVENTORYENTRIES.
@@ -285,6 +293,36 @@ export const bulkUpload = async (req, res) => {
     }
 
     console.log(`[bulkUpload] DEBUG: ${allItemNames.length} unique item names, ${itemMasterDocs.length} found in ItemMaster`);
+
+    // ── Eager backfill: for existing items whose tallySalesLedger is blank,
+    //    write the value from the Excel rows NOW — before the debug log and
+    //    before normalizeToTallyVoucher runs — so the in-memory map is accurate.
+    const backfillOps = [];
+    for (const name of allItemNames) {
+      const im = itemMasterMap.get(name);
+      if (!im) continue; // will be handled by $setOnInsert path above
+      if (im.tallySalesLedger) continue; // already has a value — don't overwrite
+      // Find the first uploaded row for this item that carries a Sales Ledger value
+      const firstWithLedger = invoices
+        .flatMap(inv => inv.items || [])
+        .find(i => (i.description || i.name || '').trim() === name && (i.tallySalesLedger || '').trim());
+      if (!firstWithLedger) continue;
+      const newLedger = firstWithLedger.tallySalesLedger.trim();
+      im.tallySalesLedger = newLedger; // update in-memory map immediately
+      backfillOps.push({
+        updateOne: {
+          filter: { name, $or: [{ tallySalesLedger: { $exists: false } }, { tallySalesLedger: '' }] },
+          update: { $set: { tallySalesLedger: newLedger } },
+        },
+      });
+    }
+    if (backfillOps.length > 0) {
+      console.log(`[bulkUpload] Backfilling tallySalesLedger for ${backfillOps.length} existing ItemMaster entries`);
+      ItemMaster.bulkWrite(backfillOps, { ordered: false }).catch(e =>
+        console.warn('[bulkUpload] tallySalesLedger backfill error (non-fatal):', e.message)
+      );
+    }
+
     allItemNames.forEach(n => {
       const im = itemMasterMap.get(n);
       console.log(`[bulkUpload] DEBUG item "${n}": hsn="${im?.hsn || ''}" tallySalesLedger="${im?.tallySalesLedger || ''}"`);
@@ -324,15 +362,6 @@ export const bulkUpload = async (req, res) => {
           //    GSTLEDGERSOURCE in Tally XML, but stock item names are NOT ledgers.
           //    Tally silently returns EXCEPTIONS=1 when a non-ledger is used there.
           const tallySalesLedger = (item.tallySalesLedger || '').trim() || (im?.tallySalesLedger || '').trim();
-          // If the Excel gave us a ledger value and ItemMaster has none, backfill it now
-          // so future exports of this item don't need the column to be present.
-          if (tallySalesLedger && im && !im.tallySalesLedger) {
-            // Fire-and-forget — non-blocking; failure here does not affect the upload
-            ItemMaster.updateOne({ name }, { $set: { tallySalesLedger } }).catch(e =>
-              console.warn(`[bulkUpload] ItemMaster backfill of tallySalesLedger for "${name}" failed: ${e.message}`)
-            );
-            im.tallySalesLedger = tallySalesLedger; // update in-memory map too
-          }
           return {
             ...item,
             hsn:             (item.hsn || '').trim() || (im?.hsn || '').trim(),
