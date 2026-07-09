@@ -1244,6 +1244,8 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   //     ACCOUNTINGALLOCATIONS → Sales Accounts
 
   // ── Ledger entries ────────────────────────────────────────────────────────
+  // Sales vouchers with OBJVIEW="Invoice Voucher View" require ALLLEDGERENTRIES.LIST
+  // (not LEDGERENTRIES.LIST). Using LEDGERENTRIES.LIST causes silent EXCEPTIONS=1.
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
       <BILLALLOCATIONS.LIST>
@@ -1260,13 +1262,13 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
       : Math.abs(entry.amount || 0).toFixed(2);
 
     return `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(entry.ledgerName || '')}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${entry.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <ISPARTYLEDGER>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISPARTYLEDGER>
     <AMOUNT>${amt}</AMOUNT>${billAllocsXml}
-  </LEDGERENTRIES.LIST>`;
+  </ALLLEDGERENTRIES.LIST>`;
   }).join('');
 
   // ── Inventory entries (item names in Tally item column) ───────────────────
@@ -1719,32 +1721,32 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const salesBase   = +(grandTotal - totalTax).toFixed(2);
 
           const cgstEntry = totalCGST > 0 ? `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(cgstLedgerName(salesBase, totalCGST, tallyGstLedgers))}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
     <AMOUNT>${totalCGST.toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>` : '';
+  </ALLLEDGERENTRIES.LIST>` : '';
 
           const sgstEntry = totalSGST > 0 ? `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(sgstLedgerName(salesBase, totalSGST, tallyGstLedgers))}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
     <AMOUNT>${totalSGST.toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>` : '';
+  </ALLLEDGERENTRIES.LIST>` : '';
 
           const igstEntry = totalIGST > 0 ? `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(igstLedgerName(salesBase, totalIGST, tallyGstLedgers))}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
     <AMOUNT>${totalIGST.toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>` : '';
+  </ALLLEDGERENTRIES.LIST>` : '';
 
           const salesAccEntry = `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>Sales Accounts</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
     <AMOUNT>${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>`;
+  </ALLLEDGERENTRIES.LIST>`;
 
           const legacyPoRef = (inv.buyersOrderNo || inv.purchaseOrderRef || '').trim();
 
@@ -1853,7 +1855,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <NARRATION>${esc(narration)}</NARRATION>
   ${billToXml}
   ${shipToXml}
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
@@ -1865,7 +1867,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
       <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
     </BILLALLOCATIONS.LIST>
-  </LEDGERENTRIES.LIST>
+  </ALLLEDGERENTRIES.LIST>
   ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}${inventoryEntries}
 </VOUCHER>`;
         } // end fallback (legacy mapper)
