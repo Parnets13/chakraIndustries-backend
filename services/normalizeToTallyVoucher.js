@@ -322,23 +322,17 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     );
   }
 
-  // ── Narration — includes item names, PO number, invoice date ─────────────
+  // ── Narration — free text only (invoice ref + date) ─────────────────────
+  // Item names and PO number are now carried in structured XML fields
+  // (ALLINVENTORYENTRIES.LIST and BUYERSORDERNO/BASICORDERDATE), so the narration
+  // no longer needs to be a workaround string. Keep it short and human-readable.
   const origDateFmt = invoiceData.invoiceDate
     ? new Date(invoiceData.invoiceDate).toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'numeric' })
-    : '';
-  // Build item summary: "HYDRA STEEL WATER BOTTLE 1000ML x1, SS Bottle x2"
-  const itemSummary = validItems.length > 0
-    ? validItems.map(i => {
-        const name = (i.description || i.name || '').toString().trim();
-        const qty  = +(i.qty || 1);
-        return qty > 1 ? `${name} x${qty}` : name;
-      }).join(', ')
     : '';
   const poRef = (invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '').toString().trim();
   const narration = [
     `Inv: ${invoiceNo}`,
     origDateFmt ? origDateFmt : null,
-    itemSummary || null,
     poRef ? `PO: ${poRef}` : null,
     invoiceData.notes || null,
   ].filter(Boolean).join(' | ');

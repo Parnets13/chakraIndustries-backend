@@ -704,11 +704,10 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
       // We derive salesBase from grandTotal to guarantee balance regardless of any
       // rounding in item-level amounts. This is the Tally-standard approach.
 
-      // ── PROVEN WORKING FORMAT (T-C): Pure accounting voucher ────────────
-      // ALLINVENTORYENTRIES not used — this Tally company is in "Accounts Only"
-      // mode and silently rejects any inventory entries in Sales vouchers.
-      //
-      // Balance: Party(-grandTotal) + CGST(+cgst) + SGST(+sgst) + SalesAccounts(+base) = 0
+      // ── Build voucher: Item Invoice format ──────────────────────────────
+      // ALLINVENTORYENTRIES.LIST is populated below when items are available,
+      // making Tally treat this as an Item Invoice (Name of Item / Qty / Rate).
+      // When no items are present, falls back to pure-accounting format.
       const grandTotal  = +((inv.grandTotal || inv.totalAmount || 0)).toFixed(2);
       let   cgst        = +((inv.cgstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.cgst||0),0))).toFixed(2);
       let   sgst        = +((inv.sgstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.sgst||0),0))).toFixed(2);
@@ -744,15 +743,80 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
       const origDateFmt  = inv.invoiceDate
         ? new Date(inv.invoiceDate).toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'numeric' })
         : '';
-      const itemSummary  = (inv.items||[]).map(i => `${i.description||i.name||''} x${i.qty||1}`).join(', ');
 
+      // Narration: free text only — item names and PO are in structured XML fields
       const narration = [
         `ERP Inv: ${inv.invoiceNo}`,
         origDateFmt ? `Original Invoice Date: ${origDateFmt}` : null,
-        itemSummary || null,
-        inv.purchaseOrderRef ? `PO: ${inv.purchaseOrderRef}` : null,
         inv.notes || null,
       ].filter(Boolean).join(' | ');
+
+      // Build ALLINVENTORYENTRIES.LIST for each line item
+      const batchInvItems = (inv.items || []).filter(i => (i.description || i.name || '').trim());
+      const batchItemAmounts = batchInvItems.map(i => {
+        const qty  = +(i.qty || 1);
+        const rate = +(i.rate || 0);
+        return +(i.amount || i.basic || (qty * rate)).toFixed(2);
+      });
+      const batchItemsTotal = +batchItemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
+      const useBatchInventory = batchInvItems.length > 0 && Math.abs(batchItemsTotal - salesBase) <= 0.10;
+      let batchInvAllocated = 0;
+      const batchInventoryXml = useBatchInventory ? batchInvItems.map((item, i) => {
+        const itemName = (item.description || item.name || '').trim();
+        const itemQty  = +(item.qty || 1);
+        const itemRate = +(item.rate || 0);
+        const isLast   = i === batchInvItems.length - 1;
+        const itemAmt  = isLast
+          ? +(salesBase - batchInvAllocated).toFixed(2)
+          : batchItemAmounts[i];
+        batchInvAllocated = +(batchInvAllocated + (isLast ? itemAmt : batchItemAmounts[i])).toFixed(2);
+        const itemUnit = 'Nos';
+        return `
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <RATE>${itemRate.toFixed(2)}/${itemUnit}</RATE>
+    <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+    <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
+    <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
+    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
+    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
+    <ACCOUNTINGALLOCATIONS.LIST>
+      <LEDGERNAME>Sales Accounts</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+      <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+    </ACCOUNTINGALLOCATIONS.LIST>
+  </ALLINVENTORYENTRIES.LIST>`;
+      }).join('') : '';
+
+      // ── Bill To / Ship To address blocks ──────────────────────────────────
+      const batchBillName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
+      const batchBillAddr  = (inv.billToAddress || inv.partyAddress || '').trim();
+      const batchBillCity  = (inv.billToCity || inv.partyCity || '').trim();
+      const batchBillState = (inv.billToState || inv.partyState || '').trim();
+      const batchBillGST   = (inv.billToGST || inv.partyGST || '').trim();
+      const batchBillAddrLines = [batchBillAddr, [batchBillCity, batchBillState].filter(Boolean).join(', ')].filter(Boolean);
+      const batchBillToXml = (batchBillName || batchBillAddr) ? `
+  <ADDRESS.LIST TYPE="Address">
+    <ADDRESS>${esc(batchBillName)}</ADDRESS>
+    ${batchBillAddrLines.map(l => `<ADDRESS>${esc(l)}</ADDRESS>`).join('\n    ')}
+    ${batchBillGST ? `<ADDRESS>GSTIN: ${esc(batchBillGST)}</ADDRESS>` : ''}
+  </ADDRESS.LIST>` : '';
+
+      const batchShipName  = (inv.shipToName || inv.shipToMailingName || '').trim();
+      const batchShipAddr  = (inv.shipToAddress || '').trim();
+      const batchShipCity  = (inv.shipToCity  || '').trim();
+      const batchShipState = (inv.shipToState || '').trim();
+      const batchShipGST   = (inv.shipToGST   || '').trim();
+      const hasBatchShipTo = !!(batchShipName || batchShipAddr);
+      const batchShipAddrLines = [batchShipAddr, [batchShipCity, batchShipState].filter(Boolean).join(', ')].filter(Boolean);
+      const batchShipToXml = hasBatchShipTo ? `
+  <CONSIGNEEMAILINGNAME>${esc(batchShipName || batchBillName)}</CONSIGNEEMAILINGNAME>
+  ${batchShipAddrLines.map(l => `<CONSIGNEEADDRESS>${esc(l)}</CONSIGNEEADDRESS>`).join('\n  ')}
+  ${batchShipState ? `<CONSIGNEESTATE>${esc(batchShipState)}</CONSIGNEESTATE>` : ''}
+  ${batchShipGST   ? `<CONSIGNEEGSTIN>${esc(batchShipGST)}</CONSIGNEEGSTIN>` : ''}` : '';
 
       const vXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
@@ -765,6 +829,8 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(inv.purchaseOrderRef || inv.buyersOrderNo || '')}</BUYERSORDERNO>
   <NARRATION>${esc(narration)}</NARRATION>
+  ${batchBillToXml}
+  ${batchShipToXml}
   <LEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
@@ -793,11 +859,12 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
     <AMOUNT>${igst.toFixed(2)}</AMOUNT>
   </LEDGERENTRIES.LIST>` : ''}
-  <LEDGERENTRIES.LIST>
+  ${!useBatchInventory ? `<LEDGERENTRIES.LIST>
     <LEDGERNAME>Sales Accounts</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
     <AMOUNT>${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>
+  </LEDGERENTRIES.LIST>` : ''}
+  ${batchInventoryXml}
 </VOUCHER>`;
 
       if (idx === 0) LOG(`pushSalesVouchersToTally: FIRST INVOICE XML:\n${vXml}`);
@@ -963,23 +1030,19 @@ function buildSingleVoucherXml(inv, cfg) {
     ${billToGST ? `<ADDRESS>GSTIN: ${esc(billToGST)}</ADDRESS>` : ''}
   </ADDRESS.LIST>` : '';
 
-  const shipToName    = (v.shipToName    || v.partyLedgerName || '').trim();
+  const shipToName    = (v.shipToName    || '').trim();
   const shipToAddress = (v.shipToAddress || billToAddress).trim();
   const shipToCity    = (v.shipToCity    || billToCity).trim();
   const shipToState   = (v.shipToState   || billToState).trim();
   const shipToGST     = (v.shipToGST     || billToGST).trim();
 
-  const shipToXml = (shipToName || shipToAddress) ? `
-  <BASICBASEPARTYDETAILS.LIST>
-    <BASICBUYERNAME>${esc(shipToName)}</BASICBUYERNAME>
-    <BASICBUYERADDRESS.LIST>
-      <BASICBUYERADDRESS>${esc(shipToAddress)}</BASICBUYERADDRESS>
-      ${shipToCity  ? `<BASICBUYERADDRESS>${esc(shipToCity)}</BASICBUYERADDRESS>` : ''}
-      ${shipToState ? `<BASICBUYERADDRESS>${esc(shipToState)}</BASICBUYERADDRESS>` : ''}
-    </BASICBUYERADDRESS.LIST>
-    ${shipToState ? `<BASICBUYERSTATE>${esc(shipToState)}</BASICBUYERSTATE>` : ''}
-    ${shipToGST   ? `<BASICBUYERGSTIN>${esc(shipToGST)}</BASICBUYERGSTIN>` : ''}
-  </BASICBASEPARTYDETAILS.LIST>` : '';
+  const hasShipTo = !!(v.shipToName?.trim() || v.shipToAddress?.trim());
+  const shipAddrLines = [shipToAddress, [shipToCity, shipToState].filter(Boolean).join(', ')].filter(Boolean);
+  const shipToXml = hasShipTo ? `
+  <CONSIGNEEMAILINGNAME>${esc(shipToName || billToName)}</CONSIGNEEMAILINGNAME>
+  ${shipAddrLines.map(l => `<CONSIGNEEADDRESS>${esc(l)}</CONSIGNEEADDRESS>`).join('\n  ')}
+  ${shipToState ? `<CONSIGNEESTATE>${esc(shipToState)}</CONSIGNEESTATE>` : ''}
+  ${shipToGST   ? `<CONSIGNEEGSTIN>${esc(shipToGST)}</CONSIGNEEGSTIN>` : ''}` : '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
@@ -1100,10 +1163,48 @@ export async function pushSingleInvoiceToTally(invoiceId) {
       const narration = [
         `ERP Inv: ${inv.invoiceNo}`,
         origFmt ? `Original Invoice Date: ${origFmt}` : null,
-        (inv.items||[]).map(i=>`${i.description||i.name||''} x${i.qty||1}`).join(', ') || null,
-        inv.purchaseOrderRef ? `PO: ${inv.purchaseOrderRef}` : null,
         inv.notes || null,
       ].filter(Boolean).join(' | ');
+
+      // Build ALLINVENTORYENTRIES.LIST for each line item
+      const invItems = (inv.items || []).filter(i => (i.description || i.name || '').trim());
+      const invItemAmounts = invItems.map(i => {
+        const qty  = +(i.qty || 1);
+        const rate = +(i.rate || 0);
+        return +(i.amount || i.basic || (qty * rate)).toFixed(2);
+      });
+      const invItemsTotal = +invItemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
+      const useLegacyInventory = invItems.length > 0 && Math.abs(invItemsTotal - salesBase) <= 0.10;
+      let legacyInvAllocated = 0;
+      const legacyInventoryXml = useLegacyInventory ? invItems.map((item, i) => {
+        const itemName = (item.description || item.name || '').trim();
+        const itemQty  = +(item.qty || 1);
+        const itemRate = +(item.rate || 0);
+        const isLast   = i === invItems.length - 1;
+        const itemAmt  = isLast
+          ? +(salesBase - legacyInvAllocated).toFixed(2)
+          : invItemAmounts[i];
+        legacyInvAllocated = +(legacyInvAllocated + (isLast ? itemAmt : invItemAmounts[i])).toFixed(2);
+        const itemUnit = 'Nos';
+        return `
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <RATE>${itemRate.toFixed(2)}/${itemUnit}</RATE>
+    <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+    <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
+    <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
+    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
+    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
+    <ACCOUNTINGALLOCATIONS.LIST>
+      <LEDGERNAME>Sales Accounts</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+      <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+    </ACCOUNTINGALLOCATIONS.LIST>
+  </ALLINVENTORYENTRIES.LIST>`;
+      }).join('') : '';
 
       voucherXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
@@ -1116,6 +1217,35 @@ export async function pushSingleInvoiceToTally(invoiceId) {
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(inv.purchaseOrderRef || inv.buyersOrderNo || '')}</BUYERSORDERNO>
   <NARRATION>${esc(narration)}</NARRATION>
+  ${(() => {
+    const sBillName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
+    const sBillAddr  = (inv.billToAddress || inv.partyAddress || '').trim();
+    const sBillCity  = (inv.billToCity || inv.partyCity || '').trim();
+    const sBillState = (inv.billToState || inv.partyState || '').trim();
+    const sBillGST   = (inv.billToGST || inv.partyGST || '').trim();
+    const sBillLines = [sBillAddr, [sBillCity, sBillState].filter(Boolean).join(', ')].filter(Boolean);
+    return (sBillName || sBillAddr) ? `
+  <ADDRESS.LIST TYPE="Address">
+    <ADDRESS>${esc(sBillName)}</ADDRESS>
+    ${sBillLines.map(l => `<ADDRESS>${esc(l)}</ADDRESS>`).join('\n    ')}
+    ${sBillGST ? `<ADDRESS>GSTIN: ${esc(sBillGST)}</ADDRESS>` : ''}
+  </ADDRESS.LIST>` : '';
+  })()}
+  ${(() => {
+    const sShipName  = (inv.shipToName || inv.shipToMailingName || '').trim();
+    const sShipAddr  = (inv.shipToAddress || '').trim();
+    const sShipCity  = (inv.shipToCity  || '').trim();
+    const sShipState = (inv.shipToState || '').trim();
+    const sShipGST   = (inv.shipToGST   || '').trim();
+    if (!(sShipName || sShipAddr)) return '';
+    const sBillName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
+    const sShipLines = [sShipAddr, [sShipCity, sShipState].filter(Boolean).join(', ')].filter(Boolean);
+    return `
+  <CONSIGNEEMAILINGNAME>${esc(sShipName || sBillName)}</CONSIGNEEMAILINGNAME>
+  ${sShipLines.map(l => `<CONSIGNEEADDRESS>${esc(l)}</CONSIGNEEADDRESS>`).join('\n  ')}
+  ${sShipState ? `<CONSIGNEESTATE>${esc(sShipState)}</CONSIGNEESTATE>` : ''}
+  ${sShipGST   ? `<CONSIGNEEGSTIN>${esc(sShipGST)}</CONSIGNEEGSTIN>` : ''}`;
+  })()}
   <LEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
@@ -1132,11 +1262,12 @@ export async function pushSingleInvoiceToTally(invoiceId) {
   ${cgst>0&&cgstLed ? `<LEDGERENTRIES.LIST><LEDGERNAME>${esc(cgstLed)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER><AMOUNT>${cgst.toFixed(2)}</AMOUNT></LEDGERENTRIES.LIST>` : ''}
   ${sgst>0&&sgstLed ? `<LEDGERENTRIES.LIST><LEDGERNAME>${esc(sgstLed)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER><AMOUNT>${sgst.toFixed(2)}</AMOUNT></LEDGERENTRIES.LIST>` : ''}
   ${igst>0&&igstLed ? `<LEDGERENTRIES.LIST><LEDGERNAME>${esc(igstLed)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER><AMOUNT>${igst.toFixed(2)}</AMOUNT></LEDGERENTRIES.LIST>` : ''}
-  <LEDGERENTRIES.LIST>
+  ${!useLegacyInventory ? `<LEDGERENTRIES.LIST>
     <LEDGERNAME>Sales Accounts</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
     <AMOUNT>${(totalTax>0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>
+  </LEDGERENTRIES.LIST>` : ''}
+  ${legacyInventoryXml}
 </VOUCHER>`;
     }
 
