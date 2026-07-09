@@ -1233,43 +1233,73 @@ function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
 function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const v = tallyVoucher;
 
-  // ── ALLLEDGERENTRIES.LIST sign convention ─────────────────────────────────
-  //   Party (debtor) → ISDEEMEDPOSITIVE=Yes, AMOUNT=negative
-  //   GST / Sales    → ISDEEMEDPOSITIVE=No,  AMOUNT=positive
+  // ── Tally Sales Invoice format ────────────────────────────────────────────
+  // Uses OBJVIEW="Invoice Voucher View" with:
+  //   LEDGERENTRIES.LIST  — for party (debit) + GST + Sales Accounts (credits)
+  //   ALLINVENTORYENTRIES.LIST — for stock items (qty, rate, item name)
+  //
+  // LEDGERENTRIES.LIST sign convention (Invoice Voucher View):
+  //   All amounts are POSITIVE. ISDEEMEDPOSITIVE controls direction:
+  //     Party  → ISDEEMEDPOSITIVE=Yes  (Dr)  AMOUNT=+grandTotal
+  //     Credit → ISDEEMEDPOSITIVE=No   (Cr)  AMOUNT=+creditAmount
+  //
+  // ALLINVENTORYENTRIES.LIST:
+  //   Always ISDEEMEDPOSITIVE=No (stock going out on sales)
+  //   ACCOUNTINGALLOCATIONS must reference "Sales Accounts" (always exists)
+  //   AMOUNT = positive item amount
 
+  // ── Ledger entries ────────────────────────────────────────────────────────
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
       <BILLALLOCATIONS.LIST>
         <NAME>${esc(ba.name || '')}</NAME>
         <BILLTYPE>${esc(ba.billType || 'New Ref')}</BILLTYPE>
         <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
-        <AMOUNT>${(-Math.abs(ba.amount || 0)).toFixed(2)}</AMOUNT>
+        <AMOUNT>${Math.abs(ba.amount || 0).toFixed(2)}</AMOUNT>
       </BILLALLOCATIONS.LIST>`).join('');
 
-    const amt = entry.isDeemedPositive
-      ? (-Math.abs(entry.amount || 0)).toFixed(2)
-      : Math.abs(entry.amount || 0).toFixed(2);
+    // In Invoice Voucher View, ALL amounts in LEDGERENTRIES.LIST are positive.
+    const amt = Math.abs(entry.amount || 0).toFixed(2);
 
     return `
-  <ALLLEDGERENTRIES.LIST>
+  <LEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(entry.ledgerName || '')}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${entry.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
+    <ISPARTYLEDGER>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISPARTYLEDGER>
     <AMOUNT>${amt}</AMOUNT>${billAllocsXml}
-  </ALLLEDGERENTRIES.LIST>`;
+  </LEDGERENTRIES.LIST>`;
   }).join('');
 
-  // ── Item names go in narration only — no ALLINVENTORYENTRIES ────────────
-  // Adding ALLINVENTORYENTRIES.LIST to ALLLEDGERENTRIES-format vouchers causes
-  // Tally to reject them silently (EXCEPTIONS=1). Items appear in the Narration.
-  const inventoryEntriesXml = ''; // intentionally empty
+  // ── Inventory entries — item names show in Tally sales register ──────────
+  const inventoryEntriesXml = (v.allInventoryEntries || [])
+    .filter(item => (item.stockItemName || '').trim())
+    .map(item => {
+      const amt = Math.abs(item.amount || 0).toFixed(2);
+      return `
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${esc(item.stockItemName)}</STOCKITEMNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <RATE>${esc(item.rate || '')}</RATE>
+    <AMOUNT>${amt}</AMOUNT>
+    <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
+    <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST>
+      <LEDGERNAME>Sales Accounts</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+      <AMOUNT>${amt}</AMOUNT>
+    </ACCOUNTINGALLOCATIONS.LIST>
+  </ALLINVENTORYENTRIES.LIST>`;
+    }).join('');
 
   // ── Bill-to address ───────────────────────────────────────────────────────
+  const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
   const billToAddress = (v.billToAddress || '').trim();
   const billToCity    = (v.billToCity    || '').trim();
   const billToState   = (v.billToState   || '').trim();
   const billToGST     = (v.billToGST     || '').trim();
-
   const billAddrLines = [billToAddress, [billToCity, billToState].filter(Boolean).join(', ')].filter(Boolean);
   const billToXml = (billToName || billToAddress) ? `
   <ADDRESS.LIST TYPE="Address">
@@ -1279,36 +1309,33 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   </ADDRESS.LIST>` : '';
 
   // ── Ship-to details ───────────────────────────────────────────────────────
-  // BASICBASEPARTYDETAILS.LIST = ship-to in Tally Sales voucher
   const shipToName    = (v.shipToName    || '').trim();
   const shipToAddress = (v.shipToAddress || '').trim();
   const shipToCity    = (v.shipToCity    || '').trim();
   const shipToState   = (v.shipToState   || '').trim();
   const shipToGST     = (v.shipToGST     || '').trim();
-
-  // Fall back to bill-to when ship-to is empty (common for same-address deliveries)
-  const effectiveShipName  = shipToName    || billToName;
-  const effectiveShipAddr  = shipToAddress || billToAddress;
-  const effectiveShipCity  = shipToCity    || billToCity;
-  const effectiveShipState = shipToState   || billToState;
-  const effectiveShipGST   = shipToGST     || billToGST;
-
-  const shipToXml = effectiveShipName ? `
+  // Fall back to bill-to when ship-to is empty
+  const effShipName  = shipToName    || billToName;
+  const effShipAddr  = shipToAddress || billToAddress;
+  const effShipCity  = shipToCity    || billToCity;
+  const effShipState = shipToState   || billToState;
+  const effShipGST   = shipToGST     || billToGST;
+  const shipToXml = effShipName ? `
   <BASICBASEPARTYDETAILS.LIST>
-    <BASICBUYERNAME>${esc(effectiveShipName)}</BASICBUYERNAME>
+    <BASICBUYERNAME>${esc(effShipName)}</BASICBUYERNAME>
     <BASICBUYERADDRESS.LIST>
-      <BASICBUYERADDRESS>${esc(effectiveShipAddr)}</BASICBUYERADDRESS>
-      ${effectiveShipCity  ? `<BASICBUYERADDRESS>${esc(effectiveShipCity)}</BASICBUYERADDRESS>` : ''}
-      ${effectiveShipState ? `<BASICBUYERADDRESS>${esc(effectiveShipState)}</BASICBUYERADDRESS>` : ''}
+      <BASICBUYERADDRESS>${esc(effShipAddr)}</BASICBUYERADDRESS>
+      ${effShipCity  ? `<BASICBUYERADDRESS>${esc(effShipCity)}</BASICBUYERADDRESS>` : ''}
+      ${effShipState ? `<BASICBUYERADDRESS>${esc(effShipState)}</BASICBUYERADDRESS>` : ''}
     </BASICBUYERADDRESS.LIST>
-    ${effectiveShipState ? `<BASICBUYERSTATE>${esc(effectiveShipState)}</BASICBUYERSTATE>` : ''}
-    ${effectiveShipGST   ? `<BASICBUYERGSTIN>${esc(effectiveShipGST)}</BASICBUYERGSTIN>` : ''}
+    ${effShipState ? `<BASICBUYERSTATE>${esc(effShipState)}</BASICBUYERSTATE>` : ''}
+    ${effShipGST   ? `<BASICBUYERGSTIN>${esc(effShipGST)}</BASICBUYERGSTIN>` : ''}
   </BASICBASEPARTYDETAILS.LIST>` : '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
   return `
-<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}">
+<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
   <DATE>${esc(v.date || '')}</DATE>
   <EFFECTIVEDATE>${esc(v.effectiveDate || v.date || '')}</EFFECTIVEDATE>
   ${guidTag}
@@ -1658,60 +1685,34 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const salesBase   = +(grandTotal - totalTax).toFixed(2);
 
           const cgstEntry = totalCGST > 0 ? `
-<ALLLEDGERENTRIES.LIST>
-  <LEDGERNAME>${esc(cgstLedgerName(salesBase, totalCGST, tallyGstLedgers))}</LEDGERNAME>
-  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-  <AMOUNT>${totalCGST.toFixed(2)}</AMOUNT>
-</ALLLEDGERENTRIES.LIST>` : '';
+  <LEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(cgstLedgerName(salesBase, totalCGST, tallyGstLedgers))}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <AMOUNT>${totalCGST.toFixed(2)}</AMOUNT>
+  </LEDGERENTRIES.LIST>` : '';
 
           const sgstEntry = totalSGST > 0 ? `
-<ALLLEDGERENTRIES.LIST>
-  <LEDGERNAME>${esc(sgstLedgerName(salesBase, totalSGST, tallyGstLedgers))}</LEDGERNAME>
-  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-  <AMOUNT>${totalSGST.toFixed(2)}</AMOUNT>
-</ALLLEDGERENTRIES.LIST>` : '';
+  <LEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(sgstLedgerName(salesBase, totalSGST, tallyGstLedgers))}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <AMOUNT>${totalSGST.toFixed(2)}</AMOUNT>
+  </LEDGERENTRIES.LIST>` : '';
 
           const igstEntry = totalIGST > 0 ? `
-<ALLLEDGERENTRIES.LIST>
-  <LEDGERNAME>${esc(igstLedgerName(salesBase, totalIGST, tallyGstLedgers))}</LEDGERNAME>
-  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-  <AMOUNT>${totalIGST.toFixed(2)}</AMOUNT>
-</ALLLEDGERENTRIES.LIST>` : '';
+  <LEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(igstLedgerName(salesBase, totalIGST, tallyGstLedgers))}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <AMOUNT>${totalIGST.toFixed(2)}</AMOUNT>
+  </LEDGERENTRIES.LIST>` : '';
 
           const salesAccEntry = `
-<ALLLEDGERENTRIES.LIST>
-  <LEDGERNAME>Sales Accounts</LEDGERNAME>
-  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-  <AMOUNT>${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
-</ALLLEDGERENTRIES.LIST>`;
+  <LEDGERENTRIES.LIST>
+    <LEDGERNAME>Sales Accounts</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <AMOUNT>${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
+  </LEDGERENTRIES.LIST>`;
 
-          const legacyItemSummary = rawItems.length > 0
-            ? rawItems.map(i => {
-                const nm = (i.description || i.name || '').trim();
-                const q  = +(i.qty || 1);
-                return q > 1 ? `${nm} x${q}` : nm;
-              }).join(', ')
-            : '';
           const legacyPoRef = (inv.buyersOrderNo || inv.purchaseOrderRef || '').trim();
-          const narration = [
-            `Inv: ${inv.invoiceNo}`,
-            origDateFmt || null,
-            legacyItemSummary || null,
-            legacyPoRef ? `PO: ${legacyPoRef}` : null,
-            inv.notes || null,
-          ].filter(Boolean).join(' | ');
-
-          LOG(`Invoice ${inv.invoiceNo}: partyName="${inv.partyName}" tallyDate=${tallyDate} grandTotal=${grandTotal} cgst=${totalCGST}(${cgstLedgerName(salesBase, totalCGST, tallyGstLedgers)}) sgst=${totalSGST}(${sgstLedgerName(salesBase, totalSGST, tallyGstLedgers)}) igst=${totalIGST}(${igstLedgerName(salesBase, totalIGST, tallyGstLedgers)})`);
-
-          // Balance check: party debit must equal sum of all credit entries.
-          const creditTotal = +(totalCGST + totalSGST + totalIGST + (totalTax > 0 ? salesBase : grandTotal)).toFixed(2);
-          if (Math.abs(grandTotal - creditTotal) > 0.01) {
-            const reason = `Voucher imbalanced: debit=${grandTotal} credits=${creditTotal} (cgst=${totalCGST} sgst=${totalSGST} igst=${totalIGST} salesBase=${salesBase})`;
-            ERR(`Invoice ${inv.invoiceNo}: SKIPPED — ${reason}`);
-            failedItems.push({ id: inv.invoiceNo, error: reason });
-            await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', reason);
-            continue;
-          }
 
           const rawItems = (inv.items || []).filter(item => (item.description || item.name || '').trim());
           const itemAmounts = rawItems.map(item => {
@@ -1720,21 +1721,68 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             return +(item.amount || item.basic || (qty * rate)).toFixed(2);
           });
           const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
+          const useInventory = rawItems.length > 0 && Math.abs(itemsTotal - salesBase) <= 0.10;
 
-          // Item names appear in the Narration — no ALLINVENTORYENTRIES needed
-          // (mixing ALLINVENTORYENTRIES with ALLLEDGERENTRIES causes EXCEPTIONS=1)
+          // Inventory entries — always uses "Sales Accounts" ledger (exists in all Tally)
+          const inventoryEntries = useInventory ? rawItems.map((item, i) => {
+            const itemName = (item.description || item.name || '').trim();
+            const itemQty  = +(item.qty || 1);
+            const itemRate = +(item.rate || 0);
+            const itemAmt  = itemAmounts[i];
+            const itemUnit = tallyUnit(item.unit || 'Nos');
+            return `
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <RATE>${itemRate.toFixed(2)}/${itemUnit}</RATE>
+    <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+    <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
+    <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST>
+      <LEDGERNAME>Sales Accounts</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+      <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+    </ACCOUNTINGALLOCATIONS.LIST>
+  </ALLINVENTORYENTRIES.LIST>`;
+          }).join('') : '';
+
+          const legacyItemSummary = rawItems.map(i => {
+            const nm = (i.description || i.name || '').trim();
+            const q  = +(i.qty || 1);
+            return q > 1 ? `${nm} x${q}` : nm;
+          }).join(', ');
+          const narration = [
+            `Inv: ${inv.invoiceNo}`,
+            origDateFmt || null,
+            legacyItemSummary || null,
+            legacyPoRef ? `PO: ${legacyPoRef}` : null,
+            inv.notes || null,
+          ].filter(Boolean).join(' | ');
+
+          LOG(`Invoice ${inv.invoiceNo}: partyName="${inv.partyName}" tallyDate=${tallyDate} grandTotal=${grandTotal} cgst=${totalCGST} sgst=${totalSGST} igst=${totalIGST}`);
+
+          // Balance check
+          const creditTotal = +(totalCGST + totalSGST + totalIGST + (totalTax > 0 ? salesBase : grandTotal)).toFixed(2);
+          if (Math.abs(grandTotal - creditTotal) > 0.01) {
+            const reason = `Voucher imbalanced: debit=${grandTotal} credits=${creditTotal}`;
+            ERR(`Invoice ${inv.invoiceNo}: SKIPPED — ${reason}`);
+            failedItems.push({ id: inv.invoiceNo, error: reason });
+            await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', reason);
+            continue;
+          }
 
           const billName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
           const billAddr  = (inv.billToAddress || inv.partyAddress || '').trim();
           const billCity  = (inv.billToCity || inv.partyCity || '').trim();
           const billState = (inv.billToState || inv.partyState || '').trim();
           const billGST   = (inv.billToGST || inv.partyGST || '').trim();
-          const hasShipTo = !!(inv.shipToName || inv.shipToAddress || inv.shipToMailingName);
-          const shipName  = hasShipTo ? (inv.shipToName || inv.shipToMailingName || billName).trim() : billName;
-          const shipAddr  = hasShipTo ? (inv.shipToAddress || '').trim() : billAddr;
-          const shipCity  = hasShipTo ? (inv.shipToCity  || billCity).trim() : billCity;
-          const shipState = hasShipTo ? (inv.shipToState || billState).trim() : billState;
-          const shipGST   = hasShipTo ? (inv.shipToGST   || billGST).trim() : billGST;
+          const shipName  = (inv.shipToName || inv.shipToMailingName || billName).trim();
+          const shipAddr  = (inv.shipToAddress || billAddr).trim();
+          const shipCity  = (inv.shipToCity  || billCity).trim();
+          const shipState = (inv.shipToState || billState).trim();
+          const shipGST   = (inv.shipToGST   || billGST).trim();
 
           const billAddrLines = [billAddr, [billCity, billState].filter(Boolean).join(', ')].filter(Boolean);
 
@@ -1758,7 +1806,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   </BASICBASEPARTYDETAILS.LIST>`;
 
           voucherXml = `
-<VOUCHER VCHTYPE="Sales" ACTION="${action}">
+<VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
   <DATE>${tallyDate}</DATE>
   <EFFECTIVEDATE>${tallyDate}</EFFECTIVEDATE>
   ${guidTag}
@@ -1771,19 +1819,20 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <NARRATION>${esc(narration)}</NARRATION>
   ${billToXml}
   ${shipToXml}
-  <ALLLEDGERENTRIES.LIST>
+  <LEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
-    <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
+    <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
+    <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
     <BILLALLOCATIONS.LIST>
       <NAME>${esc(inv.invoiceNo)}</NAME>
       <BILLTYPE>New Ref</BILLTYPE>
       <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
-      <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
+      <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
     </BILLALLOCATIONS.LIST>
-  </ALLLEDGERENTRIES.LIST>
-  ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}
+  </LEDGERENTRIES.LIST>
+  ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}${inventoryEntries}
 </VOUCHER>`;
         } // end fallback (legacy mapper)
 
