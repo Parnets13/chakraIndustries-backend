@@ -1298,9 +1298,17 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
 
       // GST source fields — only emit when gstLedgerSource is set (i.e. item has a
       // specific sales ledger, not the generic "Sales Accounts" group).
+      // CRITICAL: Also suppress if gstLedgerSource equals the stockItemName itself —
+      // this means it was set using the item description as a fallback (not a real ledger).
+      // Using a stock item name as GSTLEDGERSOURCE causes silent EXCEPTIONS=1 in Tally.
       const gstLedgerSrc = (item.gstLedgerSource || '').trim();
       const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
       const gstHsnName   = (item.gstHsnName || '').trim();
+      const isGenericOrItemName = !gstLedgerSrc
+        || gstLedgerSrc.toLowerCase() === 'sales accounts'
+        || gstLedgerSrc === (item.stockItemName || '').trim();
+      const safeGstLedger = isGenericOrItemName ? '' : gstLedgerSrc;
+      const safeHsnLedger = isGenericOrItemName ? '' : hsnLedgerSrc;
 
       return `
   <ALLINVENTORYENTRIES.LIST>
@@ -1311,10 +1319,10 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     <AMOUNT>${absAmt}</AMOUNT>
     <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
     <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
-    ${gstLedgerSrc ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
-    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : ''}
-    ${hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
-    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : ''}
+    ${safeGstLedger ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
+    <GSTLEDGERSOURCE>${esc(safeGstLedger)}</GSTLEDGERSOURCE>` : ''}
+    ${safeHsnLedger ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
+    <HSNLEDGERSOURCE>${esc(safeHsnLedger)}</HSNLEDGERSOURCE>` : ''}
     <GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
     <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>
     ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}

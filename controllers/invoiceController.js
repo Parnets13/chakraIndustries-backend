@@ -24,7 +24,9 @@ async function enrichItemsFromItemMaster(items) {
     return {
       ...item,
       hsn:             item.hsn             || im?.hsn             || '',
-      tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || name,
+      // Do NOT fall back to the item name as tallySalesLedger.
+      // Using a stock item name as GSTLEDGERSOURCE in Tally XML causes EXCEPTIONS=1.
+      tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || '',
     };
   });
 }
@@ -309,10 +311,12 @@ export const bulkUpload = async (req, res) => {
           const im   = itemMasterMap.get(name);
           // tallySalesLedger priority:
           // 1. What's already on the item (from previous upload)
-          // 2. What's stored in ItemMaster (manually set)
-          // 3. The item description itself — use it directly as the Tally stock item name
-          //    so item name always appears in Tally without manual ledger setup
-          const tallySalesLedger = item.tallySalesLedger || im?.tallySalesLedger || name;
+          // 2. What's stored in ItemMaster (manually set via Item Master UI)
+          // 3. Empty string — do NOT fall back to the item description/name.
+          //    Using the item name as tallySalesLedger causes it to be sent as
+          //    GSTLEDGERSOURCE in Tally XML, but stock item names are NOT ledgers.
+          //    Tally silently returns EXCEPTIONS=1 when a non-ledger is used there.
+          const tallySalesLedger = item.tallySalesLedger || im?.tallySalesLedger || '';
           return {
             ...item,
             hsn:             item.hsn || im?.hsn || '',

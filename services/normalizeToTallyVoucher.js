@@ -186,11 +186,17 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     //   - "Sales"          → partial/wrong name, not a Tally ledger (causes EXCEPTIONS=1)
     //   - "Sales Accounts" → Tally group name, not a ledger
     //   - any voucher type name (sales, purchase, receipt, etc.)
+    //   - the item description/name itself → it's a stock item, not a ledger
     const INVALID_LEDGER_NAMES = new Set(['sales accounts', 'sales', 'purchase accounts', 'purchase', 'receipts', 'payments', '']);
     const TALLY_VOUCHER_TYPES = ['sales', 'purchase', 'receipt', 'payment', 'journal', 'contra', 'debit note', 'credit note', 'stock journal', 'vouchers'];
     const rawLedger = (item.tallySalesLedger || '').toString().trim();
     const rawLedgerLower = rawLedger.toLowerCase();
-    const isInvalidLedger = INVALID_LEDGER_NAMES.has(rawLedgerLower) || TALLY_VOUCHER_TYPES.includes(rawLedgerLower);
+    const itemNameLower = itemName.toLowerCase();
+    // Reject if it's an invalid name, a voucher type, or if it matches the stock item name
+    // (item name used as fallback = not a real ledger)
+    const isInvalidLedger = INVALID_LEDGER_NAMES.has(rawLedgerLower)
+      || TALLY_VOUCHER_TYPES.includes(rawLedgerLower)
+      || rawLedgerLower === itemNameLower;
     const salesLedger = (rawLedger && !isInvalidLedger) ? rawLedger : 'Sales Accounts';
     
     // Only emit GSTLEDGERSOURCE when salesLedger is NOT 'Sales Accounts'

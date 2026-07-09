@@ -922,8 +922,11 @@ function buildSingleVoucherXml(inv, cfg) {
 
     // Only emit GSTLEDGERSOURCE / HSNLEDGERSOURCE when the ledger is a specific
     // sales ledger — NOT "Sales Accounts" (which is a Tally group, not a ledger).
-    // Referencing "Sales Accounts" as GSTLEDGERSOURCE causes silent EXCEPTIONS=1.
-    const isGenericLedger = !gstLedgerSrc || gstLedgerSrc.toLowerCase() === 'sales accounts';
+    // Also suppress if gstLedgerSource equals the stockItemName itself (was set as
+    // item-name fallback, not a real ledger). Both cases cause silent EXCEPTIONS=1.
+    const isGenericLedger = !gstLedgerSrc
+      || gstLedgerSrc.toLowerCase() === 'sales accounts'
+      || gstLedgerSrc === (item.stockItemName || '').trim();
     const gstSourceXml = !isGenericLedger ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
     <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : '';
     const hsnSourceXml = !isGenericLedger && hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
