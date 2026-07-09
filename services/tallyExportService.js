@@ -1233,51 +1233,40 @@ function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
 function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const v = tallyVoucher;
 
-  // ── Pure-accounting voucher — NO inventory entries ────────────────────────
-  // We always emit LEDGERENTRIES.LIST only (pure accounting format).
-  // Inventory entries (ALLINVENTORYENTRIES.LIST) are intentionally omitted because:
-  //   1. They require a valid item-specific sales ledger stored per-item in Tally
-  //      (e.g. "HYDRA STEEL WATER BOTTLE Sales Local 5%"). If that ledger name is
-  //      wrong, missing, or a group name ("Sales", "Sales Accounts"), Tally silently
-  //      rejects the entire voucher with EXCEPTIONS=1 and no LINEERROR.
-  //   2. The stored tallyVoucher sub-documents have known bad ledger names ("Sales")
-  //      from old migration runs. Stripping inventory entries is the only safe option
-  //      until the data is fully re-migrated with correct ledger names.
-  //   3. Pure-accounting format (party + GST + Sales Accounts) is valid, complete,
-  //      and works reliably across all Tally versions.
+  // ── Use ALLLEDGERENTRIES.LIST format (non-invoice view) ──────────────────
+  // This is the same format used by purchase vouchers which work reliably.
+  // OBJVIEW="Invoice Voucher View" + LEDGERENTRIES.LIST has strict sign
+  // conventions that differ from the pure-voucher format and cause silent
+  // EXCEPTIONS=1 when amounts don't match Tally's internal expectations.
   //
-  // ── AMOUNT sign convention for LEDGERENTRIES.LIST (Invoice Voucher View) ──
-  // Tally requires ALL amounts in LEDGERENTRIES.LIST to be NEGATIVE.
-  // ISDEEMEDPOSITIVE controls direction, not the sign:
-  //   Party (debtor)   → ISDEEMEDPOSITIVE=Yes, AMOUNT=-grandTotal   (debit)
-  //   GST/Sales credit → ISDEEMEDPOSITIVE=No,  AMOUNT=-creditAmount (credit)
-  // Positive amounts in LEDGERENTRIES.LIST cause silent EXCEPTIONS=1.
+  // Sign convention for ALLLEDGERENTRIES.LIST:
+  //   Party (debtor, credit side in sales) → ISDEEMEDPOSITIVE=Yes, AMOUNT=-grandTotal
+  //   GST ledgers (credit)                 → ISDEEMEDPOSITIVE=No,  AMOUNT=+gstAmt
+  //   Sales Accounts (credit)              → ISDEEMEDPOSITIVE=No,  AMOUNT=+salesBase
 
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
-    const billAllocsXml = (entry.billAllocations || []).map(ba => {
-      // Bill allocation amounts must also be negative
-      const baAmt = -Math.abs(ba.amount || 0);
-      return `
+    const billAllocsXml = (entry.billAllocations || []).map(ba => `
       <BILLALLOCATIONS.LIST>
         <NAME>${esc(ba.name || '')}</NAME>
         <BILLTYPE>${esc(ba.billType || 'New Ref')}</BILLTYPE>
         <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
-        <AMOUNT>${baAmt.toFixed(2)}</AMOUNT>
-      </BILLALLOCATIONS.LIST>`;
-    }).join('');
+        <AMOUNT>${(-Math.abs(ba.amount || 0)).toFixed(2)}</AMOUNT>
+      </BILLALLOCATIONS.LIST>`).join('');
 
-    // All LEDGERENTRIES.LIST amounts must be negative regardless of debit/credit.
-    // ISDEEMEDPOSITIVE determines direction.
-    const amt = -Math.abs(entry.amount || 0);
+    // ALLLEDGERENTRIES.LIST sign rules:
+    //   isDeemedPositive=true  (debtor/party): amount is NEGATIVE
+    //   isDeemedPositive=false (credit):       amount is POSITIVE
+    const amt = entry.isDeemedPositive
+      ? (-Math.abs(entry.amount || 0)).toFixed(2)   // party → negative
+      : Math.abs(entry.amount || 0).toFixed(2);      // GST/Sales → positive
 
     return `
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(entry.ledgerName || '')}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${entry.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-    <ISPARTYLEDGER>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISPARTYLEDGER>
-    <AMOUNT>${amt.toFixed(2)}</AMOUNT>${billAllocsXml}
-  </LEDGERENTRIES.LIST>`;
+    <AMOUNT>${amt}</AMOUNT>${billAllocsXml}
+  </ALLLEDGERENTRIES.LIST>`;
   }).join('');
 
   const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
@@ -1313,7 +1302,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
   return `
-<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
+<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}">
   <DATE>${esc(v.date || '')}</DATE>
   <EFFECTIVEDATE>${esc(v.effectiveDate || v.date || '')}</EFFECTIVEDATE>
   ${guidTag}
@@ -1663,32 +1652,32 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const salesBase   = +(grandTotal - totalTax).toFixed(2);
 
           const cgstEntry = totalCGST > 0 ? `
-<LEDGERENTRIES.LIST>
+<ALLLEDGERENTRIES.LIST>
   <LEDGERNAME>${esc(cgstLedgerName(salesBase, totalCGST, tallyGstLedgers))}</LEDGERNAME>
-  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
-  <AMOUNT>-${totalCGST.toFixed(2)}</AMOUNT>
-</LEDGERENTRIES.LIST>` : '';
+  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+  <AMOUNT>${totalCGST.toFixed(2)}</AMOUNT>
+</ALLLEDGERENTRIES.LIST>` : '';
 
           const sgstEntry = totalSGST > 0 ? `
-<LEDGERENTRIES.LIST>
+<ALLLEDGERENTRIES.LIST>
   <LEDGERNAME>${esc(sgstLedgerName(salesBase, totalSGST, tallyGstLedgers))}</LEDGERNAME>
-  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
-  <AMOUNT>-${totalSGST.toFixed(2)}</AMOUNT>
-</LEDGERENTRIES.LIST>` : '';
+  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+  <AMOUNT>${totalSGST.toFixed(2)}</AMOUNT>
+</ALLLEDGERENTRIES.LIST>` : '';
 
           const igstEntry = totalIGST > 0 ? `
-<LEDGERENTRIES.LIST>
+<ALLLEDGERENTRIES.LIST>
   <LEDGERNAME>${esc(igstLedgerName(salesBase, totalIGST, tallyGstLedgers))}</LEDGERNAME>
-  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
-  <AMOUNT>-${totalIGST.toFixed(2)}</AMOUNT>
-</LEDGERENTRIES.LIST>` : '';
+  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+  <AMOUNT>${totalIGST.toFixed(2)}</AMOUNT>
+</ALLLEDGERENTRIES.LIST>` : '';
 
           const salesAccEntry = `
-<LEDGERENTRIES.LIST>
+<ALLLEDGERENTRIES.LIST>
   <LEDGERNAME>Sales Accounts</LEDGERNAME>
-  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
-  <AMOUNT>-${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
-</LEDGERENTRIES.LIST>`;
+  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+  <AMOUNT>${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
+</ALLLEDGERENTRIES.LIST>`;
 
           const narration = [
             `ERP Inv: ${inv.invoiceNo}`,
@@ -1822,7 +1811,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   </BASICBASEPARTYDETAILS.LIST>`;
 
           voucherXml = `
-<VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
+<VOUCHER VCHTYPE="Sales" ACTION="${action}">
   <DATE>${tallyDate}</DATE>
   <EFFECTIVEDATE>${tallyDate}</EFFECTIVEDATE>
   ${guidTag}
@@ -1835,11 +1824,10 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <NARRATION>${esc(narration)}</NARRATION>
   ${billToXml}
   ${shipToXml}
-  <LEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
-    <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
     <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
     <BILLALLOCATIONS.LIST>
       <NAME>${esc(inv.invoiceNo)}</NAME>
@@ -1847,7 +1835,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
       <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
     </BILLALLOCATIONS.LIST>
-  </LEDGERENTRIES.LIST>
+  </ALLLEDGERENTRIES.LIST>
   ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}
 </VOUCHER>`;
         } // end fallback (legacy mapper)
