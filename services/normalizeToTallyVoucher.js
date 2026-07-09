@@ -181,11 +181,17 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const itemAmount = itemAmounts[i];
     const itemUnit   = tallyUnit(item.unit || 'Nos');
     const itemHSN    = (item.hsn || '').toString().trim();
-    // Sales ledger: use item.tallySalesLedger if set, else 'Sales Accounts'
+    // Sales ledger: use item.tallySalesLedger if set and valid, else 'Sales Accounts'
+    // INVALID ledger names (must fall back to 'Sales Accounts'):
+    //   - "Sales"          → partial/wrong name, not a Tally ledger (causes EXCEPTIONS=1)
+    //   - "Sales Accounts" → Tally group name, not a ledger
+    //   - any voucher type name (sales, purchase, receipt, etc.)
+    const INVALID_LEDGER_NAMES = new Set(['sales accounts', 'sales', 'purchase accounts', 'purchase', 'receipts', 'payments', '']);
     const TALLY_VOUCHER_TYPES = ['sales', 'purchase', 'receipt', 'payment', 'journal', 'contra', 'debit note', 'credit note', 'stock journal', 'vouchers'];
     const rawLedger = (item.tallySalesLedger || '').toString().trim();
-    const isVoucherType = TALLY_VOUCHER_TYPES.includes(rawLedger.toLowerCase());
-    const salesLedger = (rawLedger && !isVoucherType) ? rawLedger : 'Sales Accounts';
+    const rawLedgerLower = rawLedger.toLowerCase();
+    const isInvalidLedger = INVALID_LEDGER_NAMES.has(rawLedgerLower) || TALLY_VOUCHER_TYPES.includes(rawLedgerLower);
+    const salesLedger = (rawLedger && !isInvalidLedger) ? rawLedger : 'Sales Accounts';
     
     // Only emit GSTLEDGERSOURCE when salesLedger is NOT 'Sales Accounts'
     const hasSpecificLedger = salesLedger.toLowerCase() !== 'sales accounts';

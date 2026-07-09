@@ -1245,11 +1245,19 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   // ledger (not "Sales Accounts" group). An inventory entry with no
   // ACCOUNTINGALLOCATIONS, or with "Sales Accounts" as its ledger, causes Tally
   // to try to book through a group name → silent EXCEPTIONS=1.
+  //
+  // KNOWN BAD LEDGER NAMES that must be blocked:
+  //   "Sales Accounts" — Tally group name, not a ledger
+  //   "Sales"          — partial/wrong name, not a ledger (causes EXCEPTIONS=1 silently)
+  //   ""               — empty
+  // Only let through names that look like a real item-specific sales ledger,
+  // e.g. "HYDRA STEEL WATER BOTTLE 1000ML Sales Local 5%", "SS Bottle Sales Interstate", etc.
+  const INVALID_INVENTORY_LEDGERS = new Set(['sales accounts', 'sales', 'purchase accounts', 'purchase', '']);
   const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
     if (!item.stockItemName) return false;
-    const acctLedger = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
-    // Only include if the accounting ledger is a real specific ledger (not a group name)
-    return acctLedger && acctLedger.toLowerCase() !== 'sales accounts';
+    const acctLedger = (item.accountingAllocations?.[0]?.ledgerName || '').trim().toLowerCase();
+    // Block known invalid/group names
+    return acctLedger && !INVALID_INVENTORY_LEDGERS.has(acctLedger);
   });
   const hasInventoryEntries = validInventoryEntries.length > 0;
 
