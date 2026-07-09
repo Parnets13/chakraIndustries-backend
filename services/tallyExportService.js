@@ -1233,49 +1233,42 @@ function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
 function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const v = tallyVoucher;
 
-  // ── Determine whether any inventory entries will be emitted ──────────────
-  // When inventory entries ARE present, the "Sales Accounts" ledger entry must
-  // be OMITTED from LEDGERENTRIES.LIST. Tally books the sales value implicitly
-  // through the inventory entries' ACCOUNTINGALLOCATIONS (or its own internal
-  // logic). Keeping Sales Accounts in both LEDGERENTRIES and ALLINVENTORYENTRIES
-  // causes a double-booking that Tally silently rejects with EXCEPTIONS=1 and
-  // zero diagnostic tags — the most confusing failure mode possible.
+  // ── Pure-accounting voucher — NO inventory entries ────────────────────────
+  // We always emit LEDGERENTRIES.LIST only (pure accounting format).
+  // Inventory entries (ALLINVENTORYENTRIES.LIST) are intentionally omitted because:
+  //   1. They require a valid item-specific sales ledger stored per-item in Tally
+  //      (e.g. "HYDRA STEEL WATER BOTTLE Sales Local 5%"). If that ledger name is
+  //      wrong, missing, or a group name ("Sales", "Sales Accounts"), Tally silently
+  //      rejects the entire voucher with EXCEPTIONS=1 and no LINEERROR.
+  //   2. The stored tallyVoucher sub-documents have known bad ledger names ("Sales")
+  //      from old migration runs. Stripping inventory entries is the only safe option
+  //      until the data is fully re-migrated with correct ledger names.
+  //   3. Pure-accounting format (party + GST + Sales Accounts) is valid, complete,
+  //      and works reliably across all Tally versions.
   //
-  // ADDITIONAL RULE: Only emit inventory entries that have a SPECIFIC accounting
-  // ledger (not "Sales Accounts" group). An inventory entry with no
-  // ACCOUNTINGALLOCATIONS, or with "Sales Accounts" as its ledger, causes Tally
-  // to try to book through a group name → silent EXCEPTIONS=1.
-  //
-  // KNOWN BAD LEDGER NAMES that must be blocked:
-  //   "Sales Accounts" — Tally group name, not a ledger
-  //   "Sales"          — partial/wrong name, not a ledger (causes EXCEPTIONS=1 silently)
-  //   ""               — empty
-  // Only let through names that look like a real item-specific sales ledger,
-  // e.g. "HYDRA STEEL WATER BOTTLE 1000ML Sales Local 5%", "SS Bottle Sales Interstate", etc.
-  const INVALID_INVENTORY_LEDGERS = new Set(['sales accounts', 'sales', 'purchase accounts', 'purchase', '']);
-  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
-    if (!item.stockItemName) return false;
-    const acctLedger = (item.accountingAllocations?.[0]?.ledgerName || '').trim().toLowerCase();
-    // Block known invalid/group names
-    return acctLedger && !INVALID_INVENTORY_LEDGERS.has(acctLedger);
-  });
-  const hasInventoryEntries = validInventoryEntries.length > 0;
+  // ── AMOUNT sign convention for LEDGERENTRIES.LIST (Invoice Voucher View) ──
+  // Tally requires ALL amounts in LEDGERENTRIES.LIST to be NEGATIVE.
+  // ISDEEMEDPOSITIVE controls direction, not the sign:
+  //   Party (debtor)   → ISDEEMEDPOSITIVE=Yes, AMOUNT=-grandTotal   (debit)
+  //   GST/Sales credit → ISDEEMEDPOSITIVE=No,  AMOUNT=-creditAmount (credit)
+  // Positive amounts in LEDGERENTRIES.LIST cause silent EXCEPTIONS=1.
 
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
-    // When inventory entries are present, skip the Sales Accounts ledger entry.
-    // The sales value is carried by the inventory entries, not ledger entries.
-    if (hasInventoryEntries) {
-      const name = (entry.ledgerName || '').toLowerCase().trim();
-      if (name === 'sales accounts') return '';   // skip — handled by inventory entries
-    }
-
-    const billAllocsXml = (entry.billAllocations || []).map(ba => `
+    const billAllocsXml = (entry.billAllocations || []).map(ba => {
+      // Bill allocation amounts must also be negative
+      const baAmt = -Math.abs(ba.amount || 0);
+      return `
       <BILLALLOCATIONS.LIST>
         <NAME>${esc(ba.name || '')}</NAME>
         <BILLTYPE>${esc(ba.billType || 'New Ref')}</BILLTYPE>
         <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
-        <AMOUNT>${(ba.amount || 0).toFixed(2)}</AMOUNT>
-      </BILLALLOCATIONS.LIST>`).join('');
+        <AMOUNT>${baAmt.toFixed(2)}</AMOUNT>
+      </BILLALLOCATIONS.LIST>`;
+    }).join('');
+
+    // All LEDGERENTRIES.LIST amounts must be negative regardless of debit/credit.
+    // ISDEEMEDPOSITIVE determines direction.
+    const amt = -Math.abs(entry.amount || 0);
 
     return `
   <LEDGERENTRIES.LIST>
@@ -1283,49 +1276,8 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     <ISDEEMEDPOSITIVE>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${entry.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <ISPARTYLEDGER>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISPARTYLEDGER>
-    <AMOUNT>${(entry.amount || 0).toFixed(2)}</AMOUNT>${billAllocsXml}
+    <AMOUNT>${amt.toFixed(2)}</AMOUNT>${billAllocsXml}
   </LEDGERENTRIES.LIST>`;
-  }).join('');
-
-  const inventoryEntriesXml = validInventoryEntries.map(item => {
-    const gstLedgerSrc = (item.gstLedgerSource || '').trim();
-    const acctLedger   = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
-    const absAmount    = Math.abs(item.amount || 0);
-
-    if (!item.stockItemName) return ''; // skip blank items
-
-    const hasSpecificLedger = acctLedger && acctLedger.toLowerCase() !== 'sales accounts';
-    const hasSpecificGst    = gstLedgerSrc && gstLedgerSrc.toLowerCase() !== 'sales accounts';
-    const hsnLedgerSrc      = (item.hsnLedgerSource || gstLedgerSrc).trim();
-    const gstHsnName        = (item.gstHsnName || '').trim();
-
-    // Only include ACCOUNTINGALLOCATIONS when we have a real specific ledger
-    // (not 'Sales Accounts' group — that causes EXCEPTIONS=1)
-    const acctAllocsXml = hasSpecificLedger ? `
-      <ACCOUNTINGALLOCATIONS.LIST>
-        <LEDGERNAME>${esc(acctLedger)}</LEDGERNAME>
-        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-        <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-        <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
-      </ACCOUNTINGALLOCATIONS.LIST>` : '';
-
-    return `
-  <ALLINVENTORYENTRIES.LIST>
-    <STOCKITEMNAME>${esc(item.stockItemName || '')}</STOCKITEMNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-    <RATE>${esc(item.rate || '')}</RATE>
-    <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
-    <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
-    <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
-    ${hasSpecificGst ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
-    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>
-    <HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
-    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : ''}
-    <GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>
-    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
-  </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
 
   const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
@@ -1346,10 +1298,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const shipToAddress = (v.shipToAddress || '').trim();
   const shipToCity    = (v.shipToCity    || '').trim();
   const shipToState   = (v.shipToState   || '').trim();
-  const shipToGST     = (v.shipToGST     || '').trim();
 
-  // Only emit ship-to block when we have actual ship-to data (name or address)
-  // Do NOT fall back to bill-to values — ship-to is a different physical location
   const shipToXml = (shipToName || shipToAddress) ? `
   <BASICBASEPARTYDETAILS.LIST>
     <BASICBUYERNAME>${esc(shipToName)}</BASICBUYERNAME>
@@ -1374,7 +1323,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
   ${poDateXml}
-  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
+  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}
 </VOUCHER>`;
 }
 
@@ -1717,28 +1666,28 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 <LEDGERENTRIES.LIST>
   <LEDGERNAME>${esc(cgstLedgerName(salesBase, totalCGST, tallyGstLedgers))}</LEDGERNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
-  <AMOUNT>${totalCGST.toFixed(2)}</AMOUNT>
+  <AMOUNT>-${totalCGST.toFixed(2)}</AMOUNT>
 </LEDGERENTRIES.LIST>` : '';
 
           const sgstEntry = totalSGST > 0 ? `
 <LEDGERENTRIES.LIST>
   <LEDGERNAME>${esc(sgstLedgerName(salesBase, totalSGST, tallyGstLedgers))}</LEDGERNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
-  <AMOUNT>${totalSGST.toFixed(2)}</AMOUNT>
+  <AMOUNT>-${totalSGST.toFixed(2)}</AMOUNT>
 </LEDGERENTRIES.LIST>` : '';
 
           const igstEntry = totalIGST > 0 ? `
 <LEDGERENTRIES.LIST>
   <LEDGERNAME>${esc(igstLedgerName(salesBase, totalIGST, tallyGstLedgers))}</LEDGERNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
-  <AMOUNT>${totalIGST.toFixed(2)}</AMOUNT>
+  <AMOUNT>-${totalIGST.toFixed(2)}</AMOUNT>
 </LEDGERENTRIES.LIST>` : '';
 
           const salesAccEntry = `
 <LEDGERENTRIES.LIST>
   <LEDGERNAME>Sales Accounts</LEDGERNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
-  <AMOUNT>${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
+  <AMOUNT>-${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
 </LEDGERENTRIES.LIST>`;
 
           const narration = [
@@ -1899,8 +1848,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
     </BILLALLOCATIONS.LIST>
   </LEDGERENTRIES.LIST>
-  ${cgstEntry}${sgstEntry}${igstEntry}${salesAccLedgerEntry}
-  ${inventoryEntries}
+  ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}
 </VOUCHER>`;
         } // end fallback (legacy mapper)
 
