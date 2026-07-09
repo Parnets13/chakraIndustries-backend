@@ -35,6 +35,7 @@ import DebitNote      from '../models/DebitNote.js';
 import TallyVoucher   from '../models/TallyVoucher.js';
 import Category       from '../models/Category.js';
 import { postXmlWithRetry } from './tallyFetchEngine.js';
+import { normalizeToTallyVoucher } from './normalizeToTallyVoucher.js';
 
 const LOG = (...a) => console.log('[TallyExport]', ...a);
 const ERR = (...a) => console.error('[TallyExport ERROR]', ...a);
@@ -1679,7 +1680,64 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             }
           );
           LOG(`Invoice ${inv.invoiceNo}: PRIMARY path — stored tallyVoucher (action=${action} date=${cappedDate} inventoryEntries=${hasInventory ? (tv.allInventoryEntries||[]).length : 0} willUseInventory=${willUseInventory})`);
-          voucherXml = serializeTallyVoucher({ ...tv, date: cappedDate, effectiveDate: cappedDate }, action, guidTag);
+
+          // ── Stale-voucher guard ────────────────────────────────────────────
+          // The tallyVoucher may have been built before ItemMaster had a real
+          // tallySalesLedger (e.g. uploaded before the ledger was set, or patched
+          // later). If every inventory entry resolves to "Sales Accounts" — which
+          // is a Tally GROUP, not a ledger — re-normalize right now using the
+          // current ItemMaster so the export sends a proper Item Invoice.
+          // We only re-normalize when items exist but none have a real ledger,
+          // because that's the only case that produces the wrong accounting fallback.
+          let effectiveTv = tv;
+          if (hasInventory && !willUseInventory) {
+            try {
+              const itemNames = [...new Set(
+                (inv.items || []).map(i => (i.description || i.name || '').trim()).filter(Boolean)
+              )];
+              const masters = itemNames.length
+                ? await ItemMaster.find({ name: { $in: itemNames } }, 'name hsn tallySalesLedger').lean()
+                : [];
+              const masterMap = new Map(masters.map(m => [m.name, m]));
+              const hasRealLedger = masters.some(m => (m.tallySalesLedger || '').trim() &&
+                m.tallySalesLedger.trim().toLowerCase() !== 'sales accounts');
+              if (hasRealLedger) {
+                LOG(`Invoice ${inv.invoiceNo}: stale tallyVoucher detected (all entries → "Sales Accounts") — re-normalizing from ItemMaster`);
+                const enrichedItems = (inv.items || []).map(item => {
+                  const n  = (item.description || item.name || '').trim();
+                  const im = masterMap.get(n);
+                  return {
+                    ...item,
+                    hsn:             (item.hsn || '').trim() || (im?.hsn || '').trim(),
+                    tallySalesLedger: (item.tallySalesLedger || '').trim() || (im?.tallySalesLedger || '').trim(),
+                  };
+                });
+                const fresh = normalizeToTallyVoucher(
+                  { ...inv, items: enrichedItems },
+                  { periodEnd }
+                );
+                if (fresh && (fresh.allInventoryEntries || []).some(e => {
+                  const l = (e.gstLedgerSource || e.accountingAllocations?.[0]?.ledgerName || '').trim();
+                  return l && l.toLowerCase() !== 'sales accounts';
+                })) {
+                  effectiveTv = fresh;
+                  // Persist the corrected tallyVoucher so this re-normalization
+                  // doesn't run again on the next export.
+                  Invoice.updateOne(
+                    { _id: inv._id },
+                    { $set: { tallyVoucher: fresh, 'items': enrichedItems } }
+                  ).catch(e => ERR(`Failed to persist re-normalized tallyVoucher for ${inv.invoiceNo}: ${e.message}`));
+                  LOG(`Invoice ${inv.invoiceNo}: re-normalization succeeded — inventory ledger="${effectiveTv.allInventoryEntries[0]?.accountingAllocations?.[0]?.ledgerName}"`);
+                } else {
+                  LOG(`Invoice ${inv.invoiceNo}: re-normalization did not produce a real ledger — using stored voucher as-is`);
+                }
+              }
+            } catch (reNormErr) {
+              ERR(`Invoice ${inv.invoiceNo}: stale-voucher re-normalization failed (non-fatal): ${reNormErr.message}`);
+            }
+          }
+
+          voucherXml = serializeTallyVoucher({ ...effectiveTv, date: cappedDate, effectiveDate: cappedDate }, action, guidTag);
 
         } else {
           // ── FALLBACK: legacy field-mapping path ─────────────────────────
