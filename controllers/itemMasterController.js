@@ -33,7 +33,7 @@ const generateItemId = async () => {
 // CREATE - Add new item to master
 export const createItem = async (req, res) => {
   try {
-    const { sku, name, description, category, unit, unitPrice, costPrice, sellingPrice, minQuantity, maxQuantity, reorderPoint, hsn, gst, barcode } = req.body;
+    const { sku, name, description, category, unit, unitPrice, costPrice, sellingPrice, minQuantity, maxQuantity, reorderPoint, hsn, gst, barcode, tallySalesLedger } = req.body;
 
     // Validate required fields
     if (!sku || !name || !unit) {
@@ -78,6 +78,7 @@ export const createItem = async (req, res) => {
       hsn,
       gst: parseFloat(gst) || 0,
       barcode: finalBarcode,
+      ...(tallySalesLedger !== undefined && { tallySalesLedger: String(tallySalesLedger).trim() }),
       createdBy: req.user?._id
     });
 
@@ -174,7 +175,7 @@ export const getItemBySku = async (req, res) => {
 // UPDATE - Update item
 export const updateItem = async (req, res) => {
   try {
-    const { sku, name, description, category, unit, unitPrice, costPrice, sellingPrice, minQuantity, maxQuantity, reorderPoint, status, isActive, hsn, gst, barcode } = req.body;
+    const { sku, name, description, category, unit, unitPrice, costPrice, sellingPrice, minQuantity, maxQuantity, reorderPoint, status, isActive, hsn, gst, barcode, tallySalesLedger } = req.body;
 
     // Check if SKU is being changed and if new SKU already exists
     if (sku) {
@@ -212,6 +213,8 @@ export const updateItem = async (req, res) => {
       ...(hsn && { hsn }),
       ...(gst !== undefined && { gst: parseFloat(gst) }),
       ...(barcode && barcode.trim() && { barcode: barcode.trim() }),
+      // tallySalesLedger: allow empty string to CLEAR the value (user intentionally clearing it)
+      ...(tallySalesLedger !== undefined && { tallySalesLedger: String(tallySalesLedger).trim() }),
       updatedBy: req.user?._id
     };
 

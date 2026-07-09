@@ -245,6 +245,13 @@ export const bulkUpload = async (req, res) => {
         const cleanName = name.trim();
         // Generate a stable SKU from the name
         const sku = 'AUTO-' + cleanName.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 25) + '-' + Date.now().toString(36).slice(-4).toUpperCase();
+        // Collect the first tallySalesLedger seen for this item name across all uploaded rows.
+        // This seeds ItemMaster so future uploads and re-exports immediately use the correct ledger.
+        const firstItemWithLedger = invoices.flatMap(inv => inv.items || []).find(i => {
+          const n = (i.description || i.name || '').trim();
+          return n === cleanName && (i.tallySalesLedger || '').trim();
+        });
+        const seedLedger = (firstItemWithLedger?.tallySalesLedger || '').trim();
         return {
           updateOne: {
             filter: { name: cleanName },
@@ -259,7 +266,7 @@ export const bulkUpload = async (req, res) => {
                 sellingPrice:0,
                 isActive:    true,
                 dataSource:  'excel_upload',
-                tallySalesLedger: '', // blank — user can fill in from Item Master UI
+                tallySalesLedger: seedLedger,
               },
             },
             upsert: true,
@@ -310,16 +317,25 @@ export const bulkUpload = async (req, res) => {
           const name = (item.description || item.name || '').trim();
           const im   = itemMasterMap.get(name);
           // tallySalesLedger priority:
-          // 1. What's already on the item (from previous upload)
-          // 2. What's stored in ItemMaster (manually set via Item Master UI)
+          // 1. What's on this specific item row from the Excel (parsed Sales Ledger column)
+          // 2. What's stored in ItemMaster (manually set via Item Master UI or previous upload)
           // 3. Empty string — do NOT fall back to the item description/name.
           //    Using the item name as tallySalesLedger causes it to be sent as
           //    GSTLEDGERSOURCE in Tally XML, but stock item names are NOT ledgers.
           //    Tally silently returns EXCEPTIONS=1 when a non-ledger is used there.
-          const tallySalesLedger = item.tallySalesLedger || im?.tallySalesLedger || '';
+          const tallySalesLedger = (item.tallySalesLedger || '').trim() || (im?.tallySalesLedger || '').trim();
+          // If the Excel gave us a ledger value and ItemMaster has none, backfill it now
+          // so future exports of this item don't need the column to be present.
+          if (tallySalesLedger && im && !im.tallySalesLedger) {
+            // Fire-and-forget — non-blocking; failure here does not affect the upload
+            ItemMaster.updateOne({ name }, { $set: { tallySalesLedger } }).catch(e =>
+              console.warn(`[bulkUpload] ItemMaster backfill of tallySalesLedger for "${name}" failed: ${e.message}`)
+            );
+            im.tallySalesLedger = tallySalesLedger; // update in-memory map too
+          }
           return {
             ...item,
-            hsn:             item.hsn || im?.hsn || '',
+            hsn:             (item.hsn || '').trim() || (im?.hsn || '').trim(),
             tallySalesLedger,
           };
         });
