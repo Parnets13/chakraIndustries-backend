@@ -869,15 +869,16 @@ function buildSingleVoucherXml(inv, cfg) {
   const action  = inv.tallyGuid ? 'Alter' : 'Create';
   const guidTag = inv.tallyGuid ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
 
-  // ── Only emit inventory entries that have a specific accounting ledger ────
-  // "Sales Accounts" is a Tally GROUP (parent), not a ledger. Referencing it as
-  // ACCOUNTINGALLOCATIONS.LEDGERNAME causes silent EXCEPTIONS=1 with no error tags.
-  // Filter those out here and fall back to pure-accounting format for those items.
-  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
-    if (!item.stockItemName) return false;
-    const acctLedger = (item.accountingAllocations?.[0]?.ledgerName || '').trim();
-    return acctLedger && acctLedger.toLowerCase() !== 'sales accounts';
-  });
+  // ── All inventory entries with a stock item name are included ────────────
+  // We always emit ALLINVENTORYENTRIES.LIST for every item — the item name MUST
+  // appear in Tally XML. The ACCOUNTINGALLOCATIONS ledger falls back to
+  // "Sales Accounts" when no specific ledger is configured; Tally accepts this
+  // in the accounting allocations block (it only rejects it as GSTLEDGERSOURCE).
+  // We suppress GSTLEDGERSOURCE/HSNLEDGERSOURCE when the ledger is "Sales Accounts"
+  // (handled below in inventoryEntriesXml) to avoid the EXCEPTIONS=1 silent error.
+  const validInventoryEntries = (v.allInventoryEntries || []).filter(item =>
+    !!(item.stockItemName)
+  );
   const hasInventoryEntries = validInventoryEntries.length > 0;
 
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
@@ -919,6 +920,15 @@ function buildSingleVoucherXml(inv, cfg) {
     const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
     const gstHsnName   = (item.gstHsnName || '').trim();
 
+    // Only emit GSTLEDGERSOURCE / HSNLEDGERSOURCE when the ledger is a specific
+    // sales ledger — NOT "Sales Accounts" (which is a Tally group, not a ledger).
+    // Referencing "Sales Accounts" as GSTLEDGERSOURCE causes silent EXCEPTIONS=1.
+    const isGenericLedger = !gstLedgerSrc || gstLedgerSrc.toLowerCase() === 'sales accounts';
+    const gstSourceXml = !isGenericLedger ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
+    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : '';
+    const hsnSourceXml = !isGenericLedger && hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
+    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : '';
+
     return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(item.stockItemName || '')}</STOCKITEMNAME>
@@ -928,10 +938,8 @@ function buildSingleVoucherXml(inv, cfg) {
     <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
     <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
-    ${gstLedgerSrc ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
-    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : ''}
-    ${hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
-    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : ''}
+    ${gstSourceXml}
+    ${hsnSourceXml}
     <GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
     <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>
     ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
