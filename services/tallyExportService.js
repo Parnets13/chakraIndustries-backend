@@ -1519,7 +1519,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     }
 
     const autoLedgerXml = [
-      `<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT></LEDGER>`,
+      // ── REPAIR: Alter Sales Accounts to remove AFFECTSSTOCK ───────────────
+      // A previous export accidentally set AFFECTSSTOCK=Yes on "Sales Accounts".
+      // When AFFECTSSTOCK=Yes, Tally rejects any voucher that references it in
+      // ACCOUNTINGALLOCATIONS *and* also has ALLINVENTORYENTRIES — silent EXCEPTIONS=1.
+      // Fix it now with an explicit Alter so every future export succeeds.
+      `<LEDGER NAME="Sales Accounts" ACTION="Alter"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT><ISREVENUE>Yes</ISREVENUE><AFFECTSSTOCK>No</AFFECTSSTOCK></LEDGER>`,
       // SAFEGUARD: Create plain CGST/SGST/IGST ledgers WITHOUT rate suffixes first.
       // Most Tally installations (including this client) use plain "CGST"/"SGST"/"IGST"
       // not "Output CGST @ 9%" etc. Creating both ensures vouchers referencing either

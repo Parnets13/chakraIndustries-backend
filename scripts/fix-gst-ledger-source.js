@@ -2,13 +2,12 @@
  * fix-gst-ledger-source.js
  * 
  * Fixes invoices with bad gstLedgerSource values in their stored tallyVoucher.
+ * Also resets tallySync flag so they re-export.
  * 
  * Problem: invoices uploaded from Excel had tallySalesLedger set to the item
- * description itself (e.g. "HYDRA STEEL WATER BOTTLE 1000ML"). This was then
- * stored as gstLedgerSource in the tallyVoucher sub-document. When exported,
- * Tally sees a stock item name as GSTLEDGERSOURCE and returns EXCEPTIONS=1.
+ * description itself. When exported, Tally returns EXCEPTIONS=1.
  * 
- * Solution: clear gstLedgerSource/hsnLedgerSource when they equal the stockItemName.
+ * Solution: clear bad gstLedgerSource values and force re-export.
  */
 
 import mongoose from 'mongoose';
@@ -24,12 +23,13 @@ async function main() {
   await mongoose.connect(MONGO_URI);
   console.log('[fix-gst-ledger-source] Connected');
 
-  // Find all invoices that have a tallyVoucher with inventory entries
+  // Find all Excel-uploaded invoices that haven't synced yet
   const invoices = await Invoice.find({
+    source: 'excel_upload',
     'tallyVoucher.allInventoryEntries': { $exists: true, $ne: [] }
   }).lean();
 
-  console.log(`[fix-gst-ledger-source] Found ${invoices.length} invoices with inventory entries`);
+  console.log(`[fix-gst-ledger-source] Found ${invoices.length} Excel-uploaded invoices with inventory entries`);
 
   let fixed = 0;
 
@@ -38,20 +38,12 @@ async function main() {
     const updatedEntries = (inv.tallyVoucher?.allInventoryEntries || []).map(item => {
       const stockName = (item.stockItemName || '').trim();
       const gstLedger = (item.gstLedgerSource || '').trim();
-      const hsnLedger = (item.hsnLedgerSource || '').trim();
 
-      // Clear if gstLedgerSource equals stockItemName (item name used as ledger = wrong)
-      if (gstLedger && gstLedger === stockName) {
-        console.log(`  Invoice ${inv.invoiceNo}: clearing gstLedgerSource="${gstLedger}" (equals stockItemName)`);
+      // Clear if gstLedgerSource equals stockItemName OR is "Sales Accounts"
+      if (gstLedger && (gstLedger === stockName || gstLedger.toLowerCase() === 'sales accounts')) {
+        console.log(`  Invoice ${inv.invoiceNo}: clearing gstLedgerSource="${gstLedger}"`);
         needsUpdate = true;
-        return { ...item, gstLedgerSource: '', hsnLedgerSource: '' };
-      }
-
-      // Also clear if it's "Sales Accounts" (group name, not a ledger)
-      if (gstLedger && gstLedger.toLowerCase() === 'sales accounts') {
-        console.log(`  Invoice ${inv.invoiceNo}: clearing gstLedgerSource="Sales Accounts" (group, not ledger)`);
-        needsUpdate = true;
-        return { ...item, gstLedgerSource: '', hsnLedgerSource: '' };
+        return { ...item, gstLedgerSource: '', hsnLedgerSource: '', gstSourceType: '', hsnSourceType: '' };
       }
 
       return item;
@@ -60,14 +52,20 @@ async function main() {
     if (needsUpdate) {
       await Invoice.updateOne(
         { _id: inv._id },
-        { $set: { 'tallyVoucher.allInventoryEntries': updatedEntries } }
+        { 
+          $set: { 
+            'tallyVoucher.allInventoryEntries': updatedEntries,
+            tallySync: false,  // Force re-export
+            tallySyncAt: null
+          } 
+        }
       );
       fixed++;
     }
   }
 
   console.log(`[fix-gst-ledger-source] Fixed ${fixed} invoices`);
-  console.log('[fix-gst-ledger-source] Done');
+  console.log('[fix-gst-ledger-source] Done — invoices will re-export on next Tally sync');
   await mongoose.disconnect();
   process.exit(0);
 }
