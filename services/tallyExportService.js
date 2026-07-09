@@ -1530,16 +1530,22 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // ── Item-specific sales ledgers (GST-enabled) ──────────────────────────
       // These are the ACTUAL ledger names as they exist in Tally (or as we compute them).
       // ACTION="Create" — Tally skips any that already exist.
-      // Only create ledgers that we didn't find in Tally's live ledger list.
+      // Always create every ledger from salesLedgerNames that is NOT already in
+      // Tally's live ledger list. The old guard (tallySalesLedgers.length === 0)
+      // caused a critical bug: if Tally had ANY sales ledger at all, the block was
+      // skipped entirely and new ledgers like "SS Bottle Sales Local 5%" were never
+      // created — producing silent EXCEPTIONS=1 on every Item Invoice.
       //
       // CRITICAL: Do NOT set AFFECTSSTOCK=Yes on sales ledgers.
       // AFFECTSSTOCK=Yes tells Tally this ledger moves inventory, which causes
       // EXCEPTIONS=1 (silent) when the voucher ALSO has ALLINVENTORYENTRIES.LIST
       // that already track the stock movement. Double-booking = silent rejection.
       // Pure accounting sales ledgers (AFFECTSSTOCK=No, the default) are correct.
-      ...(tallySalesLedgers.length === 0 ? [...salesLedgerNames].map(name =>
-        `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sales Accounts</PARENT><ISREVENUE>Yes</ISREVENUE></LEDGER>`
-      ) : []),
+      ...[...salesLedgerNames]
+        .filter(name => !tallySalesLedgers.includes(name))
+        .map(name =>
+          `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sales Accounts</PARENT><ISREVENUE>Yes</ISREVENUE></LEDGER>`
+        ),
     ].join('');
 
     const autoStockXml = stockNames.map(name =>
