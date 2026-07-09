@@ -1233,16 +1233,9 @@ function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
 function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const v = tallyVoucher;
 
-  // ── Use ALLLEDGERENTRIES.LIST format (non-invoice view) ──────────────────
-  // This is the same format used by purchase vouchers which work reliably.
-  // OBJVIEW="Invoice Voucher View" + LEDGERENTRIES.LIST has strict sign
-  // conventions that differ from the pure-voucher format and cause silent
-  // EXCEPTIONS=1 when amounts don't match Tally's internal expectations.
-  //
-  // Sign convention for ALLLEDGERENTRIES.LIST:
-  //   Party (debtor, credit side in sales) → ISDEEMEDPOSITIVE=Yes, AMOUNT=-grandTotal
-  //   GST ledgers (credit)                 → ISDEEMEDPOSITIVE=No,  AMOUNT=+gstAmt
-  //   Sales Accounts (credit)              → ISDEEMEDPOSITIVE=No,  AMOUNT=+salesBase
+  // ── ALLLEDGERENTRIES.LIST sign convention ─────────────────────────────────
+  //   Party (debtor) → ISDEEMEDPOSITIVE=Yes, AMOUNT=negative
+  //   GST / Sales    → ISDEEMEDPOSITIVE=No,  AMOUNT=positive
 
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
@@ -1253,12 +1246,9 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
         <AMOUNT>${(-Math.abs(ba.amount || 0)).toFixed(2)}</AMOUNT>
       </BILLALLOCATIONS.LIST>`).join('');
 
-    // ALLLEDGERENTRIES.LIST sign rules:
-    //   isDeemedPositive=true  (debtor/party): amount is NEGATIVE
-    //   isDeemedPositive=false (credit):       amount is POSITIVE
     const amt = entry.isDeemedPositive
-      ? (-Math.abs(entry.amount || 0)).toFixed(2)   // party → negative
-      : Math.abs(entry.amount || 0).toFixed(2);      // GST/Sales → positive
+      ? (-Math.abs(entry.amount || 0)).toFixed(2)
+      : Math.abs(entry.amount || 0).toFixed(2);
 
     return `
   <ALLLEDGERENTRIES.LIST>
@@ -1269,6 +1259,33 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   </ALLLEDGERENTRIES.LIST>`;
   }).join('');
 
+  // ── Inventory entries — items with ACCOUNTINGALLOCATIONS → Sales Accounts ─
+  // Only emit when we have real stock items. Always use "Sales Accounts" as the
+  // accounting ledger (it exists in every Tally installation). This populates the
+  // item details in the Sales Register without any ledger-lookup risk.
+  const inventoryEntriesXml = (v.allInventoryEntries || [])
+    .filter(item => item.stockItemName && item.stockItemName.trim())
+    .map(item => {
+      const absAmt = Math.abs(item.amount || 0);
+      return `
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${esc(item.stockItemName)}</STOCKITEMNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <RATE>${esc(item.rate || '')}</RATE>
+    <AMOUNT>${absAmt.toFixed(2)}</AMOUNT>
+    <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
+    <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST>
+      <LEDGERNAME>Sales Accounts</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+      <AMOUNT>${absAmt.toFixed(2)}</AMOUNT>
+    </ACCOUNTINGALLOCATIONS.LIST>
+  </ALLINVENTORYENTRIES.LIST>`;
+    }).join('');
+
+  // ── Bill-to address ───────────────────────────────────────────────────────
   const billToName    = (v.billToName    || v.partyLedgerName || '').trim();
   const billToAddress = (v.billToAddress || '').trim();
   const billToCity    = (v.billToCity    || '').trim();
@@ -1283,20 +1300,31 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     ${billToGST ? `<ADDRESS>GSTIN: ${esc(billToGST)}</ADDRESS>` : ''}
   </ADDRESS.LIST>` : '';
 
+  // ── Ship-to details ───────────────────────────────────────────────────────
+  // BASICBASEPARTYDETAILS.LIST = ship-to in Tally Sales voucher
   const shipToName    = (v.shipToName    || '').trim();
   const shipToAddress = (v.shipToAddress || '').trim();
   const shipToCity    = (v.shipToCity    || '').trim();
   const shipToState   = (v.shipToState   || '').trim();
+  const shipToGST     = (v.shipToGST     || '').trim();
 
-  const shipToXml = (shipToName || shipToAddress) ? `
+  // Fall back to bill-to when ship-to is empty (common for same-address deliveries)
+  const effectiveShipName  = shipToName    || billToName;
+  const effectiveShipAddr  = shipToAddress || billToAddress;
+  const effectiveShipCity  = shipToCity    || billToCity;
+  const effectiveShipState = shipToState   || billToState;
+  const effectiveShipGST   = shipToGST     || billToGST;
+
+  const shipToXml = effectiveShipName ? `
   <BASICBASEPARTYDETAILS.LIST>
-    <BASICBUYERNAME>${esc(shipToName)}</BASICBUYERNAME>
+    <BASICBUYERNAME>${esc(effectiveShipName)}</BASICBUYERNAME>
     <BASICBUYERADDRESS.LIST>
-      <BASICBUYERADDRESS>${esc(shipToAddress)}</BASICBUYERADDRESS>
-      ${shipToCity  ? `<BASICBUYERADDRESS>${esc(shipToCity)}</BASICBUYERADDRESS>` : ''}
-      ${shipToState ? `<BASICBUYERADDRESS>${esc(shipToState)}</BASICBUYERADDRESS>` : ''}
+      <BASICBUYERADDRESS>${esc(effectiveShipAddr)}</BASICBUYERADDRESS>
+      ${effectiveShipCity  ? `<BASICBUYERADDRESS>${esc(effectiveShipCity)}</BASICBUYERADDRESS>` : ''}
+      ${effectiveShipState ? `<BASICBUYERADDRESS>${esc(effectiveShipState)}</BASICBUYERADDRESS>` : ''}
     </BASICBUYERADDRESS.LIST>
-    ${shipToState ? `<BASICBUYERSTATE>${esc(shipToState)}</BASICBUYERSTATE>` : ''}
+    ${effectiveShipState ? `<BASICBUYERSTATE>${esc(effectiveShipState)}</BASICBUYERSTATE>` : ''}
+    ${effectiveShipGST   ? `<BASICBUYERGSTIN>${esc(effectiveShipGST)}</BASICBUYERGSTIN>` : ''}
   </BASICBASEPARTYDETAILS.LIST>` : '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
@@ -1312,7 +1340,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
   ${poDateXml}
-  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}
+  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
 </VOUCHER>`;
 }
 
@@ -1705,50 +1733,17 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           });
           const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
           const useInventory = rawItems.length > 0 && Math.abs(itemsTotal - salesBase) <= 0.10;
-          if (!useInventory && rawItems.length > 0) {
-            LOG(`Invoice ${inv.invoiceNo}: items total ${itemsTotal} ≠ salesBase ${salesBase} — falling back to pure-accounting format`);
-          }
 
-          // ── Fetch item-specific sales ledger names from ItemMaster ──────────
-          // Tally GST-enabled vouchers require each inventory line to reference
-          // the EXACT sales ledger configured for that stock item in Tally
-          // (e.g., "SS Bottle Sales Local 5%"), not a generic "Sales Accounts".
-          const itemNames4Lookup = rawItems.map(i => (i.description || i.name || '').trim()).filter(Boolean);
-          const itemMasters4Inv  = await ItemMaster.find({ name: { $in: itemNames4Lookup } }).lean();
-          const itemMasterMap    = new Map(itemMasters4Inv.map(im => [im.name, im]));
-          const isInterstate     = totalIGST > 0;
-
+          // ── Inventory entries — always use "Sales Accounts" as accounting ledger ──
+          // This is safe for all Tally installations. Item names appear in the
+          // sales register. No per-item ledger lookup needed.
           const inventoryEntries = useInventory ? rawItems.map((item, i) => {
             const itemName   = (item.description || item.name || '').trim();
             const itemQty    = +(item.qty || 1);
             const itemRate   = +(item.rate || 0);
             const itemAmount = itemAmounts[i];
             const itemUnit   = tallyUnit(item.unit || 'Nos');
-            
-            // Look up the item in ItemMaster to get HSN, GST rate, and stored ledger name
-            const im             = itemMasterMap.get(itemName);
-            const itemHSN        = im?.hsn || '';
-            const itemGSTRate    = im?.gst || 0;
-            // tallySalesLedger: exact Tally sales ledger name stored per item
-            const storedLedger   = im?.tallySalesLedger || null;
 
-            // Resolve the correct item-specific sales ledger using the live Tally ledger list.
-            // Falls back to a computed name (or stored override) if Tally list is unavailable.
-            const salesLedger = resolveSalesLedger(
-              tallySalesLedgers,
-              itemName,
-              itemGSTRate,
-              storedLedger,
-              isInterstate
-            );
-            
-            // Only emit inventory entry when salesLedger is a specific ledger,
-            // NOT 'Sales Accounts' — Tally rejects inventory entries with group names
-            const hasSpecificLedger = salesLedger && salesLedger.toLowerCase() !== 'sales accounts';
-            if (!hasSpecificLedger) return ''; // skip — ledger entries handle this
-
-            LOG(`Invoice ${inv.invoiceNo}: item "${itemName}" → salesLedger="${salesLedger}" hsn="${itemHSN}" gst=${itemGSTRate}%`);
-            
             return `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
@@ -1758,24 +1753,14 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
   <AMOUNT>${itemAmount.toFixed(2)}</AMOUNT>
   <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
   <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
-  <GSTSOURCETYPE>Ledger</GSTSOURCETYPE>
-  <GSTLEDGERSOURCE>${esc(salesLedger)}</GSTLEDGERSOURCE>
-  <HSNSOURCETYPE>Ledger</HSNSOURCETYPE>
-  <HSNLEDGERSOURCE>${esc(salesLedger)}</HSNLEDGERSOURCE>
-  <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
-  <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
-  ${itemHSN ? `<GSTHSNNAME>${esc(itemHSN)}</GSTHSNNAME>` : ''}
   <ACCOUNTINGALLOCATIONS.LIST>
-    <LEDGERNAME>${esc(salesLedger)}</LEDGERNAME>
+    <LEDGERNAME>Sales Accounts</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <AMOUNT>${itemAmount.toFixed(2)}</AMOUNT>
   </ACCOUNTINGALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
           }).join('') : '';
-
-          const hasItems = inventoryEntries.length > 0;
-          const salesAccLedgerEntry = hasItems ? '' : salesAccEntry;
 
           const billName  = (inv.billToName || inv.billToMailingName || inv.partyName || '').trim();
           const billAddr  = (inv.billToAddress || inv.partyAddress || '').trim();
@@ -1837,6 +1822,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     </BILLALLOCATIONS.LIST>
   </ALLLEDGERENTRIES.LIST>
   ${cgstEntry}${sgstEntry}${igstEntry}${salesAccEntry}
+  ${inventoryEntries}
 </VOUCHER>`;
         } // end fallback (legacy mapper)
 
