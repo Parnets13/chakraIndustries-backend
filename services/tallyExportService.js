@@ -1270,25 +1270,54 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   }).join('');
 
   // ── Inventory entries (item names in Tally item column) ───────────────────
+  // IMPORTANT: Must include GST source fields (GSTSOURCETYPE, GSTLEDGERSOURCE,
+  // HSNSOURCETYPE, HSNLEDGERSOURCE, GSTOVRDNTAXABILITY, GSTOVRDNTYPEOFSUPPLY)
+  // exactly as stored by normalizeToTallyVoucher. Omitting them causes silent
+  // EXCEPTIONS=1 with no LINEERROR in Tally's response.
   const inventoryEntriesXml = (v.allInventoryEntries || [])
     .filter(item => (item.stockItemName || '').trim())
     .map(item => {
-      const amt = Math.abs(item.amount || 0).toFixed(2);
+      const absAmt = Math.abs(item.amount || 0).toFixed(2);
+
+      // Use stored accountingAllocations, falling back to "Sales Accounts"
+      const acctAllocsXml = (item.accountingAllocations && item.accountingAllocations.length > 0)
+        ? item.accountingAllocations.map(aa => `
+      <ACCOUNTINGALLOCATIONS.LIST>
+        <LEDGERNAME>${esc(aa.ledgerName || 'Sales Accounts')}</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>${aa.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
+        <ISLASTDEEMEDPOSITIVE>${aa.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
+        <AMOUNT>${Math.abs(aa.amount || 0).toFixed(2)}</AMOUNT>
+      </ACCOUNTINGALLOCATIONS.LIST>`).join('')
+        : `
+      <ACCOUNTINGALLOCATIONS.LIST>
+        <LEDGERNAME>Sales Accounts</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+        <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+        <AMOUNT>${absAmt}</AMOUNT>
+      </ACCOUNTINGALLOCATIONS.LIST>`;
+
+      // GST source fields — only emit when gstLedgerSource is set (i.e. item has a
+      // specific sales ledger, not the generic "Sales Accounts" group).
+      const gstLedgerSrc = (item.gstLedgerSource || '').trim();
+      const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
+      const gstHsnName   = (item.gstHsnName || '').trim();
+
       return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(item.stockItemName)}</STOCKITEMNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <RATE>${esc(item.rate || '')}</RATE>
-    <AMOUNT>${amt}</AMOUNT>
+    <AMOUNT>${absAmt}</AMOUNT>
     <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
     <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
-    <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>Sales Accounts</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>${amt}</AMOUNT>
-    </ACCOUNTINGALLOCATIONS.LIST>
+    ${gstLedgerSrc ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
+    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : ''}
+    ${hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
+    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : ''}
+    <GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
+    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>
+    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
   </ALLINVENTORYENTRIES.LIST>`;
     }).join('');
 
