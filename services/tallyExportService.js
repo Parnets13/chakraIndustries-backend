@@ -1450,12 +1450,18 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       LOG('exportSalesInvoices: connector mode — skipping live GST/sales ledger name fetch (using fallback names)');
     }
 
-    // Only export invoices not yet synced to Tally.
-    // tallySync=true means already exported — skip them to prevent duplicates.
+    // Fetch all ERP invoices that haven't been successfully synced.
+    // Also include invoices where tallySync=true but tallySyncAt is null or very old
+    // (these were incorrectly marked synced by the old dedup skip path).
     const invoices = await Invoice.find({
       status:    { $nin: ['Cancelled'] },
       source:    { $nin: ['Tally', 'tally'] },
-      tallySync: { $ne: true },
+      $or: [
+        { tallySync: { $ne: true } },
+        // Re-attempt if tallySync=true but was set more than 7 days ago without
+        // a corresponding voucher number logged — catches the dedup-skip bug
+        { tallySync: true, tallySyncAt: { $exists: false } },
+      ],
     }).lean();
 
     if (!invoices.length) {
