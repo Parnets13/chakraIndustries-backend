@@ -1642,21 +1642,18 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         }
 
         // ── SAFEGUARD 2: Invoice-number dedup check against Tally ───────────
-        // If the invoice number already exists as a Tally Sales voucher number,
-        // the invoice was already exported. Skip it and mark tallySync=true in
-        // the ERP so it won't be attempted again on the next run.
+        // If the invoice number already exists in Tally, we must ALTER (not Create)
+        // to overwrite it with the ERP version. ERP is the source of truth.
+        // We do NOT skip and mark synced — that would leave a manually-created
+        // Tally voucher permanently replacing the ERP voucher.
         const invNoUpper = String(inv.invoiceNo).trim().toUpperCase();
-        // Diagnostic: log dedup result for first 5 invoices so we can confirm the set works
         if (idx < 5) {
-          LOG(`DEDUP CHECK invoice[${idx}] "${invNoUpper}" — set has it: ${tallyVoucherNumbers.has(invNoUpper)} (set size: ${tallyVoucherNumbers.size})`);
+          LOG(`DEDUP CHECK invoice[${idx}] "${invNoUpper}" — already in Tally: ${tallyVoucherNumbers.has(invNoUpper)} (set size: ${tallyVoucherNumbers.size})`);
         }
-        if (tallyVoucherNumbers.has(invNoUpper)) {
-          LOG(`Invoice ${inv.invoiceNo}: SKIPPED — voucher number already exists in Tally (duplicate prevention)`);
-          skippedItems.push({ id: inv.invoiceNo, reason: 'Already exists in Tally' });
-          await logInvoiceExportResult(syncId, inv.invoiceNo, inv.partyName || '', 'Skipped', 'Voucher number already exists in Tally');
-          // Mark as synced so it's not retried (it IS already in Tally)
-          await Invoice.updateOne({ _id: inv._id }, { tallySync: true, tallySyncAt: new Date() });
-          continue;
+        // Flag for Alter — will be used below when serializeTallyVoucher is called
+        const existsInTally = tallyVoucherNumbers.has(invNoUpper);
+        if (existsInTally) {
+          LOG(`Invoice ${inv.invoiceNo}: already in Tally — will send as Alter to sync ERP version`);
         }
 
         // ── Voucher date helpers (used by both primary and fallback paths) ─
@@ -1711,7 +1708,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
           const poNumber     = (tv.buyersOrderNo || inv.buyersOrderNo || '').toUpperCase().trim();
           const existingByPO = poNumber ? tallyPOMap.get(poNumber) : null;
-          const action       = (existingByPO || inv.tallyGuid) ? 'Alter' : 'Create';
+          // Force Alter if: PO map found it, or ERP has a GUID, or dedup set found the voucher number
+          const action       = (existingByPO || inv.tallyGuid || existsInTally) ? 'Alter' : 'Create';
           const guidTag      = existingByPO?.guid ? `<GUID>${esc(existingByPO.guid)}</GUID>`
                              : inv.tallyGuid      ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
 
@@ -1729,12 +1727,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           await logInvoiceExportResult(syncId, inv.invoiceNo, inv.partyName || '', 'Warning',
             'tallyVoucher missing — used legacy mapper. Run: node scripts/migrate-tally-vouchers.js');
 
-          // ── Match by PO Number ONLY ───────────────────────────────────────
+          // ── Match by PO Number or voucher number ──────────────────────────
           const poNumber = (inv.buyersOrderNo || '').toUpperCase().trim();
           const existing = poNumber ? tallyPOMap.get(poNumber) : null;
-          const action   = existing ? 'Alter' : 'Create';
+          const action   = (existing || existsInTally) ? 'Alter' : 'Create';
           const guidTag  = existing ? `<GUID>${esc(existing.guid)}</GUID>` : '';
-          LOG(`Invoice ${inv.invoiceNo} (PO: ${poNumber || 'none'}): ${action}`);
+          LOG(`Invoice ${inv.invoiceNo} (PO: ${poNumber || 'none'}): ${action}${existsInTally ? ' (voucher exists in Tally)' : ''}`);
 
           const tallyDate = capTallyDate(
             action === 'Alter' ? (td(inv.invoiceDate) || freshToday) : freshToday,
