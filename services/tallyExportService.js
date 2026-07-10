@@ -1668,29 +1668,60 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           ? new Date(inv.invoiceDate).toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'numeric' })
           : '';
 
-        // ── PRIMARY PATH: serialize stored tallyVoucher sub-document ───────
-        // Zero field mapping — just wrap stored fields in XML tags.
-        // FALLBACK: if tallyVoucher is null (legacy invoice), use the existing
-        // field-mapping logic below and log a warning to the sync log.
+        // ── PRIMARY PATH: always re-normalize from live invoice data ──────
+        // The stored tallyVoucher may be stale (built before ItemMaster had
+        // tallySalesLedger, or before serializer bugs were fixed). Re-normalize
+        // fresh every time so we always send correct XML.
         let voucherXml;
 
         if (inv.tallyVoucher && inv.tallyVoucher.voucherNumber) {
-          const tv = inv.tallyVoucher.toObject ? inv.tallyVoucher.toObject() : inv.tallyVoucher;
-          const poNumber = (tv.buyersOrderNo || inv.buyersOrderNo || '').toUpperCase().trim();
+          // Fetch fresh ItemMaster data for all items in this invoice
+          const itemNames = [...new Set(
+            (inv.items || []).map(i => (i.description || i.name || '').trim()).filter(Boolean)
+          )];
+          const masters = itemNames.length
+            ? await ItemMaster.find({ name: { $in: itemNames } }, 'name hsn tallySalesLedger').lean()
+            : [];
+          const masterMap = new Map(masters.map(m => [m.name, m]));
+
+          // Enrich invoice items with latest ItemMaster values
+          const enrichedItems = (inv.items || []).map(item => {
+            const n  = (item.description || item.name || '').trim();
+            const im = masterMap.get(n);
+            return {
+              ...item,
+              hsn:              (item.hsn || '').trim()              || (im?.hsn              || '').trim(),
+              tallySalesLedger: (item.tallySalesLedger || '').trim() || (im?.tallySalesLedger || '').trim(),
+            };
+          });
+
+          // Re-normalize with fresh data + current periodEnd
+          let tv;
+          try {
+            tv = normalizeToTallyVoucher(
+              { ...inv, items: enrichedItems },
+              { periodEnd }
+            );
+          } catch (reNormErr) {
+            ERR(`Invoice ${inv.invoiceNo}: re-normalization failed: ${reNormErr.message}`);
+            failedItems.push({ id: inv.invoiceNo, error: `Re-normalize: ${reNormErr.message}` });
+            await logInvoiceExportResult(syncId, inv.invoiceNo, inv.partyName || '', 'Failed', reNormErr.message);
+            continue;
+          }
+
+          const poNumber     = (tv.buyersOrderNo || inv.buyersOrderNo || '').toUpperCase().trim();
           const existingByPO = poNumber ? tallyPOMap.get(poNumber) : null;
-          const action   = (existingByPO || inv.tallyGuid) ? 'Alter' : 'Create';
-          const guidTag  = existingByPO?.guid ? `<GUID>${esc(existingByPO.guid)}</GUID>`
-                         : inv.tallyGuid      ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
-          const cappedDate = capTallyDate(tv.date || freshToday, periodEnd);
-          // Diagnostic: log whether inventory entries will be included or stripped
-          const hasInventory = (tv.allInventoryEntries || []).length > 0;
-          const willUseInventory = hasInventory && (tv.allInventoryEntries || []).some(
-            item => {
-              const src = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
-              return src && src.toLowerCase() !== 'sales accounts';
-            }
-          );
-          LOG(`Invoice ${inv.invoiceNo}: PRIMARY path — stored tallyVoucher (action=${action} date=${cappedDate} inventoryEntries=${hasInventory ? (tv.allInventoryEntries||[]).length : 0} willUseInventory=${willUseInventory})`);
+          const action       = (existingByPO || inv.tallyGuid) ? 'Alter' : 'Create';
+          const guidTag      = existingByPO?.guid ? `<GUID>${esc(existingByPO.guid)}</GUID>`
+                             : inv.tallyGuid      ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
+
+          const hasInventory    = (tv.allInventoryEntries || []).length > 0;
+          const salesLedgerUsed = hasInventory
+            ? (tv.allInventoryEntries[0]?.accountingAllocations?.[0]?.ledgerName || 'Sales Accounts')
+            : (tv.allLedgerEntries?.find(e => !e.isDeemedPositive && !e.ledgerName?.toLowerCase().includes('cgst') && !e.ledgerName?.toLowerCase().includes('sgst') && !e.ledgerName?.toLowerCase().includes('igst'))?.ledgerName || 'Sales');
+          LOG(`Invoice ${inv.invoiceNo}: action=${action} date=${tv.date} inventoryEntries=${hasInventory ? tv.allInventoryEntries.length : 0} salesLedger="${salesLedgerUsed}"`);
+
+          voucherXml = serializeTallyVoucher(tv, action, guidTag);
 
           // ── Stale-voucher guard ────────────────────────────────────────────
           // The tallyVoucher may have been built before ItemMaster had a real
@@ -1701,54 +1732,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           // We only re-normalize when items exist but none have a real ledger,
           // because that's the only case that produces the wrong accounting fallback.
           let effectiveTv = tv;
-          if (hasInventory && !willUseInventory) {
-            try {
-              const itemNames = [...new Set(
-                (inv.items || []).map(i => (i.description || i.name || '').trim()).filter(Boolean)
-              )];
-              const masters = itemNames.length
-                ? await ItemMaster.find({ name: { $in: itemNames } }, 'name hsn tallySalesLedger').lean()
-                : [];
-              const masterMap = new Map(masters.map(m => [m.name, m]));
-              const hasRealLedger = masters.some(m => (m.tallySalesLedger || '').trim() &&
-                m.tallySalesLedger.trim().toLowerCase() !== 'sales accounts');
-              if (hasRealLedger) {
-                LOG(`Invoice ${inv.invoiceNo}: stale tallyVoucher detected (all entries → "Sales Accounts") — re-normalizing from ItemMaster`);
-                const enrichedItems = (inv.items || []).map(item => {
-                  const n  = (item.description || item.name || '').trim();
-                  const im = masterMap.get(n);
-                  return {
-                    ...item,
-                    hsn:             (item.hsn || '').trim() || (im?.hsn || '').trim(),
-                    tallySalesLedger: (item.tallySalesLedger || '').trim() || (im?.tallySalesLedger || '').trim(),
-                  };
-                });
-                const fresh = normalizeToTallyVoucher(
-                  { ...inv, items: enrichedItems },
-                  { periodEnd }
-                );
-                if (fresh && (fresh.allInventoryEntries || []).some(e => {
-                  const l = (e.gstLedgerSource || e.accountingAllocations?.[0]?.ledgerName || '').trim();
-                  return l && l.toLowerCase() !== 'sales accounts';
-                })) {
-                  effectiveTv = fresh;
-                  // Persist the corrected tallyVoucher so this re-normalization
-                  // doesn't run again on the next export.
-                  Invoice.updateOne(
-                    { _id: inv._id },
-                    { $set: { tallyVoucher: fresh, 'items': enrichedItems } }
-                  ).catch(e => ERR(`Failed to persist re-normalized tallyVoucher for ${inv.invoiceNo}: ${e.message}`));
-                  LOG(`Invoice ${inv.invoiceNo}: re-normalization succeeded — inventory ledger="${effectiveTv.allInventoryEntries[0]?.accountingAllocations?.[0]?.ledgerName}"`);
-                } else {
-                  LOG(`Invoice ${inv.invoiceNo}: re-normalization did not produce a real ledger — using stored voucher as-is`);
-                }
-              }
-            } catch (reNormErr) {
-              ERR(`Invoice ${inv.invoiceNo}: stale-voucher re-normalization failed (non-fatal): ${reNormErr.message}`);
-            }
-          }
-
-          voucherXml = serializeTallyVoucher({ ...effectiveTv, date: cappedDate, effectiveDate: cappedDate }, action, guidTag);
+          voucherXml = serializeTallyVoucher(tv, action, guidTag);
 
         } else {
           // ── FALLBACK: legacy field-mapping path ─────────────────────────
@@ -2081,7 +2065,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     const dur = `${((Date.now() - start) / 1000).toFixed(1)}s`;
     await writeLog({ syncId, type: 'Sales', direction: 'ERP → Tally', status: overallOk ? 'Success' : 'Failed', duration: dur, error: batchErrors.join('; '), records: invoices.length, triggeredBy });
 
-    LOG(`exportSalesInvoices complete — created:${successIds.length} skipped:${skippedItems.length} failed:${failedItems.length} in ${dur}`);
+    LOG(`exportSalesInvoices complete — created:${successIds.length} skipped:${skippedItems.length} failed:${failedItems.length} batchErrors:${batchErrors.length} in ${dur}`);
     return {
       ok: overallOk,
       records: invoices.length,
