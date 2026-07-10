@@ -114,7 +114,7 @@ export function resolveGstLedgerName(taxType, salesBase, taxAmount, availableLed
  * @throws {Error} if required fields missing or voucher is imbalanced
  */
 export function normalizeToTallyVoucher(invoiceData, options = {}) {
-  const { gstLedgerNames = null, periodEnd = null } = options;
+  const { gstLedgerNames = null, periodEnd = null, salesVoucherTypeName = 'Sales' } = options;
 
   // ── Required field validation ────────────────────────────────────────────
   const invoiceNo = (invoiceData.invoiceNo || '').toString().trim();
@@ -405,7 +405,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   console.log(`  buyersOrderNo: "${(invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '')}"`);
 
   return {
-    voucherType:      'Sales',
+    voucherType:      salesVoucherTypeName,   // exact name from Tally's VoucherType list
     voucherNumber:    invoiceNo,
     date:             voucherDate,
     effectiveDate:    voucherDate,

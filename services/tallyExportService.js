@@ -1418,11 +1418,43 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     LOG(`exportSalesInvoices: ▶ using SVCURRENTCOMPANY="${cfg.companyName || '(EMPTY — will cause EXCEPTIONS)'}"`);
 
     // GUARD: If companyName is still empty after the ping, abort immediately.
-    // An empty SVCURRENTCOMPANY tag causes every voucher to be silently rejected
-    // with EXCEPTIONS=1 and no LINEERROR — the most confusing failure mode.
     if (!cfg.companyName || !cfg.companyName.trim()) {
       ERR('exportSalesInvoices: companyName is empty — cannot export. Open Tally Settings and click "Test Connection" to auto-detect the company name, then retry.');
       return { ok: false, records: 0, error: 'Tally company name is not configured. Go to Tally Settings → Test Connection to auto-detect it, then retry the export.' };
+    }
+
+    // ── Step 0.6: Probe which Sales voucher type name Tally accepts ───────────
+    // EXCEPTIONS=1 with no LINEERROR is caused by an unrecognised VOUCHERTYPENAME.
+    // Tally accepts "Sales" by default, but some companies rename it to
+    // "Sales Invoice", "Tax Invoice", etc. Detect the real name by fetching
+    // VoucherType collection — use the first name that starts with "Sale".
+    let salesVoucherTypeName = 'Sales'; // default
+    try {
+      const co = (cfg.companyName || '').trim().toUpperCase();
+      const coTag = co ? `<SVCURRENTCOMPANY>${esc(co)}</SVCURRENTCOMPANY>` : '';
+      const vtXml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>VTProbe</ID></HEADER>
+<BODY><DESC>
+  <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="VTProbe"><TYPE>VoucherType</TYPE><FETCH>Name</FETCH></COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
+</ENVELOPE>`;
+      const vtResp = await postXml(cfg, vtXml, 30000);
+      const allVTypes = [...(vtResp || '').matchAll(/<NAME>(.*?)<\/NAME>/gi)]
+        .map(m => m[1].trim()).filter(Boolean);
+      LOG(`exportSalesInvoices: Tally voucher types: [${allVTypes.join(', ')}]`);
+      // Find the first Sales-type name (case-insensitive)
+      const salesType = allVTypes.find(n => n.toLowerCase().startsWith('sale'));
+      if (salesType) {
+        salesVoucherTypeName = salesType;
+        LOG(`exportSalesInvoices: using voucher type "${salesVoucherTypeName}"`);
+      } else {
+        LOG(`exportSalesInvoices: no Sales-type voucher found — using default "${salesVoucherTypeName}"`);
+      }
+    } catch (vtErr) {
+      LOG(`exportSalesInvoices: voucher type probe failed (non-fatal): ${vtErr.message} — using "${salesVoucherTypeName}"`);
     }
 
     // ── Step 0.5: Fetch ACTUAL GST ledger names from Tally ────────────────────
@@ -1698,12 +1730,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             };
           });
 
-          // Re-normalize with fresh data + current periodEnd
+          // Re-normalize with fresh data + current periodEnd + correct voucher type
           let tv;
           try {
             tv = normalizeToTallyVoucher(
               { ...inv, items: enrichedItems },
-              { periodEnd }
+              { periodEnd, salesVoucherTypeName }
             );
           } catch (reNormErr) {
             ERR(`Invoice ${inv.invoiceNo}: re-normalization failed: ${reNormErr.message}`);
@@ -1723,7 +1755,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const salesLedgerUsed = hasInventory
             ? (tv.allInventoryEntries[0]?.accountingAllocations?.[0]?.ledgerName || 'Sales Accounts')
             : (tv.allLedgerEntries?.find(e => !e.isDeemedPositive && !e.ledgerName?.toLowerCase().includes('cgst') && !e.ledgerName?.toLowerCase().includes('sgst') && !e.ledgerName?.toLowerCase().includes('igst'))?.ledgerName || 'Sales');
-          LOG(`Invoice ${inv.invoiceNo}: action=${action} date=${tv.date} inventoryEntries=${hasInventory ? tv.allInventoryEntries.length : 0} salesLedger="${salesLedgerUsed}"`);
+          LOG(`Invoice ${inv.invoiceNo}: action=${action} date=${tv.date} inventoryEntries=${hasInventory ? tv.allInventoryEntries.length : 0} salesLedger="${salesLedgerUsed}" voucherType="${tv.voucherType || 'Sales'}" company="${cfg.companyName}"`);
 
           voucherXml = serializeTallyVoucher(tv, action, guidTag);
 
