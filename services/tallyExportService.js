@@ -1969,10 +1969,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // ACTION="Create" is sent for a voucher number that already exists in Tally.
       // CREATED=0, ALTERED=0, ERRORS=0, EXCEPTIONS=0 with a single voucher means
       // Tally knows this number but we sent Create instead of Alter.
-      // Re-send as ACTION="Alter" with the voucher number used as the alter key.
-      if (result.ok && (result.created || 0) === 0 && (result.altered || 0) === 0 && batch.length === 1) {
+      // Also handles EXCEPTIONS=1 with CREATED=0 — this happens when an existing
+      // voucher has a different structure (e.g. accounting-only vs item invoice)
+      // and Tally rejects the Create. Re-send as Alter to overwrite it.
+      const isSilentDuplicate = result.ok && (result.created || 0) === 0 && (result.altered || 0) === 0 && batch.length === 1;
+      const isExceptionOnCreate = !result.ok && (result.created || 0) === 0 && batch.length === 1;
+      if (isSilentDuplicate || isExceptionOnCreate) {
         const v = batch[0];
-        LOG(`Sales batch ${batchNo}: CREATED=0, ALTERED=0 — voucher ${v.invoiceNo} already exists in Tally. Re-sending as Alter...`);
+        const reason = isSilentDuplicate ? 'CREATED=0, ALTERED=0 — voucher already exists in Tally' : 'EXCEPTIONS=1 on Create — voucher may exist with different structure';
+        LOG(`Sales batch ${batchNo}: ${reason}. Re-sending ${v.invoiceNo} as Alter...`);
         // Rebuild the XML with ACTION="Alter" by string-replacing the action attribute
         const alterXml = v.xml.replace(/ACTION="Create"/, 'ACTION="Alter"');
         const alterEnvelope = importEnvelope(cfg, 'Vouchers', alterXml);
