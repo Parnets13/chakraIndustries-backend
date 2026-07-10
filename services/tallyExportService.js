@@ -1245,83 +1245,13 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   //     ACCOUNTINGALLOCATIONS → Sales Accounts
 
   // ── Inventory entries ────────────────────────────────────────────────────
-  // Build ALLINVENTORYENTRIES.LIST for every item that has a stock item name.
-  // The ACCOUNTINGALLOCATIONS block inside each inventory entry carries the sales
-  // ledger credit — this is what makes Tally treat the voucher as an Item Invoice
-  // (i.e. Name of Item / Quantity / Rate columns are populated) rather than a bare
-  // Accounting Invoice. The matching Sales Accounts ledger entry is suppressed below
-  // to prevent double-booking.
-  // Only include inventory entries that have a real (non-group) sales ledger in
-  // their accountingAllocations. "Sales Accounts" is a Tally group — referencing
-  // it as LEDGERNAME in ACCOUNTINGALLOCATIONS causes silent EXCEPTIONS=1.
-  // Items without a specific ledger fall back to the plain ledger-only format
-  // (their credit is handled by the LEDGERENTRIES.LIST Sales Accounts entry).
-  // NOTE: ISDEEMEDPOSITIVE=No → amounts are NEGATIVE in both ALLINVENTORYENTRIES
-  // and ACCOUNTINGALLOCATIONS for sales vouchers.
-  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
-    if (!item.stockItemName) return false;
-    const allocLedger = (item.accountingAllocations?.[0]?.ledgerName || '').toLowerCase().trim();
-    return allocLedger && allocLedger !== 'sales accounts';
-  });
-  const hasInventoryEntries = validInventoryEntries.length > 0;
-
-  const inventoryEntriesXml = validInventoryEntries.map(item => {
-    // Sales inventory entries: ISDEEMEDPOSITIVE=No, amount is NEGATIVE (stock going out).
-    // Tally requires negative amounts on both ALLINVENTORYENTRIES and their
-    // ACCOUNTINGALLOCATIONS for sales vouchers. Using absAmount (positive) causes
-    // silent EXCEPTIONS=1 with no LINEERROR — the most confusing failure mode.
-    const negAmount = -Math.abs(item.amount || 0);
-
-    const acctAllocsXml = (item.accountingAllocations || []).map(aa => `
-    <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>${esc(aa.ledgerName || '')}</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>${aa.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
-      <ISLASTDEEMEDPOSITIVE>${aa.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>${negAmount.toFixed(2)}</AMOUNT>
-    </ACCOUNTINGALLOCATIONS.LIST>`).join('');
-
-    // Only emit GSTLEDGERSOURCE / HSNLEDGERSOURCE for specific (non-group) ledgers.
-    // "Sales Accounts" is Tally's built-in group name — using it as GSTLEDGERSOURCE
-    // causes silent EXCEPTIONS=1.
-    const gstLedgerSrc = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
-    const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
-    const gstHsnName   = (item.gstHsnName || '').trim();
-    const isGenericLedger = !gstLedgerSrc
-      || gstLedgerSrc.toLowerCase() === 'sales accounts'
-      || gstLedgerSrc === (item.stockItemName || '').trim();
-    const gstSourceXml = !isGenericLedger
-      ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
-    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>`
-      : '';
-    const hsnSourceXml = !isGenericLedger && hsnLedgerSrc
-      ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
-    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>`
-      : '';
-    // Only emit GST override tags when we have a specific (non-group) ledger source.
-    // Emitting GSTOVRDNTAXABILITY without a GSTLEDGERSOURCE causes silent EXCEPTIONS=1.
-    const gstOverrideXml = !isGenericLedger
-      ? `<GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`
-      : '';
-
-    return `
-  <ALLINVENTORYENTRIES.LIST>
-    <STOCKITEMNAME>${esc(item.stockItemName || '')}</STOCKITEMNAME>
-    <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-    <RATE>${esc(item.rate || '')}</RATE>
-    <AMOUNT>${negAmount.toFixed(2)}</AMOUNT>
-    <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
-    <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
-    ${gstSourceXml}
-    ${hsnSourceXml}
-    ${gstOverrideXml}
-    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
-  </ALLINVENTORYENTRIES.LIST>`;
-  }).join('');
+  // This Tally installation rejects ALLINVENTORYENTRIES.LIST in Sales vouchers
+  // with silent EXCEPTIONS=1. Item names are included in the narration instead.
+  // Confirmed by exhaustive direct testing — every combination with inventory fails.
+  const inventoryEntriesXml = '';
+  const hasInventoryEntries = false;
 
   // ── Ledger entries ────────────────────────────────────────────────────────
-  // This Tally instance requires LEDGERENTRIES.LIST (not ALLLEDGERENTRIES.LIST).
   // IMPORTANT: Do NOT suppress the "Sales Accounts" ledger entry when inventory
   // entries are present. In Tally's Item Invoice format:
   //   - LEDGERENTRIES.LIST carries the accounting credit (Sales Accounts / sales ledger)
