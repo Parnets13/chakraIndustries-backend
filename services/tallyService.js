@@ -777,6 +777,8 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
           ? +(salesBase - batchInvAllocated).toFixed(2)
           : batchItemAmounts[i];
         batchInvAllocated = +(batchInvAllocated + (isLast ? itemAmt : batchItemAmounts[i])).toFixed(2);
+        // Sales inventory: ISDEEMEDPOSITIVE=No → amounts must be NEGATIVE
+        const negItemAmt  = -Math.abs(itemAmt);
         const itemUnit    = 'Nos';
         const salesLedger = (item.tallySalesLedger || '').trim();
         return `
@@ -785,14 +787,14 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <RATE>${itemRate.toFixed(2)}/${itemUnit}</RATE>
-    <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+    <AMOUNT>${negItemAmt.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
     <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
     <ACCOUNTINGALLOCATIONS.LIST>
       <LEDGERNAME>${esc(salesLedger)}</LEDGERNAME>
       <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
       <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+      <AMOUNT>${negItemAmt.toFixed(2)}</AMOUNT>
     </ACCOUNTINGALLOCATIONS.LIST>
   </ALLINVENTORYENTRIES.LIST>`;
       }).join('') : '';
@@ -1150,6 +1152,8 @@ export async function pushSingleInvoiceToTally(invoiceId) {
           ? +(salesBase - legacyInvAllocated).toFixed(2)
           : invItemAmounts[i];
         legacyInvAllocated = +(legacyInvAllocated + (isLast ? itemAmt : invItemAmounts[i])).toFixed(2);
+        // Sales inventory: ISDEEMEDPOSITIVE=No → amounts must be NEGATIVE
+        const negItemAmt  = -Math.abs(itemAmt);
         const itemUnit    = 'Nos';
         const salesLedger = (item.tallySalesLedger || '').trim();
         return `
@@ -1158,14 +1162,14 @@ export async function pushSingleInvoiceToTally(invoiceId) {
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <RATE>${itemRate.toFixed(2)}/${itemUnit}</RATE>
-    <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+    <AMOUNT>${negItemAmt.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
     <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
     <ACCOUNTINGALLOCATIONS.LIST>
       <LEDGERNAME>${esc(salesLedger)}</LEDGERNAME>
       <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
       <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+      <AMOUNT>${negItemAmt.toFixed(2)}</AMOUNT>
     </ACCOUNTINGALLOCATIONS.LIST>
   </ALLINVENTORYENTRIES.LIST>`;
       }).join('') : '';

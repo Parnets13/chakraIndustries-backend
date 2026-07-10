@@ -1256,6 +1256,8 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   // it as LEDGERNAME in ACCOUNTINGALLOCATIONS causes silent EXCEPTIONS=1.
   // Items without a specific ledger fall back to the plain ledger-only format
   // (their credit is handled by the LEDGERENTRIES.LIST Sales Accounts entry).
+  // NOTE: ISDEEMEDPOSITIVE=No → amounts are NEGATIVE in both ALLINVENTORYENTRIES
+  // and ACCOUNTINGALLOCATIONS for sales vouchers.
   const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
     if (!item.stockItemName) return false;
     const allocLedger = (item.accountingAllocations?.[0]?.ledgerName || '').toLowerCase().trim();
@@ -1264,14 +1266,18 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const hasInventoryEntries = validInventoryEntries.length > 0;
 
   const inventoryEntriesXml = validInventoryEntries.map(item => {
-    const absAmount = Math.abs(item.amount || 0);
+    // Sales inventory entries: ISDEEMEDPOSITIVE=No, amount is NEGATIVE (stock going out).
+    // Tally requires negative amounts on both ALLINVENTORYENTRIES and their
+    // ACCOUNTINGALLOCATIONS for sales vouchers. Using absAmount (positive) causes
+    // silent EXCEPTIONS=1 with no LINEERROR — the most confusing failure mode.
+    const negAmount = -Math.abs(item.amount || 0);
 
     const acctAllocsXml = (item.accountingAllocations || []).map(aa => `
     <ACCOUNTINGALLOCATIONS.LIST>
       <LEDGERNAME>${esc(aa.ledgerName || '')}</LEDGERNAME>
       <ISDEEMEDPOSITIVE>${aa.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
       <ISLASTDEEMEDPOSITIVE>${aa.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>${Math.abs(aa.amount || 0).toFixed(2)}</AMOUNT>
+      <AMOUNT>${negAmount.toFixed(2)}</AMOUNT>
     </ACCOUNTINGALLOCATIONS.LIST>`).join('');
 
     // Only emit GSTLEDGERSOURCE / HSNLEDGERSOURCE for specific (non-group) ledgers.
@@ -1304,7 +1310,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <RATE>${esc(item.rate || '')}</RATE>
-    <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
+    <AMOUNT>${negAmount.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
     <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
     ${gstSourceXml}
@@ -1830,6 +1836,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
               ? +(salesBase - legacyAllocated).toFixed(2)
               : itemAmounts[i];
             legacyAllocated  = +(legacyAllocated + (isLast ? itemAmt : itemAmounts[i])).toFixed(2);
+            // Sales inventory: ISDEEMEDPOSITIVE=No → amounts must be NEGATIVE
+            const negItemAmt = -Math.abs(itemAmt);
             const itemUnit   = 'Nos';
             const salesLedger = (item.tallySalesLedger || '').trim();
             return `
@@ -1838,14 +1846,14 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
     <RATE>${itemRate.toFixed(2)}/${itemUnit}</RATE>
-    <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+    <AMOUNT>${negItemAmt.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
     <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
     <ACCOUNTINGALLOCATIONS.LIST>
       <LEDGERNAME>${esc(salesLedger)}</LEDGERNAME>
       <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
       <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>${itemAmt.toFixed(2)}</AMOUNT>
+      <AMOUNT>${negItemAmt.toFixed(2)}</AMOUNT>
     </ACCOUNTINGALLOCATIONS.LIST>
   </ALLINVENTORYENTRIES.LIST>`;
           }).join('') : '';
