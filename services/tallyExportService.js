@@ -1245,75 +1245,53 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   //     ACCOUNTINGALLOCATIONS → Sales Accounts
 
   // ── Inventory entries ────────────────────────────────────────────────────
-  // Format confirmed from SCI0918 (manually created, working in this Tally):
-  //   - ALLINVENTORYENTRIES.LIST with stockItemName, qty, rate, amount (POSITIVE)
-  //   - ACCOUNTINGALLOCATIONS inside carries the sales ledger credit (POSITIVE amount)
-  //   - LEDGERENTRIES has party (negative) + GST (positive) only
-  //   - NO "Sales Accounts" in LEDGERENTRIES — the credit is in ACCOUNTINGALLOCATIONS
-  //
-  // Amount signs: ISDEEMEDPOSITIVE=No → amounts are POSITIVE in Tally XML
-  // (counter-intuitive but confirmed from the working SCI0918 voucher structure)
-  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
-    if (!(item.stockItemName || '').trim()) return false;
-    const allocLedger = (item.accountingAllocations?.[0]?.ledgerName || '').toLowerCase().trim();
-    return allocLedger && allocLedger !== 'sales accounts';
-  });
-  const hasInventoryEntries = validInventoryEntries.length > 0;
-
-  const inventoryEntriesXml = validInventoryEntries.map(item => {
-    // POSITIVE amounts — matches SCI0918 working format
-    const posAmount = Math.abs(item.amount || 0);
-
-    const acctAllocsXml = (item.accountingAllocations || []).map(aa => `
+  // Build ALLINVENTORYENTRIES.LIST for each item
+  const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
+    const rate = item.rate || 0;
+    const qty = item.actualQty || item.billedQty || 0;
+    const unit = item.unit || 'Nos';
+    const amt = Math.abs(item.amount || 0);
+    
+    const gstSrcTag = item.gstLedgerSource 
+      ? `<GSTLEDGERSOURCE>${esc(item.gstLedgerSource)}</GSTLEDGERSOURCE>` 
+      : '';
+    
+    const ovrdTags = item.gstLedgerSource ? `
+    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
+    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>` : '';
+    
+    const hsnTag = item.hsnName ? `<GSTHSNNAME>${esc(item.hsnName)}</GSTHSNNAME>` : '';
+    
+    const acctAlloc = (item.accountingAllocations || []).map(alloc => `
     <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>${esc(aa.ledgerName || '')}</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>${aa.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
-      <ISLASTDEEMEDPOSITIVE>${aa.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>${posAmount.toFixed(2)}</AMOUNT>
+      <LEDGERNAME>${esc(alloc.ledgerName || 'Sales Accounts')}</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+      <AMOUNT>-${Math.abs(alloc.amount || 0).toFixed(2)}</AMOUNT>
     </ACCOUNTINGALLOCATIONS.LIST>`).join('');
-
-    const gstLedgerSrc = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
-    const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
-    const gstHsnName   = (item.gstHsnName || '').trim();
-    const isGenericLedger = !gstLedgerSrc
-      || gstLedgerSrc.toLowerCase() === 'sales accounts'
-      || gstLedgerSrc === (item.stockItemName || '').trim();
-    const gstSourceXml = !isGenericLedger
-      ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
-    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : '';
-    const hsnSourceXml = !isGenericLedger && hsnLedgerSrc
-      ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
-    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : '';
-    const gstOverrideXml = !isGenericLedger
-      ? `<GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>` : '';
-
+    
     return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(item.stockItemName || '')}</STOCKITEMNAME>
-    <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-    <RATE>${esc(item.rate || '')}</RATE>
-    <AMOUNT>${posAmount.toFixed(2)}</AMOUNT>
-    <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
-    <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
-    ${gstSourceXml}
-    ${hsnSourceXml}
-    ${gstOverrideXml}
-    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    < >No</ISLASTDEEMEDPOSITIVE>
+    <RATE>${rate.toFixed(2)}/${unit}</RATE>
+    <AMOUNT>${amt.toFixed(2)}</AMOUNT>
+    <ACTUALQTY>${qty} ${unit}</ACTUALQTY>
+    <BILLEDQTY>${qty} ${unit}</BILLEDQTY>${gstSrcTag}${ovrdTags}${hsnTag}${acctAlloc}
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
+  const hasInventoryEntries = (v.allInventoryEntries || []).length > 0;
 
   // ── Ledger entries ────────────────────────────────────────────────────────
-  // When inventory entries are present: suppress "Sales Accounts" from LEDGERENTRIES
-  // because the credit flows through ACCOUNTINGALLOCATIONS inside ALLINVENTORYENTRIES.
-  // Double-posting Sales Accounts in both places causes EXCEPTIONS=1.
-  // When no inventory: include all ledger entries (pure accounting format).
-  const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
-    if (hasInventoryEntries) {
-      const name = (entry.ledgerName || '').toLowerCase().trim();
-      if (name === 'sales accounts') return '';
+  // When inventory entries exist, suppress the Sales Accounts ledger (it appears in ACCOUNTINGALLOCATIONS)
+  const ledgerEntriesXml = (v.allLedgerEntries || []).filter(entry => {
+    // Suppress Sales Accounts ledger when inventory entries exist
+    if (hasInventoryEntries && entry.ledgerName && entry.ledgerName.toLowerCase().includes('sales')) {
+      return false;
     }
+    return true;
+  }).map(entry => {
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
       <BILLALLOCATIONS.LIST>
         <NAME>${esc(ba.name || '')}</NAME>
@@ -1499,6 +1477,13 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // ACCOUNTINGALLOCATIONS *and* also has ALLINVENTORYENTRIES — silent EXCEPTIONS=1.
       // Fix it now with an explicit Alter so every future export succeeds.
       `<LEDGER NAME="Sales Accounts" ACTION="Alter"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT><ISREVENUE>Yes</ISREVENUE><AFFECTSSTOCK>No</AFFECTSSTOCK></LEDGER>`,
+      // ── CRITICAL: Create a plain "Sales" ledger as the default sales credit ledger ──
+      // normalizeToTallyVoucher uses "Sales" (not "Sales Accounts") as the fallback
+      // sales credit ledger in LEDGERENTRIES.LIST when no item-specific ledger is known.
+      // "Sales Accounts" is a GROUP — using it in a ledger entry causes EXCEPTIONS=1.
+      // This "Sales" ledger is created once and reused for all invoices without a
+      // specific per-item sales ledger.
+      `<LEDGER NAME="Sales" ACTION="Create"><NAME>Sales</NAME><PARENT>Sales Accounts</PARENT><ISREVENUE>Yes</ISREVENUE><AFFECTSSTOCK>No</AFFECTSSTOCK></LEDGER>`,
       // SAFEGUARD: Create plain CGST/SGST/IGST ledgers WITHOUT rate suffixes first.
       // Most Tally installations (including this client) use plain "CGST"/"SGST"/"IGST"
       // not "Output CGST @ 9%" etc. Creating both ensures vouchers referencing either
@@ -1783,9 +1768,19 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     <AMOUNT>${totalIGST.toFixed(2)}</AMOUNT>
   </LEDGERENTRIES.LIST>` : '';
 
+          // ── Sales credit ledger for the legacy fallback path ──────────────
+          // "Sales Accounts" is a Tally GROUP, not a ledger — must NOT be used
+          // in LEDGERENTRIES.LIST (causes EXCEPTIONS=1).
+          // Use the item-specific tallySalesLedger if one is set, else "Sales"
+          // (the auto-created fallback ledger under "Sales Accounts" group).
+          const legacyItemLedgers = (inv.items || [])
+            .map(i => (i.tallySalesLedger || '').trim())
+            .filter(l => l && l.toLowerCase() !== 'sales accounts');
+          const legacySalesLedger = legacyItemLedgers.length > 0 ? legacyItemLedgers[0] : 'Sales';
+
           const salesAccEntry = `
   <LEDGERENTRIES.LIST>
-    <LEDGERNAME>Sales Accounts</LEDGERNAME>
+    <LEDGERNAME>${esc(legacySalesLedger)}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
     <AMOUNT>${(totalTax > 0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
   </LEDGERENTRIES.LIST>`;
@@ -1844,13 +1839,24 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           }).join('') : '';
           const hasLegacyInventory = useInventory && rawItems.length > 0;
 
-          // Narration: free text only — item names and PO are now in structured XML fields
+          // Narration: comprehensive item breakdown (Tally config blocks inventory XML)
+          const itemLines = rawItems.map((item, i) => {
+            const itemName = (item.description || item.name || '').trim();
+            const itemQty  = +(item.qty || 1);
+            const itemRate = +(item.rate || 0);
+            const itemAmt  = itemAmounts[i] || 0;
+            const itemUnit = tallyUnit(item.unit || 'Nos');
+            return `${i + 1}. ${itemName}: ${itemQty} ${itemUnit} @ ₹${itemRate.toFixed(2)} = ₹${itemAmt.toFixed(2)}`;
+          });
           const narration = [
-            `Inv: ${inv.invoiceNo}`,
-            origDateFmt || null,
+            `Invoice: ${inv.invoiceNo}`,
+            origDateFmt ? `Date: ${origDateFmt}` : null,
             legacyPoRef ? `PO: ${legacyPoRef}` : null,
+            '',
+            ...itemLines,
+            '',
             inv.notes || null,
-          ].filter(Boolean).join(' | ');
+          ].filter(x => x !== null).join('\n');
 
           LOG(`Invoice ${inv.invoiceNo}: partyName="${inv.partyName}" tallyDate=${tallyDate} grandTotal=${grandTotal} cgst=${totalCGST} sgst=${totalSGST} igst=${totalIGST}`);
 
@@ -1977,9 +1983,44 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           // Also mark this number in the local set to prevent a repeated attempt
           tallyVoucherNumbers.add(String(v.invoiceNo).trim().toUpperCase());
         } else {
-          batchErrors.push(`Batch ${batchNo}: ${alterResult.error}`);
-          for (const bv of batch) {
-            await logInvoiceExportResult(syncId, bv.invoiceNo, bv.partyName, 'Failed', alterResult.error || 'Tally rejected Alter retry');
+          // ── LAST RESORT: Delete + Re-Create ──────────────────────────────
+          // The Alter was also rejected — this typically happens when the existing
+          // Tally voucher has a different structure (e.g. item invoice vs accounting)
+          // and Tally won't allow structural changes via Alter.
+          // Delete the existing voucher and re-create it fresh.
+          LOG(`Sales batch ${batchNo}: Alter also rejected — attempting Delete + Create for ${v.invoiceNo}`);
+          try {
+            const deleteXml = v.xml.replace(/ACTION="(Create|Alter)"/, 'ACTION="Delete"');
+            const deleteEnvelope = importEnvelope(cfg, 'Vouchers', deleteXml);
+            const deleteResp = await postXml(cfg, deleteEnvelope, 60000);
+            const deleteResult = parseResponse(deleteResp, `Sales batch ${batchNo} [Delete]`);
+            LOG(`Sales batch ${batchNo}: Delete result — ok:${deleteResult.ok} altered:${deleteResult.altered}`);
+
+            // Re-create fresh (Create action, no GUID)
+            const reCreateXml = v.xml
+              .replace(/ACTION="(Alter|Delete)"/, 'ACTION="Create"')
+              .replace(/<GUID>[^<]*<\/GUID>\s*/gi, ''); // strip any GUID tag
+            const reCreateEnvelope = importEnvelope(cfg, 'Vouchers', reCreateXml);
+            const reCreateResp = await postXml(cfg, reCreateEnvelope, 60000);
+            const reCreateResult = parseResponse(reCreateResp, `Sales batch ${batchNo} [Delete+Create]`);
+
+            if (reCreateResult.ok && (reCreateResult.created || 0) > 0) {
+              totalCreated += reCreateResult.created || 0;
+              LOG(`Sales batch ${batchNo}: Delete+Create succeeded — ${v.invoiceNo} re-created in Tally`);
+              successIds.push(v.id);
+              await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', 'Re-created after Delete (structure conflict resolved)');
+              tallyVoucherNumbers.add(String(v.invoiceNo).trim().toUpperCase());
+            } else {
+              const finalErr = reCreateResult.error || 'Tally rejected Delete+Create';
+              batchErrors.push(`Batch ${batchNo}: ${finalErr}`);
+              await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', `Delete+Create failed: ${finalErr}`);
+            }
+          } catch (delErr) {
+            ERR(`Sales batch ${batchNo}: Delete+Create threw: ${delErr.message}`);
+            batchErrors.push(`Batch ${batchNo}: ${alterResult.error}`);
+            for (const bv of batch) {
+              await logInvoiceExportResult(syncId, bv.invoiceNo, bv.partyName, 'Failed', alterResult.error || 'Tally rejected Alter retry');
+            }
           }
         }
         continue;

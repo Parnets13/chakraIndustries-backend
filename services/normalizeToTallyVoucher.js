@@ -280,11 +280,37 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     });
   }
 
-  // 5. Sales Accounts credit.
+  // 5. Sales credit ledger.
   //    salesBase = grandTotal - totalTax
   //    When there is no tax, salesBase === grandTotal (correct).
+  //
+  //    CRITICAL: "Sales Accounts" is a Tally GROUP — NOT a ledger.
+  //    Using a group name in LEDGERENTRIES.LIST causes silent EXCEPTIONS=1.
+  //    We MUST use an actual ledger under the "Sales Accounts" group.
+  //
+  //    Resolution priority:
+  //    1. If all items share the same tallySalesLedger → use that one ledger
+  //    2. If items have mixed ledgers → use the first non-empty one
+  //    3. Fallback: "Sales" — a generic ledger that is auto-created under
+  //       "Sales Accounts" by the export pre-flight step. Never "Sales Accounts".
+  const INVALID_SALES_NAMES = new Set(['sales accounts', 'sales accounts (group)', '']);
+  const itemLedgers = validItems
+    .map(item => {
+      const raw = (item.tallySalesLedger || '').toString().trim();
+      return INVALID_SALES_NAMES.has(raw.toLowerCase()) ? '' : raw;
+    })
+    .filter(Boolean);
+  // Unique ledger names used across all items
+  const uniqueItemLedgers = [...new Set(itemLedgers)];
+  // Use the single shared ledger if all items agree, else use first one, else fallback
+  const salesCreditLedger = uniqueItemLedgers.length === 1
+    ? uniqueItemLedgers[0]
+    : uniqueItemLedgers.length > 1
+      ? uniqueItemLedgers[0]
+      : 'Sales';   // ← auto-created ledger under "Sales Accounts" group
+
   allLedgerEntries.push({
-    ledgerName: 'Sales Accounts',
+    ledgerName: salesCreditLedger,
     isDeemedPositive: false,
     isLastDeemedPositive: false,
     amount: totalTax > 0 ? +salesBase : +grandTotal,
@@ -303,7 +329,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     console.log(`    [${i}] ${e.stockItemName} => amount=${e.amount}`)
   );
   console.log(`  Party Ledger amount  : ${-grandTotal}`);
-  console.log(`  Sales Ledger amount  : ${totalTax > 0 ? +salesBase : +grandTotal}`);
+  console.log(`  Sales Credit Ledger  : "${salesCreditLedger}" amount=${totalTax > 0 ? +salesBase : +grandTotal}`);
   console.log(`  CGST amount          : ${totalCGST}`);
   console.log(`  SGST amount          : ${totalSGST}`);
   console.log(`  IGST amount          : ${totalIGST}`);
@@ -322,20 +348,35 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     );
   }
 
-  // ── Narration — free text only (invoice ref + date) ─────────────────────
-  // Item names and PO number are now carried in structured XML fields
-  // (ALLINVENTORYENTRIES.LIST and BUYERSORDERNO/BASICORDERDATE), so the narration
-  // no longer needs to be a workaround string. Keep it short and human-readable.
+  // ── Narration — COMPREHENSIVE item details (Tally config blocks inventory XML) ──
+  // This Tally company does NOT accept ALLINVENTORYENTRIES.LIST via XML import.
+  // All item details (name, qty, rate, amount) MUST go in NARRATION as plain text
+  // so they appear in Tally's voucher view and sales register.
   const origDateFmt = invoiceData.invoiceDate
     ? new Date(invoiceData.invoiceDate).toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'numeric' })
     : '';
   const poRef = (invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '').toString().trim();
+  
+  // Build item-by-item breakdown for narration
+  const itemLines = validItems.map((item, i) => {
+    const itemName   = (item.description || item.name || '').toString().trim();
+    const itemQty    = +(item.qty || 1);
+    const itemRate   = +(item.rate || 0);
+    const itemAmount = itemAmounts[i];
+    const itemUnit   = tallyUnit(item.unit || 'Nos');
+    // Format: "1. HYDRA STEEL WATER BOTTLE 1000ML: 50 Nos @ ₹150.00 = ₹7,500.00"
+    return `${i + 1}. ${itemName}: ${itemQty} ${itemUnit} @ ₹${itemRate.toFixed(2)} = ₹${itemAmount.toFixed(2)}`;
+  });
+  
   const narration = [
-    `Inv: ${invoiceNo}`,
-    origDateFmt ? origDateFmt : null,
+    `Invoice: ${invoiceNo}`,
+    origDateFmt ? `Date: ${origDateFmt}` : null,
     poRef ? `PO: ${poRef}` : null,
+    '', // blank line separator
+    ...itemLines,
+    '', // blank line before notes
     invoiceData.notes || null,
-  ].filter(Boolean).join(' | ');
+  ].filter(x => x !== null).join('\n');
 
   // ── Assemble sub-document ─────────────────────────────────────────────────
   // ── PO Date → YYYYMMDD ────────────────────────────────────────────────────
