@@ -1245,50 +1245,62 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   //     ACCOUNTINGALLOCATIONS → Sales Accounts
 
   // ── Inventory entries ────────────────────────────────────────────────────
-  // Build ALLINVENTORYENTRIES.LIST for each item
+  // Fields stored by normalizeToTallyVoucher:
+  //   item.rate      → already-formatted string "150.00/Nos"  (written as-is to <RATE>)
+  //   item.actualQty → already-formatted string "50 Nos"      (written as-is to <ACTUALQTY>)
+  //   item.billedQty → already-formatted string "50 Nos"      (written as-is to <BILLEDQTY>)
+  //   item.amount    → negative number  e.g. -7500.00         (abs used for <AMOUNT>)
+  //   item.gstHsnName → HSN code string                       (→ <GSTHSNNAME>)
   const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
-    const rate = item.rate || 0;
-    const qty = item.actualQty || item.billedQty || 0;
-    const unit = item.unit || 'Nos';
+    // rate and qty are pre-formatted strings from the normalizer — use directly
+    const rateStr = item.rate || '';           // e.g. "150.00/Nos"
+    const actualQtyStr = item.actualQty || ''; // e.g. "50 Nos"
+    const billedQtyStr = item.billedQty || ''; // e.g. "50 Nos"
     const amt = Math.abs(item.amount || 0);
-    
-    const gstSrcTag = item.gstLedgerSource 
-      ? `<GSTLEDGERSOURCE>${esc(item.gstLedgerSource)}</GSTLEDGERSOURCE>` 
-      : '';
-    
+
+    const gstSrcTag = item.gstLedgerSource
+      ? `\n    <GSTLEDGERSOURCE>${esc(item.gstLedgerSource)}</GSTLEDGERSOURCE>` : '';
+
     const ovrdTags = item.gstLedgerSource ? `
     <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
     <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>` : '';
-    
-    const hsnTag = item.hsnName ? `<GSTHSNNAME>${esc(item.hsnName)}</GSTHSNNAME>` : '';
-    
+
+    // Field name stored by normalizer is gstHsnName (not hsnName)
+    const hsnTag = item.gstHsnName ? `\n    <GSTHSNNAME>${esc(item.gstHsnName)}</GSTHSNNAME>` : '';
+
     const acctAlloc = (item.accountingAllocations || []).map(alloc => `
     <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>${esc(alloc.ledgerName || 'Sales Accounts')}</LEDGERNAME>
+      <LEDGERNAME>${esc(alloc.ledgerName || '')}</LEDGERNAME>
       <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
       <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
       <AMOUNT>-${Math.abs(alloc.amount || 0).toFixed(2)}</AMOUNT>
     </ACCOUNTINGALLOCATIONS.LIST>`).join('');
-    
+
     return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(item.stockItemName || '')}</STOCKITEMNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    < >No</ISLASTDEEMEDPOSITIVE>
-    <RATE>${rate.toFixed(2)}/${unit}</RATE>
-    <AMOUNT>${amt.toFixed(2)}</AMOUNT>
-    <ACTUALQTY>${qty} ${unit}</ACTUALQTY>
-    <BILLEDQTY>${qty} ${unit}</BILLEDQTY>${gstSrcTag}${ovrdTags}${hsnTag}${acctAlloc}
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <RATE>${esc(rateStr)}</RATE>
+    <AMOUNT>-${amt.toFixed(2)}</AMOUNT>
+    <ACTUALQTY>${esc(actualQtyStr)}</ACTUALQTY>
+    <BILLEDQTY>${esc(billedQtyStr)}</BILLEDQTY>${gstSrcTag}${ovrdTags}${hsnTag}${acctAlloc}
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
   const hasInventoryEntries = (v.allInventoryEntries || []).length > 0;
 
   // ── Ledger entries ────────────────────────────────────────────────────────
-  // When inventory entries exist, suppress the Sales Accounts ledger (it appears in ACCOUNTINGALLOCATIONS)
+  // When inventory entries exist, suppress only the pure "Sales Accounts" group entry
+  // (the sales credit is already carried in ACCOUNTINGALLOCATIONS inside each
+  //  inventory entry). Party and GST ledger entries are always kept.
   const ledgerEntriesXml = (v.allLedgerEntries || []).filter(entry => {
-    // Suppress Sales Accounts ledger when inventory entries exist
-    if (hasInventoryEntries && entry.ledgerName && entry.ledgerName.toLowerCase().includes('sales')) {
-      return false;
+    if (hasInventoryEntries) {
+      // Suppress sales credit ledger — it's covered by ACCOUNTINGALLOCATIONS
+      const n = (entry.ledgerName || '').toLowerCase();
+      const isSalesCredit = n === 'sales accounts'
+        || n === 'sales'
+        || (n.startsWith('ss ') && n.includes('sales'));
+      if (isSalesCredit && !entry.isDeemedPositive) return false;
     }
     return true;
   }).map(entry => {
@@ -1314,11 +1326,28 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   </LEDGERENTRIES.LIST>`;
   }).join('');
 
-  // ── Bill-to / Ship-to — stripped pending confirmed-working test ────────────
-  // Address tags removed while ship-to approach is being validated against Tally.
-  // Restore once CREATED=1 confirmed with the flat scalar tag format.
-  const billToXml = '';
-  const shipToXml = '';
+  // ── Ship-to address (BASICBASEPARTYDETAILS.LIST) ───────────────────────────
+  // These fields are mapped by normalizeToTallyVoucher and stored in the voucher.
+  const shipToXml = (v.shipToName || v.shipToAddress) ? `
+  <BASICBASEPARTYDETAILS.LIST>
+    <BASICBUYERNAME>${esc(v.shipToName || v.partyLedgerName || '')}</BASICBUYERNAME>
+    <BASICBUYERADDRESS.LIST>
+      <BASICBUYERADDRESS>${esc(v.shipToAddress || '')}</BASICBUYERADDRESS>
+    </BASICBUYERADDRESS.LIST>
+    <BASICBUYERSTATE>${esc(v.shipToState || '')}</BASICBUYERSTATE>
+    <BASICBUYERCOUNTRY>India</BASICBUYERCOUNTRY>
+    <BASICBUYERGSTIN>${esc(v.shipToGST || '')}</BASICBUYERGSTIN>
+  </BASICBASEPARTYDETAILS.LIST>` : '';
+
+  // ── Bill-to address (ADDRESS.LIST on the party ledger entry) ──────────────
+  // Tally stores bill-to as part of the voucher ADDRESS block.
+  const billToXml = (v.billToAddress || v.billToName) ? `
+  <ADDRESS.LIST>
+    <ADDRESS>${esc(v.billToName || '')}</ADDRESS>
+    <ADDRESS>${esc(v.billToAddress || '')}</ADDRESS>
+    ${v.billToCity  ? `<ADDRESS>${esc(v.billToCity)}</ADDRESS>` : ''}
+    ${v.billToState ? `<ADDRESS>${esc(v.billToState)}</ADDRESS>` : ''}
+  </ADDRESS.LIST>` : '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
