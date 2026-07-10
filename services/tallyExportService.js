@@ -1723,17 +1723,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
           voucherXml = serializeTallyVoucher(tv, action, guidTag);
 
-          // ── Stale-voucher guard ────────────────────────────────────────────
-          // The tallyVoucher may have been built before ItemMaster had a real
-          // tallySalesLedger (e.g. uploaded before the ledger was set, or patched
-          // later). If every inventory entry resolves to "Sales Accounts" — which
-          // is a Tally GROUP, not a ledger — re-normalize right now using the
-          // current ItemMaster so the export sends a proper Item Invoice.
-          // We only re-normalize when items exist but none have a real ledger,
-          // because that's the only case that produces the wrong accounting fallback.
-          let effectiveTv = tv;
-          voucherXml = serializeTallyVoucher(tv, action, guidTag);
-
         } else {
           // ── FALLBACK: legacy field-mapping path ─────────────────────────
           LOG(`Invoice ${inv.invoiceNo}: FALLBACK path — tallyVoucher=null, using legacy mapper`);
