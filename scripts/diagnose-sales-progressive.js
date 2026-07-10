@@ -1,26 +1,3 @@
-/**
- * diagnose-sales-progressive.js
- * ──────────────────────────────────────────────────────────────────────────────
- * DIAGNOSTIC MODE — does NOT modify any existing export logic.
- *
- * Sends the same Sales voucher to Tally 8 times, each round adding exactly one
- * more XML layer. Stops at the FIRST round that returns EXCEPTIONS=1 and prints:
- *   • The exact XML of the failing round (and the last passing round)
- *   • A line-by-line diff of what changed between pass → fail
- *
- * Also exports a real Sales voucher from Tally (via TDL collection) and diffs
- * every XML tag against what the ERP sends, flagging:
- *   MISSING  — tag present in Tally export but absent from ERP XML
- *   EXTRA    — tag present in ERP XML but absent from Tally export
- *
- * Usage:
- *   node scripts/diagnose-sales-progressive.js
- *   node scripts/diagnose-sales-progressive.js BIW-INV-001   ← specific invoice
- *
- * Output is written to:
- *   logs/sales-progressive-YYYY-MM-DDTHH-MM-SS.log
- * AND printed to stdout so you can see it live.
- */
 
 import mongoose from 'mongoose';
 import fs        from 'fs';

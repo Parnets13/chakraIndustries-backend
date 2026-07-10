@@ -1322,13 +1322,13 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
 
   // ── Ledger entries ────────────────────────────────────────────────────────
   // This Tally instance requires LEDGERENTRIES.LIST (not ALLLEDGERENTRIES.LIST).
-  // When inventory entries are present, suppress the "Sales Accounts" ledger entry
-  // to avoid double-booking (the inventory ACCOUNTINGALLOCATIONS carry the credit).
+  // IMPORTANT: Do NOT suppress the "Sales Accounts" ledger entry when inventory
+  // entries are present. In Tally's Item Invoice format:
+  //   - LEDGERENTRIES.LIST carries the accounting credit (Sales Accounts / sales ledger)
+  //   - ALLINVENTORYENTRIES.LIST > ACCOUNTINGALLOCATIONS routes it to the specific ledger
+  // Both must be present. Suppressing Sales Accounts breaks the voucher balance
+  // and causes EXCEPTIONS=1 (Tally internally sums to non-zero).
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
-    if (hasInventoryEntries) {
-      const name = (entry.ledgerName || '').toLowerCase().trim();
-      if (name === 'sales accounts') return '';
-    }
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
       <BILLALLOCATIONS.LIST>
         <NAME>${esc(ba.name || '')}</NAME>
