@@ -151,50 +151,67 @@ router.get('/diagnose-vouchers', protect, async (req, res) => {
         }));
     } catch (e) { results.ledgersError = e.message; }
 
-    // ── 3. Minimal test Sales voucher with SVSHOWERRORLIST ───────────────────
+    // ── 3. Minimal test Sales voucher — pure accounting, no items ────────────
+    // Uses correct Tally sign conventions:
+    //   Party debit: ISDEEMEDPOSITIVE=Yes, AMOUNT=-grandTotal (negative)
+    //   Sales credit: ISDEEMEDPOSITIVE=No, AMOUNT=+salesBase (positive)
+    // No inventory entries — simplest possible voucher to test if Sales type works at all.
     try {
+      const salesVT = (results.voucherTypes || []).find(n => n.toLowerCase().startsWith('sale')) || 'Sales';
+      const partyName = (results.relevantLedgers || []).find(l => l.parent?.toLowerCase().includes('sundry debtor'))?.name || 'BI Worldwide India PVT LTD';
+      const salesLed  = (results.relevantLedgers || []).find(l => l.parent?.toLowerCase().includes('sales') && l.name?.toLowerCase() !== 'sales accounts')?.name || 'Sales';
+      results.testUsing = { salesVT, partyName, salesLed, date: '20260702' };
+
       const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA>
   <REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME>
     <STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></STATICVARIABLES>
   </REQUESTDESC>
   <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">
-    <VOUCHER VCHTYPE="Sales" ACTION="Create">
+    <VOUCHER VCHTYPE="${salesVT}" ACTION="Create" OBJVIEW="Invoice Voucher View">
       <DATE>20260702</DATE>
-      <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
-      <VOUCHERNUMBER>TEST-DIAG-001</VOUCHERNUMBER>
-      <PARTYLEDGERNAME>BI Worldwide India PVT LTD</PARTYLEDGERNAME>
+      <EFFECTIVEDATE>20260702</EFFECTIVEDATE>
+      <VOUCHERTYPENAME>${salesVT}</VOUCHERTYPENAME>
+      <VOUCHERNUMBER>TEST-DIAG-${Date.now()}</VOUCHERNUMBER>
+      <PARTYLEDGERNAME>${partyName}</PARTYLEDGERNAME>
       <ISINVOICE>Yes</ISINVOICE>
+      <NARRATION>ERP diagnostic test</NARRATION>
       <ALLLEDGERENTRIES.LIST>
-        <LEDGERNAME>BI Worldwide India PVT LTD</LEDGERNAME>
-        <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>200.00</AMOUNT>
-      </ALLLEDGERENTRIES.LIST>
-      <ALLLEDGERENTRIES.LIST>
-        <LEDGERNAME>CGST</LEDGERNAME>
-        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-4.76</AMOUNT>
-      </ALLLEDGERENTRIES.LIST>
-      <ALLLEDGERENTRIES.LIST>
-        <LEDGERNAME>SGST</LEDGERNAME>
-        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>-4.76</AMOUNT>
-      </ALLLEDGERENTRIES.LIST>
-      <ALLINVENTORYENTRIES.LIST>
-        <STOCKITEMNAME>HYDRA STEEL WATER BOTTLE 1000ML</STOCKITEMNAME>
+        <LEDGERNAME>${partyName}</LEDGERNAME>
         <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-        <RATE>190.48 /1 Nos</RATE><AMOUNT>-190.48</AMOUNT>
-        <ACTUALQTY>1 Nos</ACTUALQTY><BILLEDQTY>1 Nos</BILLEDQTY>
-        <ACCOUNTINGALLOCATIONS.LIST>
-          <LEDGERNAME>Sales Accounts</LEDGERNAME>
-          <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-190.48</AMOUNT>
-        </ACCOUNTINGALLOCATIONS.LIST>
-      </ALLINVENTORYENTRIES.LIST>
+        <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
+        <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
+        <AMOUNT>-100.00</AMOUNT>
+        <BILLALLOCATIONS.LIST>
+          <NAME>TEST-DIAG-BILL</NAME>
+          <BILLTYPE>New Ref</BILLTYPE>
+          <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
+          <AMOUNT>-100.00</AMOUNT>
+        </BILLALLOCATIONS.LIST>
+      </ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST>
+        <LEDGERNAME>${salesLed}</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+        <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+        <ISPARTYLEDGER>No</ISPARTYLEDGER>
+        <AMOUNT>100.00</AMOUNT>
+      </ALLLEDGERENTRIES.LIST>
     </VOUCHER>
   </TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
-      const resp = await postXmlWithRetry(cfg, xml, ct(60000));
-      results.testVoucherRaw      = resp.slice(0, 1000);
+      const resp = await postXmlWithRetry(cfg, xml, ct(90000));
+      results.testVoucherRaw        = resp.slice(0, 2000);
       results.testVoucherLineErrors = [...resp.matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m => m[1].trim());
       results.testVoucherCreated    = parseInt(resp.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
       results.testVoucherExceptions = parseInt(resp.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1] || '0');
+      // Clean up if created
+      if (results.testVoucherCreated > 0) {
+        try {
+          const delXml = xml.replace('ACTION="Create"', 'ACTION="Delete"');
+          await postXmlWithRetry(cfg, delXml, ct(30000));
+          results.testVoucherDeleted = true;
+        } catch (_) { results.testVoucherDeleted = false; }
+      }
     } catch (e) { results.testVoucherError = e.message; }
 
     res.json({ success: true, data: results });
