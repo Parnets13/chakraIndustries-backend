@@ -1348,7 +1348,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
   return `
-<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
+<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}">
   <DATE>${esc(v.date || '')}</DATE>
   <EFFECTIVEDATE>${esc(v.effectiveDate || v.date || '')}</EFFECTIVEDATE>
   ${guidTag}
