@@ -1237,12 +1237,12 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   // ── EXACT format matching manually-created Tally Sales Invoices ───────────
   // Based on visual inspection of SCI0919 (manually created, working):
   //   OBJVIEW="Invoice Voucher View"
-  //   LEDGERENTRIES.LIST for party + GST + Sales ledger
+  //   ALLLEDGERENTRIES.LIST for party + GST + Sales ledger
   //     Party: ISDEEMEDPOSITIVE=Yes, AMOUNT = NEGATIVE (-grandTotal)
   //     Credits: ISDEEMEDPOSITIVE=No, AMOUNT = POSITIVE (+amount)
   //   ALLINVENTORYENTRIES.LIST for each item
   //     ISDEEMEDPOSITIVE=No, positive amount
-  //     ACCOUNTINGALLOCATIONS → Sales Accounts
+  //     ACCOUNTINGALLOCATIONS → specific sales ledger
 
   // ── Inventory entries ────────────────────────────────────────────────────
   // Fields stored by normalizeToTallyVoucher:
@@ -1289,10 +1289,6 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   }).join('');
   const hasInventoryEntries = (v.allInventoryEntries || []).length > 0;
 
-  // ── Ledger entries ────────────────────────────────────────────────────────
-  // When inventory entries exist, suppress only the pure "Sales Accounts" group entry
-  // (the sales credit is already carried in ACCOUNTINGALLOCATIONS inside each
-  //  inventory entry). Party and GST ledger entries are always kept.
   const ledgerEntriesXml = (v.allLedgerEntries || []).filter(entry => {
     if (hasInventoryEntries) {
       // Suppress sales credit ledger — it's covered by ACCOUNTINGALLOCATIONS
