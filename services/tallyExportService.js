@@ -2693,66 +2693,92 @@ export function validateTallyExport(voucher, tallyMasters, options = {}) {
  *
  * Callers should cache the result for the duration of an export run —
  * calling this once per invoice is too slow.
+ *
+ * IMPORTANT: Each collection is fetched in a SEPARATE request.
+ * Sending multiple <COLLECTION> blocks under a single <ID> in one request
+ * causes TallyPrime to crash with a c0000005 memory access violation because
+ * the XML response builder dereferences a null pointer when the <ID> name
+ * does not exactly match any single collection name.
  */
 export async function fetchTallyMastersForValidation(cfg) {
+  // Never run in connector mode — these TDL Collection queries are too slow
+  // over the long-poll tunnel and the round-trip overhead times out.
+  if (cfg.useConnector && cfg.connectorId) {
+    LOG('fetchTallyMastersForValidation: skipped (connector mode)');
+    return null;
+  }
+
   try {
     const company = (cfg.companyName || '').trim().toUpperCase();
     const coTag   = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
 
-    const xml = `<ENVELOPE>
+    // ── Helper: send one collection request and return raw XML ────────────────
+    const fetchCollection = async (collectionName, objectType, fetchFields) => {
+      const xml = `<ENVELOPE>
 <HEADER>
-  <VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>
-  <TYPE>Collection</TYPE><ID>ERPMasterValidation</ID>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>${collectionName}</ID>
 </HEADER>
 <BODY><DESC>
   <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
   <TDL><TDLMESSAGE>
-    <COLLECTION NAME="ERPMasterValidation_StockItems">
-      <TYPE>StockItem</TYPE><FETCH>Name</FETCH>
-    </COLLECTION>
-    <COLLECTION NAME="ERPMasterValidation_Ledgers">
-      <TYPE>Ledger</TYPE><FETCH>Name, Parent, TaxType</FETCH>
-    </COLLECTION>
-    <COLLECTION NAME="ERPMasterValidation_Godowns">
-      <TYPE>Godown</TYPE><FETCH>Name</FETCH>
+    <COLLECTION NAME="${collectionName}">
+      <TYPE>${objectType}</TYPE>
+      <FETCH>${fetchFields}</FETCH>
     </COLLECTION>
   </TDLMESSAGE></TDL>
 </DESC></BODY>
 </ENVELOPE>`;
+      return postXmlWithRetry(cfg, xml, 30000, 1);
+    };
 
-    const resp = await postXmlWithRetry(cfg, xml, cfg.useConnector && cfg.connectorId ? 120000 : 45000, 1);
-    if (!resp) return null;
+    // ── Three separate requests — one collection each ─────────────────────────
+    // Sending all three in one request causes a c0000005 crash in TallyPrime
+    // because the <ID> tag must match exactly one <COLLECTION NAME="...">.
+    const [stockResp, ledgerResp, godownResp] = await Promise.all([
+      fetchCollection('ERPMasterStockItems',  'StockItem', 'Name').catch(() => ''),
+      fetchCollection('ERPMasterLedgers',     'Ledger',    'Name, Parent, TaxType').catch(() => ''),
+      fetchCollection('ERPMasterGodowns',     'Godown',    'Name').catch(() => ''),
+    ]);
 
-    // Parse stock items
+    // ── Parse stock items ─────────────────────────────────────────────────────
     const stockItems = [];
-    for (const m of resp.matchAll(/<STOCKITEM[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
-      const name = (m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
-      if (name) stockItems.push(name);
+    if (stockResp) {
+      for (const m of stockResp.matchAll(/<STOCKITEM[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
+        const name = (m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+        if (name) stockItems.push(name);
+      }
     }
 
-    // Parse ledgers — split into salesLedgers and gstLedgers by parent/taxType
+    // ── Parse ledgers — split into salesLedgers and gstLedgers ───────────────
     const salesLedgers = [];
     const gstLedgers   = [];
-    for (const m of resp.matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
-      const block   = m[1];
-      const name    = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1]     || '').trim();
-      const parent  = (block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim().toLowerCase();
-      const taxType = (block.match(/<TAXTYPE>(.*?)<\/TAXTYPE>/i)?.[1]|| '').trim().toLowerCase();
-      if (!name) continue;
-      const nameLow = name.toLowerCase();
-      if (parent.includes('sales') || (parent === '' && nameLow.includes('sales'))) salesLedgers.push(name);
-      if (
-        parent.includes('duties') || parent.includes('tax') ||
-        taxType === 'central tax' || taxType === 'state tax' || taxType === 'integrated tax' ||
-        nameLow.includes('cgst') || nameLow.includes('sgst') || nameLow.includes('igst')
-      ) gstLedgers.push(name);
+    if (ledgerResp) {
+      for (const m of ledgerResp.matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
+        const block   = m[1];
+        const name    = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1]     || '').trim();
+        const parent  = (block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim().toLowerCase();
+        const taxType = (block.match(/<TAXTYPE>(.*?)<\/TAXTYPE>/i)?.[1]|| '').trim().toLowerCase();
+        if (!name) continue;
+        const nameLow = name.toLowerCase();
+        if (parent.includes('sales') || (parent === '' && nameLow.includes('sales'))) salesLedgers.push(name);
+        if (
+          parent.includes('duties') || parent.includes('tax') ||
+          taxType === 'central tax' || taxType === 'state tax' || taxType === 'integrated tax' ||
+          nameLow.includes('cgst') || nameLow.includes('sgst') || nameLow.includes('igst')
+        ) gstLedgers.push(name);
+      }
     }
 
-    // Parse godowns
+    // ── Parse godowns ─────────────────────────────────────────────────────────
     const godowns = [];
-    for (const m of resp.matchAll(/<GODOWN[^>]*>([\s\S]*?)<\/GODOWN>/gi)) {
-      const name = (m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
-      if (name) godowns.push(name);
+    if (godownResp) {
+      for (const m of godownResp.matchAll(/<GODOWN[^>]*>([\s\S]*?)<\/GODOWN>/gi)) {
+        const name = (m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+        if (name) godowns.push(name);
+      }
     }
 
     LOG(`fetchTallyMastersForValidation: stockItems=${stockItems.length} salesLedgers=${salesLedgers.length} gstLedgers=${gstLedgers.length} godowns=${godowns.length}`);
