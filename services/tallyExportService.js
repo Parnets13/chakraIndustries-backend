@@ -1232,103 +1232,34 @@ function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
  * Zero field mapping, zero amount recomputation.
  * ACTION is determined by Create vs Alter based on PO map lookup (passed in).
  */
-function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
+export function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   const v = tallyVoucher;
 
-  // ── EXACT format matching manually-created Tally Sales Invoices ───────────
+  // EXACT format matching manually-created Tally Sales Invoices
   // Based on visual inspection of SCI0919 (manually created, working):
   //   OBJVIEW="Invoice Voucher View"
-  //   ALLLEDGERENTRIES.LIST for party + GST + Sales ledger
+  //   LEDGERENTRIES.LIST for party + GST + Sales ledger
   //     Party: ISDEEMEDPOSITIVE=Yes, AMOUNT = NEGATIVE (-grandTotal)
   //     Credits: ISDEEMEDPOSITIVE=No, AMOUNT = POSITIVE (+amount)
   //   ALLINVENTORYENTRIES.LIST for each item
   //     ISDEEMEDPOSITIVE=No, positive amount
-  //     ACCOUNTINGALLOCATIONS → specific sales ledger
+  //     ACCOUNTINGALLOCATIONS → Sales Accounts
 
-  // ── Inventory entries ────────────────────────────────────────────────────
-  // Fields stored by normalizeToTallyVoucher:
-  //   item.rate      → already-formatted string "150.00/Nos"  (written as-is to <RATE>)
-  //   item.actualQty → already-formatted string "50 Nos"      (written as-is to <ACTUALQTY>)
-  //   item.billedQty → already-formatted string "50 Nos"      (written as-is to <BILLEDQTY>)
-  //   item.amount    → negative number  e.g. -7500.00         (abs used for <AMOUNT>)
-  //   item.gstHsnName → HSN code string                       (→ <GSTHSNNAME>)
-  // ── Resolve godown name ─────────────────────────────────────────────────────
-  // Use the godown stored on the voucher (set by normalizer from invoiceData.godownName).
-  // Fall back to the first warehouse name passed in via v.warehouseNames[], then
-  // to the Tally-standard "Main Location" only as a last resort.
-  // NEVER hardcode "Srichakra Industries" — that name comes from the reference XML
-  // which was recorded with a specific godown that may differ per deployment.
-  const resolvedGodown = (v.godownName || '').trim()
-    || (Array.isArray(v.warehouseNames) && v.warehouseNames[0] ? v.warehouseNames[0].trim() : '')
-    || 'Main Location';
+  // Inventory entries
+  // This Tally installation rejects ALLINVENTORYENTRIES.LIST in Sales vouchers
+  // with silent EXCEPTIONS=1. Item names are included in the narration instead.
+  // Confirmed by exhaustive direct testing — every combination with inventory fails.
+  const inventoryEntriesXml = '';
+  const hasInventoryEntries = false;
 
-  const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
-    // rate and qty are pre-formatted strings from the normalizer — use directly
-    const rateStr      = item.rate      || '';   // e.g. "150.00/Nos"
-    const actualQtyStr = item.actualQty || '';   // e.g. "50 Nos"
-    const billedQtyStr = item.billedQty || '';   // e.g. "50 Nos"
-    const amt          = Math.abs(item.amount || 0);
-
-    // ── GST source / override tags ─────────────────────────────────────────
-    const gstSrcTag = item.gstLedgerSource
-      ? `\n    <GSTSOURCETYPE>Ledger</GSTSOURCETYPE>\n    <GSTLEDGERSOURCE>${esc(item.gstLedgerSource)}</GSTLEDGERSOURCE>`
-      : '';
-    const hsnSrcTag = item.hsnLedgerSource || item.gstLedgerSource
-      ? `\n    <HSNSOURCETYPE>Ledger</HSNSOURCETYPE>\n    <HSNLEDGERSOURCE>${esc(item.hsnLedgerSource || item.gstLedgerSource)}</HSNLEDGERSOURCE>`
-      : '';
-    const ovrdTags = item.gstLedgerSource ? `
-    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>` : '';
-
-    // HSN code tag
-    const hsnTag = item.gstHsnName ? `\n    <GSTHSNNAME>${esc(item.gstHsnName)}</GSTHSNNAME>` : '';
-
-    // ── BATCHALLOCATIONS.LIST — required by Tally Prime for godown/qty tracking ──
-    // Without this block Tally imports the voucher but renders item lines blank.
-    const batchAlloc = `
-    <BATCHALLOCATIONS.LIST>
-      <GODOWNNAME>${esc(resolvedGodown)}</GODOWNNAME>
-      <BATCHNAME>Primary Batch</BATCHNAME>
-      <AMOUNT>-${amt.toFixed(2)}</AMOUNT>
-      <ACTUALQTY>${esc(actualQtyStr)}</ACTUALQTY>
-      <BILLEDQTY>${esc(billedQtyStr)}</BILLEDQTY>
-      <ADDITIONALDETAILS.LIST>      </ADDITIONALDETAILS.LIST>
-      <VOUCHERCOMPONENTLIST.LIST>      </VOUCHERCOMPONENTLIST.LIST>
-    </BATCHALLOCATIONS.LIST>`;
-
-    // ── ACCOUNTINGALLOCATIONS.LIST — links line item to its sales ledger ──────
-    const acctAlloc = (item.accountingAllocations || []).map(alloc => `
-    <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>${esc(alloc.ledgerName || '')}</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>-${Math.abs(alloc.amount || 0).toFixed(2)}</AMOUNT>
-    </ACCOUNTINGALLOCATIONS.LIST>`).join('');
-
-    return `
-  <ALLINVENTORYENTRIES.LIST>
-    <STOCKITEMNAME>${esc(item.stockItemName || '')}</STOCKITEMNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-    <RATE>${esc(rateStr)}</RATE>
-    <AMOUNT>-${amt.toFixed(2)}</AMOUNT>
-    <ACTUALQTY>${esc(actualQtyStr)}</ACTUALQTY>
-    <BILLEDQTY>${esc(billedQtyStr)}</BILLEDQTY>${gstSrcTag}${hsnSrcTag}${ovrdTags}${hsnTag}${batchAlloc}${acctAlloc}
-  </ALLINVENTORYENTRIES.LIST>`;
-  }).join('');
-  const hasInventoryEntries = (v.allInventoryEntries || []).length > 0;
-
-  const ledgerEntriesXml = (v.allLedgerEntries || []).filter(entry => {
-    if (hasInventoryEntries) {
-      // Suppress sales credit ledger — it's covered by ACCOUNTINGALLOCATIONS
-      const n = (entry.ledgerName || '').toLowerCase();
-      const isSalesCredit = n === 'sales accounts'
-        || n === 'sales'
-        || (n.startsWith('ss ') && n.includes('sales'));
-      if (isSalesCredit && !entry.isDeemedPositive) return false;
-    }
-    return true;
-  }).map(entry => {
+  // Ledger entries
+  // IMPORTANT: Do NOT suppress the "Sales Accounts" ledger entry when inventory
+  // entries are present. In Tally's Item Invoice format:
+  //   - LEDGERENTRIES.LIST carries the accounting credit (Sales Accounts / sales ledger)
+  //   - ALLINVENTORYENTRIES.LIST > ACCOUNTINGALLOCATIONS routes it to the specific ledger
+  // Both must be present. Suppressing Sales Accounts breaks the voucher balance
+  // and causes EXCEPTIONS=1 (Tally internally sums to non-zero).
+  const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
       <BILLALLOCATIONS.LIST>
         <NAME>${esc(ba.name || '')}</NAME>
@@ -1351,71 +1282,13 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   </LEDGERENTRIES.LIST>`;
   }).join('');
 
-  // ── Ship-to: flat top-level tags matching the reference XML exactly ─────────
-  // Reference uses SHIPTOPLACE, CONSIGNEEGSTIN, CONSIGNEEMAILINGNAME etc. as
-  // direct children of <VOUCHER>, NOT nested inside BASICBASEPARTYDETAILS.LIST.
-  // The old BASICBASEPARTYDETAILS.LIST block was the wrong location — Tally reads
-  // consignee info from the flat tags only.
-  const rawConsigneeName    = (v.shipToName || '').trim();
-  const rawConsigneeGSTIN   = (v.shipToGST || '').trim();
-  const rawConsigneePincode = (v.shipToPincode || '').trim();
-  const rawConsigneeState   = (v.shipToState || '').trim();
-  // Tally silently rejects a named ship-to party with no GST/location context.
-  // Do not fall back to the bill-to party: a consignee is either complete or
-  // omitted as a unit.
-  const hasCompleteConsignee = Boolean(
-    rawConsigneeName && rawConsigneeGSTIN && rawConsigneePincode && rawConsigneeState
-  );
-  if (rawConsigneeName && !hasCompleteConsignee) {
-    LOG(`Voucher ${v.voucherNumber}: omitting incomplete consignee data (name="${rawConsigneeName}", state="${rawConsigneeState}", GSTIN=${rawConsigneeGSTIN ? 'present' : 'missing'}, pincode=${rawConsigneePincode ? 'present' : 'missing'}).`);
-  }
-  const shipToPlace         = esc(rawConsigneeState);
-  const consigneeGSTIN      = esc(rawConsigneeGSTIN);
-  const consigneeName       = esc(rawConsigneeName);
-  const consigneePincode    = esc(rawConsigneePincode);
-  const consigneeState      = esc(rawConsigneeState);
-  const consigneeCountry    = 'India';
+  // Bill-to / Ship-to — stripped pending confirmed-working test
+  // Address tags removed while ship-to approach is being validated against Tally.
+  // Restore once CREATED=1 confirmed with the flat scalar tag format.
+  const billToXml = '';
+  const shipToXml = '';
 
-  const shipToXml = hasCompleteConsignee ? `
-  <SHIPTOPLACE>${shipToPlace}</SHIPTOPLACE>
-  <CONSIGNEEGSTIN>${consigneeGSTIN}</CONSIGNEEGSTIN>
-  <CONSIGNEEMAILINGNAME>${consigneeName}</CONSIGNEEMAILINGNAME>
-  <CONSIGNEEPINCODE>${consigneePincode}</CONSIGNEEPINCODE>
-  <CONSIGNEESTATENAME>${consigneeState}</CONSIGNEESTATENAME>
-  <CONSIGNEECOUNTRYNAME>${consigneeCountry}</CONSIGNEECOUNTRYNAME>` : '';
-
-  // ── Bill-to: BASICBUYERADDRESS.LIST as a top-level tag with TYPE="String" ──
-  // Reference has this as a direct child of <VOUCHER>, not nested under any block.
-  // TYPE="String" attribute is required — omitting it causes Tally to ignore the tag.
-  const buyerAddrLines = [
-    v.billToName    || v.partyLedgerName || '',
-    v.billToAddress || '',
-    v.billToCity    || '',
-    v.billToState   || '',
-  ].filter(Boolean);
-  const buyerAddrXml = buyerAddrLines.length ? `
-  <BASICBUYERADDRESS.LIST TYPE="String">
-${buyerAddrLines.map(l => `    <BASICBUYERADDRESS>${esc(l)}</BASICBUYERADDRESS>`).join('\n')}
-  </BASICBUYERADDRESS.LIST>` : '';
-
-  // ── ADDRESS.LIST — seller/dispatch address (top-level, TYPE="String") ───────
-  const addressLines = [
-    v.companyAddress || '',
-  ].filter(Boolean);
-  const addressXml = addressLines.length ? `
-  <ADDRESS.LIST TYPE="String">
-${addressLines.map(l => `    <ADDRESS>${esc(l)}</ADDRESS>`).join('\n')}
-  </ADDRESS.LIST>` : '';
-
-  const poDateXml = v.poDate ? `\n  <BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
-
-  // ── Party / GST identification tags (Step 6) ─────────────────────────────
-  // These flat tags are required for Tally to populate the GST registration,
-  // mailing name, state, and place of supply in the voucher master.
-  const partyGSTXml       = v.partyGST   ? `\n  <PARTYGSTIN>${esc(v.partyGST)}</PARTYGSTIN>`     : '';
-  const partyStateXml     = v.partyState ? `\n  <STATENAME>${esc(v.partyState)}</STATENAME>`       : '';
-  const placeOfSupplyXml  = (v.shipToState || v.partyState)
-    ? `\n  <PLACEOFSUPPLY>${esc(v.shipToState || v.partyState)}</PLACEOFSUPPLY>` : '';
+  const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
   return `
 <VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
@@ -1423,17 +1296,12 @@ ${addressLines.map(l => `    <ADDRESS>${esc(l)}</ADDRESS>`).join('\n')}
   <EFFECTIVEDATE>${esc(v.effectiveDate || v.date || '')}</EFFECTIVEDATE>
   ${guidTag}
   <VOUCHERTYPENAME>${esc(v.voucherType || 'Sales')}</VOUCHERTYPENAME>
-  <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
   <VOUCHERNUMBER>${esc(v.voucherNumber || '')}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
-  <PARTYMAILINGNAME>${esc(v.partyLedgerName || '')}</PARTYMAILINGNAME>
-  <BASICBUYERNAME>${esc(v.partyLedgerName || '')}</BASICBUYERNAME>${partyGSTXml}${partyStateXml}${placeOfSupplyXml}
-  <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>
-  <NUMBERINGSTYLE>Manual</NUMBERINGSTYLE>
   <ISINVOICE>Yes</ISINVOICE>
-  <VCHENTRYMODE>Item Invoice</VCHENTRYMODE>
-  <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>${poDateXml}
-  <NARRATION>${esc(v.narration || '')}</NARRATION>${addressXml}${buyerAddrXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
+  <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
+  ${poDateXml}
+  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
 </VOUCHER>`;
 }
 
