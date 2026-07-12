@@ -1558,18 +1558,55 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       return { ok: true, records: 0 };
     }
 
-    // ── STEP 3 DIAGNOSTIC: Fetch active warehouse names for godown resolution ─
-    // These names are logged so you can verify which godown will be used in
-    // BATCHALLOCATIONS.LIST before any test import. The serializer uses the first
-    // active warehouse name as the godown name, falling back to "Main Location".
+    // ── STEP 3 DIAGNOSTIC: Fetch ACTUAL godown names from Tally ──────────────
+    // MongoDB Warehouse names are ERP-internal names and do NOT match Tally's
+    // godown master. We must use Tally's real godown names in BATCHALLOCATIONS.LIST.
+    // Fetch the live list now, pick the best default, and use it for every invoice.
+    let tallyGodownNames = [];
+    let resolvedDefaultGodown = 'Main Location'; // last resort only
+    try {
+      const godownXml = `<ENVELOPE>
+<HEADER>
+  <VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE><ID>ERPGodownList</ID>
+</HEADER>
+<BODY><DESC>
+  <STATICVARIABLES>${cfg.companyName ? `<SVCURRENTCOMPANY>${esc(cfg.companyName.toUpperCase())}</SVCURRENTCOMPANY>` : ''}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="ERPGodownList">
+      <TYPE>Godown</TYPE><FETCH>Name</FETCH>
+    </COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
+</ENVELOPE>`;
+      const godownResp = await postXml(cfg, godownXml, 20000);
+      for (const m of (godownResp || '').matchAll(/<GODOWN[^>]*>([\s\S]*?)<\/GODOWN>/gi)) {
+        const name = (m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+        if (name) tallyGodownNames.push(name);
+      }
+      LOG(`exportSalesInvoices: Tally godowns available: [${tallyGodownNames.join(', ')}]`);
+
+      if (tallyGodownNames.length > 0) {
+        // Priority: pick the godown that best matches "Srichakra" or is the only one
+        const preferred = tallyGodownNames.find(g => /srichakra/i.test(g))
+          || tallyGodownNames.find(g => /main/i.test(g))
+          || tallyGodownNames[0];
+        resolvedDefaultGodown = preferred;
+        LOG(`exportSalesInvoices: resolved default godown = "${resolvedDefaultGodown}"`);
+      } else {
+        LOG('exportSalesInvoices: ⚠ no godowns returned from Tally — using "Main Location" fallback');
+      }
+    } catch (gErr) {
+      LOG(`exportSalesInvoices: godown fetch failed (non-fatal): ${gErr.message} — using "Main Location"`);
+    }
+
+    // ── Active ERP warehouses — logged for diagnostics only, NOT used as godown names ──
+    // MongoDB Warehouse names (testing, banglore, etc.) do NOT exist in Tally.
+    // We use tallyGodownNames fetched above instead.
     const activeWarehouses = await Warehouse.find({ status: 'Active' }, 'name').lean();
     const warehouseNames   = activeWarehouses.map(w => w.name);
-    LOG(`exportSalesInvoices: active warehouses (godown candidates): [${warehouseNames.join(', ') || '(none — will use Main Location)'}]`);
-    // The resolved godown for BATCHALLOCATIONS.LIST will be:
-    //   1. inv.godownName (if set per invoice)
-    //   2. warehouseNames[0] (first active warehouse)
-    //   3. "Main Location" (Tally default fallback)
-    LOG(`exportSalesInvoices: resolved godown fallback = "${warehouseNames[0] || 'Main Location'}"`);
+    LOG(`exportSalesInvoices: ERP warehouse names (diagnostic only, not sent to Tally): [${warehouseNames.join(', ') || '(none)'}]`);
+    LOG(`exportSalesInvoices: GODOWNNAME that will be used in XML: "${resolvedDefaultGodown}"`);
 
     LOG(`exportSalesInvoices: ${invoices.length} invoices to export`);
     LOG(`First invoice: no=${invoices[0].invoiceNo} source=${invoices[0].source} PO=${invoices[0].buyersOrderNo || 'none'}`);
@@ -1819,8 +1856,9 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             if (idx === 0) {
               LOG(`DIAGNOSTIC [invoice ${inv.invoiceNo}]:`);
               LOG(`  godownName on invoice: "${inv.godownName || '(none)'}"`);
-              LOG(`  warehouseNames[]: [${warehouseNames.join(', ')}]`);
-              LOG(`  resolvedGodown will be: "${(inv.godownName || '').trim() || warehouseNames[0] || 'Main Location'}"`);
+              LOG(`  Tally godown list: [${tallyGodownNames.join(', ')}]`);
+              LOG(`  resolvedDefaultGodown: "${resolvedDefaultGodown}"`);
+              LOG(`  godownName that will be used in XML: "${tv.godownName || resolvedDefaultGodown}"`);
               LOG(`  tallySalesLedgers (live from Tally): [${tallySalesLedgers.slice(0,10).join(', ')}${tallySalesLedgers.length > 10 ? '...' : ''}]`);
               LOG(`  tallyGstLedgers (live from Tally): cgst=[${(tallyGstLedgers?.cgstNames||[]).join(', ')}] igst=[${(tallyGstLedgers?.igstNames||[]).join(', ')}]`);
               for (const [i, item] of (inv.items || []).entries()) {
@@ -1847,8 +1885,10 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             : (tv.allLedgerEntries?.find(e => !e.isDeemedPositive && !e.ledgerName?.toLowerCase().includes('cgst') && !e.ledgerName?.toLowerCase().includes('sgst') && !e.ledgerName?.toLowerCase().includes('igst'))?.ledgerName || 'Sales');
           LOG(`Invoice ${inv.invoiceNo}: action=${action} date=${tv.date} inventoryEntries=${hasInventory ? tv.allInventoryEntries.length : 0} salesLedger="${salesLedgerUsed}" voucherType="${tv.voucherType || 'Sales'}" company="${cfg.companyName}"`);
 
-          // Inject warehouseNames so serializer can resolve godown without DB access
-          tv.warehouseNames = warehouseNames;
+          // Inject real Tally godown names so serializer uses the correct godown
+          // resolvedDefaultGodown = first matching Tally godown (e.g. "Srichakra Industries")
+          tv.warehouseNames      = tallyGodownNames;   // full list for validation
+          tv.godownName          = tv.godownName || resolvedDefaultGodown; // override blank godown
 
           // ── STEP 7: Pre-export validation against live Tally masters ────────
           if (tallyMastersForValidation) {
@@ -1906,70 +1946,124 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         LOG(`Sales DEBUG — first FAILING batch (${batchNo}/${batchTot}) full XML:\n${singleEnvelope}`);
       }
 
-      // ── SAFEGUARD: Detect "silent duplicate" — Tally returns all-zero when
-      // ACTION="Create" is sent for a voucher number that already exists in Tally.
-      // CREATED=0, ALTERED=0, ERRORS=0, EXCEPTIONS=0 with a single voucher means
-      // Tally knows this number but we sent Create instead of Alter.
-      // Also handles EXCEPTIONS=1 with CREATED=0 — this happens when an existing
-      // voucher has a different structure (e.g. accounting-only vs item invoice)
-      // and Tally rejects the Create. Re-send as Alter to overwrite it.
-      const isSilentDuplicate = result.ok && (result.created || 0) === 0 && (result.altered || 0) === 0 && batch.length === 1;
-      const isExceptionOnCreate = !result.ok && (result.created || 0) === 0 && batch.length === 1;
-      if (isSilentDuplicate || isExceptionOnCreate) {
+      // ── SAFEGUARD: Smart retry — only attempt Alter/Delete when appropriate ──
+      //
+      // ERROR CLASSIFICATION before any retry:
+      //   "Master not found" errors (godown/ledger/stock item does not exist) →
+      //     FAIL FAST. Nothing was created in Tally. Alter/Delete are both wrong.
+      //   "Voucher already exists" / silent zero (CREATED=0, ALTERED=0, no error) →
+      //     Safe to retry as Alter — the voucher exists and we want to overwrite it.
+      //   Alter also rejected → Delete+Create, BUT only if we have a GUID/key from
+      //     a prior successful Tally response — never Delete an unnamed object.
+
+      // ── Classify the error ───────────────────────────────────────────────────
+      const errorText  = (result.error || '').toLowerCase();
+      const isMasterNotFoundError =
+        errorText.includes('does not exist') ||
+        errorText.includes('godown') ||
+        errorText.includes('ledger') ||
+        errorText.includes('stock item') ||
+        errorText.includes('not found') ||
+        errorText.includes('master') ||
+        errorText.includes('could not find');
+
+      const isSilentDuplicate = result.ok
+        && (result.created || 0) === 0
+        && (result.altered || 0) === 0
+        && batch.length === 1;
+
+      // Only retry as Alter when:
+      //   a) Silent zero (voucher already exists in Tally — no error, just not created)
+      //   b) Exception on Create AND the error is NOT a master-data failure
+      const isExceptionOnCreate = !result.ok
+        && (result.created || 0) === 0
+        && batch.length === 1
+        && !isMasterNotFoundError;   // ← master-data errors must never retry
+
+      if (isMasterNotFoundError && !result.ok) {
+        // Master-data failure — nothing was created, nothing to Alter or Delete.
+        // Surface a clear error and stop immediately.
+        const masterErr = `Master data error (nothing created in Tally — fix the master first): ${result.error}`;
+        ERR(`Sales batch ${batchNo}: ${masterErr}`);
+        batchErrors.push(`Batch ${batchNo}: ${masterErr}`);
+        for (const bv of batch) {
+          await logInvoiceExportResult(syncId, bv.invoiceNo, bv.partyName, 'Failed', masterErr);
+        }
+        // Do NOT continue — fall through so the invoice is NOT marked as synced
+      } else if (isSilentDuplicate || isExceptionOnCreate) {
         const v = batch[0];
-        const reason = isSilentDuplicate ? 'CREATED=0, ALTERED=0 — voucher already exists in Tally' : 'EXCEPTIONS=1 on Create — voucher may exist with different structure';
+        const reason = isSilentDuplicate
+          ? 'CREATED=0, ALTERED=0 — voucher already exists in Tally'
+          : `EXCEPTIONS on Create (non-master error) — voucher may exist with different structure`;
         LOG(`Sales batch ${batchNo}: ${reason}. Re-sending ${v.invoiceNo} as Alter...`);
-        // Rebuild the XML with ACTION="Alter" by string-replacing the action attribute
-        const alterXml = v.xml.replace(/ACTION="Create"/, 'ACTION="Alter"');
+
+        const alterXml      = v.xml.replace(/ACTION="Create"/, 'ACTION="Alter"');
         const alterEnvelope = importEnvelope(cfg, 'Vouchers', alterXml);
-        const alterResp   = await postXml(cfg, alterEnvelope, 60000);
-        const alterResult = parseResponse(alterResp, `Sales Invoices batch ${batchNo}/${batchTot} [Alter retry]`);
+        const alterResp     = await postXml(cfg, alterEnvelope, 60000);
+        const alterResult   = parseResponse(alterResp, `Sales Invoices batch ${batchNo}/${batchTot} [Alter retry]`);
+
         if (alterResult.ok) {
           totalCreated += alterResult.created || 0;
           totalAltered += alterResult.altered || 0;
           LOG(`Sales batch ${batchNo}: Alter retry succeeded — created:${alterResult.created} altered:${alterResult.altered}`);
           successIds.push(v.id);
           await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', 'Sent as Alter (was duplicate Create)');
-          // Also mark this number in the local set to prevent a repeated attempt
           tallyVoucherNumbers.add(String(v.invoiceNo).trim().toUpperCase());
         } else {
-          // ── LAST RESORT: Delete + Re-Create ──────────────────────────────
-          // The Alter was also rejected — this typically happens when the existing
-          // Tally voucher has a different structure (e.g. item invoice vs accounting)
-          // and Tally won't allow structural changes via Alter.
-          // Delete the existing voucher and re-create it fresh.
-          LOG(`Sales batch ${batchNo}: Alter also rejected — attempting Delete + Create for ${v.invoiceNo}`);
-          try {
-            const deleteXml = v.xml.replace(/ACTION="(Create|Alter)"/, 'ACTION="Delete"');
-            const deleteEnvelope = importEnvelope(cfg, 'Vouchers', deleteXml);
-            const deleteResp = await postXml(cfg, deleteEnvelope, 60000);
-            const deleteResult = parseResponse(deleteResp, `Sales batch ${batchNo} [Delete]`);
-            LOG(`Sales batch ${batchNo}: Delete result — ok:${deleteResult.ok} altered:${deleteResult.altered}`);
+          // ── LAST RESORT: Delete + Re-Create ────────────────────────────────
+          // Only attempt if Alter also failed AND the failure is NOT a master-data
+          // error AND we have a GUID/key from the voucher XML (so we know exactly
+          // what to delete). Never delete an unnamed/unidentified object.
+          const alterErrText = (alterResult.error || '').toLowerCase();
+          const alterIsMasterError =
+            alterErrText.includes('does not exist') ||
+            alterErrText.includes('not found') ||
+            alterErrText.includes('godown') ||
+            alterErrText.includes('ledger');
 
-            // Re-create fresh (Create action, no GUID)
-            const reCreateXml = v.xml
-              .replace(/ACTION="(Alter|Delete)"/, 'ACTION="Create"')
-              .replace(/<GUID>[^<]*<\/GUID>\s*/gi, ''); // strip any GUID tag
-            const reCreateEnvelope = importEnvelope(cfg, 'Vouchers', reCreateXml);
-            const reCreateResp = await postXml(cfg, reCreateEnvelope, 60000);
-            const reCreateResult = parseResponse(reCreateResp, `Sales batch ${batchNo} [Delete+Create]`);
+          const hasGuidInXml = /<GUID>[^<]+<\/GUID>/i.test(v.xml);
 
-            if (reCreateResult.ok && (reCreateResult.created || 0) > 0) {
-              totalCreated += reCreateResult.created || 0;
-              LOG(`Sales batch ${batchNo}: Delete+Create succeeded — ${v.invoiceNo} re-created in Tally`);
-              successIds.push(v.id);
-              await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', 'Re-created after Delete (structure conflict resolved)');
-              tallyVoucherNumbers.add(String(v.invoiceNo).trim().toUpperCase());
-            } else {
-              const finalErr = reCreateResult.error || 'Tally rejected Delete+Create';
-              batchErrors.push(`Batch ${batchNo}: ${finalErr}`);
-              await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', `Delete+Create failed: ${finalErr}`);
-            }
-          } catch (delErr) {
-            ERR(`Sales batch ${batchNo}: Delete+Create threw: ${delErr.message}`);
-            batchErrors.push(`Batch ${batchNo}: ${alterResult.error}`);
-            for (const bv of batch) {
-              await logInvoiceExportResult(syncId, bv.invoiceNo, bv.partyName, 'Failed', alterResult.error || 'Tally rejected Alter retry');
+          if (alterIsMasterError || !hasGuidInXml) {
+            // Master error on Alter, or no GUID to identify the object — stop here.
+            const stopReason = alterIsMasterError
+              ? `Alter also failed with master-data error — fix masters before retrying: ${alterResult.error}`
+              : `Alter failed and no GUID available — cannot safely Delete unnamed object: ${alterResult.error}`;
+            ERR(`Sales batch ${batchNo}: ${stopReason}`);
+            batchErrors.push(`Batch ${batchNo}: ${stopReason}`);
+            await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', stopReason);
+          } else {
+            LOG(`Sales batch ${batchNo}: Alter rejected — attempting Delete+Create for ${v.invoiceNo} (has GUID)`);
+            try {
+              const deleteXml      = v.xml.replace(/ACTION="(Create|Alter)"/, 'ACTION="Delete"');
+              const deleteEnvelope = importEnvelope(cfg, 'Vouchers', deleteXml);
+              const deleteResp     = await postXml(cfg, deleteEnvelope, 60000);
+              const deleteResult   = parseResponse(deleteResp, `Sales batch ${batchNo} [Delete]`);
+              LOG(`Sales batch ${batchNo}: Delete result — ok:${deleteResult.ok} altered:${deleteResult.altered}`);
+
+              const reCreateXml = v.xml
+                .replace(/ACTION="(Alter|Delete)"/, 'ACTION="Create"')
+                .replace(/<GUID>[^<]*<\/GUID>\s*/gi, '');
+              const reCreateEnvelope = importEnvelope(cfg, 'Vouchers', reCreateXml);
+              const reCreateResp     = await postXml(cfg, reCreateEnvelope, 60000);
+              const reCreateResult   = parseResponse(reCreateResp, `Sales batch ${batchNo} [Delete+Create]`);
+
+              if (reCreateResult.ok && (reCreateResult.created || 0) > 0) {
+                totalCreated += reCreateResult.created || 0;
+                LOG(`Sales batch ${batchNo}: Delete+Create succeeded — ${v.invoiceNo} re-created in Tally`);
+                successIds.push(v.id);
+                await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', 'Re-created after Delete');
+                tallyVoucherNumbers.add(String(v.invoiceNo).trim().toUpperCase());
+              } else {
+                const finalErr = reCreateResult.error || 'Tally rejected Delete+Create';
+                batchErrors.push(`Batch ${batchNo}: ${finalErr}`);
+                await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', `Delete+Create failed: ${finalErr}`);
+              }
+            } catch (delErr) {
+              ERR(`Sales batch ${batchNo}: Delete+Create threw: ${delErr.message}`);
+              batchErrors.push(`Batch ${batchNo}: ${delErr.message}`);
+              for (const bv of batch) {
+                await logInvoiceExportResult(syncId, bv.invoiceNo, bv.partyName, 'Failed', `Delete+Create error: ${delErr.message}`);
+              }
             }
           }
         }
