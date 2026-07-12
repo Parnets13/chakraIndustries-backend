@@ -1251,23 +1251,51 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   //   item.billedQty → already-formatted string "50 Nos"      (written as-is to <BILLEDQTY>)
   //   item.amount    → negative number  e.g. -7500.00         (abs used for <AMOUNT>)
   //   item.gstHsnName → HSN code string                       (→ <GSTHSNNAME>)
+  // ── Resolve godown name ─────────────────────────────────────────────────────
+  // Use the godown stored on the voucher (set by normalizer from invoiceData.godownName).
+  // Fall back to the first warehouse name passed in via v.warehouseNames[], then
+  // to the Tally-standard "Main Location" only as a last resort.
+  // NEVER hardcode "Srichakra Industries" — that name comes from the reference XML
+  // which was recorded with a specific godown that may differ per deployment.
+  const resolvedGodown = (v.godownName || '').trim()
+    || (Array.isArray(v.warehouseNames) && v.warehouseNames[0] ? v.warehouseNames[0].trim() : '')
+    || 'Main Location';
+
   const inventoryEntriesXml = (v.allInventoryEntries || []).map(item => {
     // rate and qty are pre-formatted strings from the normalizer — use directly
-    const rateStr = item.rate || '';           // e.g. "150.00/Nos"
-    const actualQtyStr = item.actualQty || ''; // e.g. "50 Nos"
-    const billedQtyStr = item.billedQty || ''; // e.g. "50 Nos"
-    const amt = Math.abs(item.amount || 0);
+    const rateStr      = item.rate      || '';   // e.g. "150.00/Nos"
+    const actualQtyStr = item.actualQty || '';   // e.g. "50 Nos"
+    const billedQtyStr = item.billedQty || '';   // e.g. "50 Nos"
+    const amt          = Math.abs(item.amount || 0);
 
+    // ── GST source / override tags ─────────────────────────────────────────
     const gstSrcTag = item.gstLedgerSource
-      ? `\n    <GSTLEDGERSOURCE>${esc(item.gstLedgerSource)}</GSTLEDGERSOURCE>` : '';
-
+      ? `\n    <GSTSOURCETYPE>Ledger</GSTSOURCETYPE>\n    <GSTLEDGERSOURCE>${esc(item.gstLedgerSource)}</GSTLEDGERSOURCE>`
+      : '';
+    const hsnSrcTag = item.hsnLedgerSource || item.gstLedgerSource
+      ? `\n    <HSNSOURCETYPE>Ledger</HSNSOURCETYPE>\n    <HSNLEDGERSOURCE>${esc(item.hsnLedgerSource || item.gstLedgerSource)}</HSNLEDGERSOURCE>`
+      : '';
     const ovrdTags = item.gstLedgerSource ? `
     <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
     <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>` : '';
 
-    // Field name stored by normalizer is gstHsnName (not hsnName)
+    // HSN code tag
     const hsnTag = item.gstHsnName ? `\n    <GSTHSNNAME>${esc(item.gstHsnName)}</GSTHSNNAME>` : '';
 
+    // ── BATCHALLOCATIONS.LIST — required by Tally Prime for godown/qty tracking ──
+    // Without this block Tally imports the voucher but renders item lines blank.
+    const batchAlloc = `
+    <BATCHALLOCATIONS.LIST>
+      <GODOWNNAME>${esc(resolvedGodown)}</GODOWNNAME>
+      <BATCHNAME>Primary Batch</BATCHNAME>
+      <AMOUNT>-${amt.toFixed(2)}</AMOUNT>
+      <ACTUALQTY>${esc(actualQtyStr)}</ACTUALQTY>
+      <BILLEDQTY>${esc(billedQtyStr)}</BILLEDQTY>
+      <ADDITIONALDETAILS.LIST>      </ADDITIONALDETAILS.LIST>
+      <VOUCHERCOMPONENTLIST.LIST>      </VOUCHERCOMPONENTLIST.LIST>
+    </BATCHALLOCATIONS.LIST>`;
+
+    // ── ACCOUNTINGALLOCATIONS.LIST — links line item to its sales ledger ──────
     const acctAlloc = (item.accountingAllocations || []).map(alloc => `
     <ACCOUNTINGALLOCATIONS.LIST>
       <LEDGERNAME>${esc(alloc.ledgerName || '')}</LEDGERNAME>
@@ -1284,7 +1312,7 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
     <RATE>${esc(rateStr)}</RATE>
     <AMOUNT>-${amt.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${esc(actualQtyStr)}</ACTUALQTY>
-    <BILLEDQTY>${esc(billedQtyStr)}</BILLEDQTY>${gstSrcTag}${ovrdTags}${hsnTag}${acctAlloc}
+    <BILLEDQTY>${esc(billedQtyStr)}</BILLEDQTY>${gstSrcTag}${hsnSrcTag}${ovrdTags}${hsnTag}${batchAlloc}${acctAlloc}
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
   const hasInventoryEntries = (v.allInventoryEntries || []).length > 0;
@@ -1313,52 +1341,85 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
       : Math.abs(entry.amount || 0).toFixed(2);
 
     return `
-  <ALLLEDGERENTRIES.LIST>
+  <LEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(entry.ledgerName || '')}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${entry.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <ISPARTYLEDGER>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISPARTYLEDGER>
     <AMOUNT>${amt}</AMOUNT>${billAllocsXml}
-  </ALLLEDGERENTRIES.LIST>`;
+  </LEDGERENTRIES.LIST>`;
   }).join('');
 
-  // ── Ship-to address (BASICBASEPARTYDETAILS.LIST) ───────────────────────────
-  // These fields are mapped by normalizeToTallyVoucher and stored in the voucher.
-  const shipToXml = (v.shipToName || v.shipToAddress) ? `
-  <BASICBASEPARTYDETAILS.LIST>
-    <BASICBUYERNAME>${esc(v.shipToName || v.partyLedgerName || '')}</BASICBUYERNAME>
-    <BASICBUYERADDRESS.LIST>
-      <BASICBUYERADDRESS>${esc(v.shipToAddress || '')}</BASICBUYERADDRESS>
-    </BASICBUYERADDRESS.LIST>
-    <BASICBUYERSTATE>${esc(v.shipToState || '')}</BASICBUYERSTATE>
-    <BASICBUYERCOUNTRY>India</BASICBUYERCOUNTRY>
-    <BASICBUYERGSTIN>${esc(v.shipToGST || '')}</BASICBUYERGSTIN>
-  </BASICBASEPARTYDETAILS.LIST>` : '';
+  // ── Ship-to: flat top-level tags matching the reference XML exactly ─────────
+  // Reference uses SHIPTOPLACE, CONSIGNEEGSTIN, CONSIGNEEMAILINGNAME etc. as
+  // direct children of <VOUCHER>, NOT nested inside BASICBASEPARTYDETAILS.LIST.
+  // The old BASICBASEPARTYDETAILS.LIST block was the wrong location — Tally reads
+  // consignee info from the flat tags only.
+  const shipToPlace         = esc(v.shipToState   || '');
+  const consigneeGSTIN      = esc(v.shipToGST     || '');
+  const consigneeName       = esc(v.shipToName    || v.partyLedgerName || '');
+  const consigneePincode    = esc(v.shipToPincode || '');
+  const consigneeState      = esc(v.shipToState   || '');
+  const consigneeCountry    = 'India';
 
-  // ── Bill-to address (ADDRESS.LIST on the party ledger entry) ──────────────
-  // Tally stores bill-to as part of the voucher ADDRESS block.
-  const billToXml = (v.billToAddress || v.billToName) ? `
-  <ADDRESS.LIST>
-    <ADDRESS>${esc(v.billToName || '')}</ADDRESS>
-    <ADDRESS>${esc(v.billToAddress || '')}</ADDRESS>
-    ${v.billToCity  ? `<ADDRESS>${esc(v.billToCity)}</ADDRESS>` : ''}
-    ${v.billToState ? `<ADDRESS>${esc(v.billToState)}</ADDRESS>` : ''}
+  const shipToXml = (v.shipToState || v.shipToGST || v.shipToName) ? `
+  <SHIPTOPLACE>${shipToPlace}</SHIPTOPLACE>
+  <CONSIGNEEGSTIN>${consigneeGSTIN}</CONSIGNEEGSTIN>
+  <CONSIGNEEMAILINGNAME>${consigneeName}</CONSIGNEEMAILINGNAME>
+  <CONSIGNEEPINCODE>${consigneePincode}</CONSIGNEEPINCODE>
+  <CONSIGNEESTATENAME>${consigneeState}</CONSIGNEESTATENAME>
+  <CONSIGNEECOUNTRYNAME>${consigneeCountry}</CONSIGNEECOUNTRYNAME>` : '';
+
+  // ── Bill-to: BASICBUYERADDRESS.LIST as a top-level tag with TYPE="String" ──
+  // Reference has this as a direct child of <VOUCHER>, not nested under any block.
+  // TYPE="String" attribute is required — omitting it causes Tally to ignore the tag.
+  const buyerAddrLines = [
+    v.billToName    || v.partyLedgerName || '',
+    v.billToAddress || '',
+    v.billToCity    || '',
+    v.billToState   || '',
+  ].filter(Boolean);
+  const buyerAddrXml = buyerAddrLines.length ? `
+  <BASICBUYERADDRESS.LIST TYPE="String">
+${buyerAddrLines.map(l => `    <BASICBUYERADDRESS>${esc(l)}</BASICBUYERADDRESS>`).join('\n')}
+  </BASICBUYERADDRESS.LIST>` : '';
+
+  // ── ADDRESS.LIST — seller/dispatch address (top-level, TYPE="String") ───────
+  const addressLines = [
+    v.companyAddress || '',
+  ].filter(Boolean);
+  const addressXml = addressLines.length ? `
+  <ADDRESS.LIST TYPE="String">
+${addressLines.map(l => `    <ADDRESS>${esc(l)}</ADDRESS>`).join('\n')}
   </ADDRESS.LIST>` : '';
 
-  const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
+  const poDateXml = v.poDate ? `\n  <BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
+
+  // ── Party / GST identification tags (Step 6) ─────────────────────────────
+  // These flat tags are required for Tally to populate the GST registration,
+  // mailing name, state, and place of supply in the voucher master.
+  const partyGSTXml       = v.partyGST   ? `\n  <PARTYGSTIN>${esc(v.partyGST)}</PARTYGSTIN>`     : '';
+  const partyStateXml     = v.partyState ? `\n  <STATENAME>${esc(v.partyState)}</STATENAME>`       : '';
+  const placeOfSupplyXml  = (v.shipToState || v.partyState)
+    ? `\n  <PLACEOFSUPPLY>${esc(v.shipToState || v.partyState)}</PLACEOFSUPPLY>` : '';
 
   return `
-<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}">
+<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
   <DATE>${esc(v.date || '')}</DATE>
   <EFFECTIVEDATE>${esc(v.effectiveDate || v.date || '')}</EFFECTIVEDATE>
   ${guidTag}
   <VOUCHERTYPENAME>${esc(v.voucherType || 'Sales')}</VOUCHERTYPENAME>
+  <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
   <VOUCHERNUMBER>${esc(v.voucherNumber || '')}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
+  <PARTYMAILINGNAME>${esc(v.partyLedgerName || '')}</PARTYMAILINGNAME>
+  <BASICBUYERNAME>${esc(v.partyLedgerName || '')}</BASICBUYERNAME>${partyGSTXml}${partyStateXml}${placeOfSupplyXml}
+  <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>
+  <NUMBERINGSTYLE>Manual</NUMBERINGSTYLE>
   <ISINVOICE>Yes</ISINVOICE>
-  <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
-  ${poDateXml}
-  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
+  <VCHENTRYMODE>Item Invoice</VCHENTRYMODE>
+  <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>${poDateXml}
+  <NARRATION>${esc(v.narration || '')}</NARRATION>${addressXml}${buyerAddrXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
 </VOUCHER>`;
 }
 
@@ -1497,6 +1558,19 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       return { ok: true, records: 0 };
     }
 
+    // ── STEP 3 DIAGNOSTIC: Fetch active warehouse names for godown resolution ─
+    // These names are logged so you can verify which godown will be used in
+    // BATCHALLOCATIONS.LIST before any test import. The serializer uses the first
+    // active warehouse name as the godown name, falling back to "Main Location".
+    const activeWarehouses = await Warehouse.find({ status: 'Active' }, 'name').lean();
+    const warehouseNames   = activeWarehouses.map(w => w.name);
+    LOG(`exportSalesInvoices: active warehouses (godown candidates): [${warehouseNames.join(', ') || '(none — will use Main Location)'}]`);
+    // The resolved godown for BATCHALLOCATIONS.LIST will be:
+    //   1. inv.godownName (if set per invoice)
+    //   2. warehouseNames[0] (first active warehouse)
+    //   3. "Main Location" (Tally default fallback)
+    LOG(`exportSalesInvoices: resolved godown fallback = "${warehouseNames[0] || 'Main Location'}"`);
+
     LOG(`exportSalesInvoices: ${invoices.length} invoices to export`);
     LOG(`First invoice: no=${invoices[0].invoiceNo} source=${invoices[0].source} PO=${invoices[0].buyersOrderNo || 'none'}`);
 
@@ -1604,6 +1678,16 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // PO Number is the ONLY match key. No Party Name / Invoice Number matching.
     const tallyPOMap = await fetchTallyPOMap(cfg);
     LOG(`exportSalesInvoices: ${tallyPOMap.size} PO numbers already in Tally`);
+
+    // ── STEP 7: Fetch Tally masters for pre-export validation ─────────────────
+    // Fetched once here and reused for every invoice in the loop.
+    // Non-fatal: if Tally is unreachable we skip validation (warnings only).
+    const tallyMastersForValidation = await fetchTallyMastersForValidation(cfg);
+    if (!tallyMastersForValidation) {
+      LOG('exportSalesInvoices: ⚠ could not fetch Tally masters for validation — skipping pre-export checks');
+    } else {
+      LOG(`exportSalesInvoices: validation masters ready — godowns: [${tallyMastersForValidation.godowns.join(', ')}]`);
+    }
 
     // ── SAFEGUARD: Fetch existing Sales voucher numbers from Tally ────────────
     // If an invoice number already exists as a Sales voucher number in Tally,
@@ -1731,6 +1815,18 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
               { ...inv, items: enrichedItems },
               { periodEnd, salesVoucherTypeName }
             );
+            // ── STEP 3 DIAGNOSTIC: log godown + ledger names for first invoice ──
+            if (idx === 0) {
+              LOG(`DIAGNOSTIC [invoice ${inv.invoiceNo}]:`);
+              LOG(`  godownName on invoice: "${inv.godownName || '(none)'}"`);
+              LOG(`  warehouseNames[]: [${warehouseNames.join(', ')}]`);
+              LOG(`  resolvedGodown will be: "${(inv.godownName || '').trim() || warehouseNames[0] || 'Main Location'}"`);
+              LOG(`  tallySalesLedgers (live from Tally): [${tallySalesLedgers.slice(0,10).join(', ')}${tallySalesLedgers.length > 10 ? '...' : ''}]`);
+              LOG(`  tallyGstLedgers (live from Tally): cgst=[${(tallyGstLedgers?.cgstNames||[]).join(', ')}] igst=[${(tallyGstLedgers?.igstNames||[]).join(', ')}]`);
+              for (const [i, item] of (inv.items || []).entries()) {
+                LOG(`  item[${i}] "${item.description || item.name}": tallySalesLedger="${item.tallySalesLedger||'(empty)'}" hsn="${item.hsn||'(empty)'}"`);
+              }
+            }
           } catch (reNormErr) {
             ERR(`Invoice ${inv.invoiceNo}: re-normalization failed: ${reNormErr.message}`);
             failedItems.push({ id: inv.invoiceNo, error: `Re-normalize: ${reNormErr.message}` });
@@ -1750,6 +1846,22 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             ? (tv.allInventoryEntries[0]?.accountingAllocations?.[0]?.ledgerName || 'Sales Accounts')
             : (tv.allLedgerEntries?.find(e => !e.isDeemedPositive && !e.ledgerName?.toLowerCase().includes('cgst') && !e.ledgerName?.toLowerCase().includes('sgst') && !e.ledgerName?.toLowerCase().includes('igst'))?.ledgerName || 'Sales');
           LOG(`Invoice ${inv.invoiceNo}: action=${action} date=${tv.date} inventoryEntries=${hasInventory ? tv.allInventoryEntries.length : 0} salesLedger="${salesLedgerUsed}" voucherType="${tv.voucherType || 'Sales'}" company="${cfg.companyName}"`);
+
+          // Inject warehouseNames so serializer can resolve godown without DB access
+          tv.warehouseNames = warehouseNames;
+
+          // ── STEP 7: Pre-export validation against live Tally masters ────────
+          if (tallyMastersForValidation) {
+            try {
+              const vResult = validateTallyExport(tv, tallyMastersForValidation, { strict: false });
+              if (vResult.warnings.length > 0) {
+                LOG(`Invoice ${inv.invoiceNo}: pre-export warnings:\n${vResult.warnings.map((w, i) => `  [${i+1}] ${w}`).join('\n')}`);
+              }
+            } catch (valErr) {
+              // strict=false so this won't throw, but log any unexpected error
+              ERR(`Invoice ${inv.invoiceNo}: validateTallyExport threw unexpectedly: ${valErr.message}`);
+            }
+          }
 
           voucherXml = serializeTallyVoucher(tv, action, guidTag);
 
@@ -2454,4 +2566,203 @@ export async function runSelectiveExport(cfg, key, triggeredBy) {
 /** @future — Import all data from Tally into ERP */
 export async function importFromTally(cfg, triggeredBy, onProgress = () => {}) {
   throw new Error('importFromTally is not yet implemented. Use the Tally → ERP import endpoint.');
+}
+
+
+// ─── STEP 7: PRE-EXPORT TALLY MASTER VALIDATION ──────────────────────────────
+/**
+ * validateTallyExport
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Runs BEFORE XML generation and checks every critical field in the voucher
+ * against the actual master data in Tally (passed in as `tallyMasters`).
+ *
+ * A failed check throws immediately with a clear message that lists the exact
+ * field + value that didn't match — so you get a visible error before sending
+ * to Tally rather than a silent blank field after import.
+ *
+ * @param {Object} voucher       - Normalized TallyVoucher object (from normalizeToTallyVoucher)
+ * @param {Object} tallyMasters  - Live master data fetched from Tally:
+ *   {
+ *     stockItems:   string[]   — exact stock item names in Tally
+ *     salesLedgers: string[]   — exact sales ledger names in Tally
+ *     godowns:      string[]   — exact godown names in Tally
+ *     gstLedgers:   string[]   — exact GST (Duties & Taxes) ledger names in Tally
+ *   }
+ * @param {Object} options
+ *   { strict: boolean }        — if false, issues are warnings not errors (default: true)
+ *
+ * @returns {{ valid: true, warnings: string[] }}
+ * @throws  { Error }  if any required check fails (strict mode)
+ */
+export function validateTallyExport(voucher, tallyMasters, options = {}) {
+  const { strict = true } = options;
+  const errors   = [];
+  const warnings = [];
+
+  const flag = (msg) => {
+    if (strict) errors.push(msg);
+    else        warnings.push(msg);
+  };
+
+  // ── Helper: case-insensitive exact match ─────────────────────────────────
+  const hasExact = (list, value) =>
+    Array.isArray(list) && list.some(n => n.trim().toLowerCase() === (value || '').trim().toLowerCase());
+
+  // ── 1. Stock item names ───────────────────────────────────────────────────
+  for (const item of (voucher.allInventoryEntries || [])) {
+    const name = (item.stockItemName || '').trim();
+    if (!name) {
+      flag(`STOCKITEMNAME is empty for one or more inventory entries`);
+    } else if (tallyMasters.stockItems?.length && !hasExact(tallyMasters.stockItems, name)) {
+      flag(`STOCKITEMNAME "${name}" does not exist in Tally stock items. Check spelling, casing, and spaces.`);
+    }
+  }
+
+  // ── 2. Sales ledger names (inside ACCOUNTINGALLOCATIONS.LIST) ────────────
+  for (const item of (voucher.allInventoryEntries || [])) {
+    for (const alloc of (item.accountingAllocations || [])) {
+      const ledger = (alloc.ledgerName || '').trim();
+      if (!ledger) {
+        flag(`ACCOUNTINGALLOCATIONS.LIST LEDGERNAME is empty for stock item "${item.stockItemName}"`);
+      } else if (
+        tallyMasters.salesLedgers?.length &&
+        ledger.toLowerCase() !== 'sales accounts' &&
+        !hasExact(tallyMasters.salesLedgers, ledger)
+      ) {
+        flag(`Sales LEDGERNAME "${ledger}" (for item "${item.stockItemName}") does not exist in Tally sales ledgers. Check tallySalesLedger value in ItemMaster.`);
+      }
+    }
+  }
+
+  // ── 3. Godown name ────────────────────────────────────────────────────────
+  // The resolved godown name is not stored directly on voucher — derive it.
+  const resolvedGodown = (voucher.godownName || '').trim()
+    || (Array.isArray(voucher.warehouseNames) && voucher.warehouseNames[0] ? voucher.warehouseNames[0].trim() : '')
+    || 'Main Location';
+  if (tallyMasters.godowns?.length && !hasExact(tallyMasters.godowns, resolvedGodown)) {
+    flag(`GODOWNNAME "${resolvedGodown}" does not exist in Tally godowns. Run Export → Godowns first, or check Warehouse master names.`);
+  }
+
+  // ── 4. GST ledger names (CGST/SGST/IGST in LEDGERENTRIES.LIST) ───────────
+  for (const entry of (voucher.allLedgerEntries || [])) {
+    const name = (entry.ledgerName || '').trim().toLowerCase();
+    if (name.includes('cgst') || name.includes('sgst') || name.includes('igst')) {
+      if (tallyMasters.gstLedgers?.length && !hasExact(tallyMasters.gstLedgers, entry.ledgerName)) {
+        flag(`GST LEDGERNAME "${entry.ledgerName}" does not exist in Tally Duties & Taxes ledgers. Run Export → System Ledgers or check fetchTallyGstLedgerNames output.`);
+      }
+    }
+  }
+
+  // ── 5. Ship To / Consignee completeness for interstate invoices ───────────
+  const isInterstate = (voucher.allLedgerEntries || []).some(e =>
+    (e.ledgerName || '').toLowerCase().includes('igst')
+  );
+  if (isInterstate) {
+    if (!voucher.shipToState) {
+      flag(`CONSIGNEESTATENAME / SHIPTOPLACE is empty on an interstate invoice (invoice has IGST). Populate shipToState on the Invoice.`);
+    }
+    if (!voucher.shipToGST) {
+      warnings.push(`CONSIGNEEGSTIN is empty on an interstate invoice. If the consignee is GST-registered this is required for e-invoice compliance.`);
+    }
+    if (!voucher.shipToPincode) {
+      warnings.push(`CONSIGNEEPINCODE is empty on an interstate invoice. Populate shipToPincode (or partyPostal) on the Invoice.`);
+    }
+  }
+
+  // ── 6. Party GST ─────────────────────────────────────────────────────────
+  if (!voucher.partyGST) {
+    warnings.push(`PARTYGSTIN is empty for party "${voucher.partyLedgerName}". If the party is GST-registered this will cause GST return mismatches.`);
+  }
+
+  // ── Throw or return ───────────────────────────────────────────────────────
+  if (errors.length > 0) {
+    throw new Error(
+      `validateTallyExport failed for voucher "${voucher.voucherNumber}" with ${errors.length} error(s):\n` +
+      errors.map((e, i) => `  [${i + 1}] ${e}`).join('\n')
+    );
+  }
+
+  return { valid: true, warnings };
+}
+
+/**
+ * fetchTallyMastersForValidation
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Fetches the four master lists needed by validateTallyExport from a live
+ * Tally connection. Returns null if Tally is unreachable (non-fatal).
+ *
+ * Callers should cache the result for the duration of an export run —
+ * calling this once per invoice is too slow.
+ */
+export async function fetchTallyMastersForValidation(cfg) {
+  try {
+    const company = (cfg.companyName || '').trim().toUpperCase();
+    const coTag   = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+
+    const xml = `<ENVELOPE>
+<HEADER>
+  <VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE><ID>ERPMasterValidation</ID>
+</HEADER>
+<BODY><DESC>
+  <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="ERPMasterValidation_StockItems">
+      <TYPE>StockItem</TYPE><FETCH>Name</FETCH>
+    </COLLECTION>
+    <COLLECTION NAME="ERPMasterValidation_Ledgers">
+      <TYPE>Ledger</TYPE><FETCH>Name, Parent, TaxType</FETCH>
+    </COLLECTION>
+    <COLLECTION NAME="ERPMasterValidation_Godowns">
+      <TYPE>Godown</TYPE><FETCH>Name</FETCH>
+    </COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
+</ENVELOPE>`;
+
+    const resp = await postXmlWithRetry(cfg, xml, cfg.useConnector && cfg.connectorId ? 120000 : 45000, 1);
+    if (!resp) return null;
+
+    // Parse stock items
+    const stockItems = [];
+    for (const m of resp.matchAll(/<STOCKITEM[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
+      const name = (m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      if (name) stockItems.push(name);
+    }
+
+    // Parse ledgers — split into salesLedgers and gstLedgers by parent/taxType
+    const salesLedgers = [];
+    const gstLedgers   = [];
+    for (const m of resp.matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
+      const block   = m[1];
+      const name    = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1]     || '').trim();
+      const parent  = (block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim().toLowerCase();
+      const taxType = (block.match(/<TAXTYPE>(.*?)<\/TAXTYPE>/i)?.[1]|| '').trim().toLowerCase();
+      if (!name) continue;
+      const nameLow = name.toLowerCase();
+      if (parent.includes('sales') || (parent === '' && nameLow.includes('sales'))) salesLedgers.push(name);
+      if (
+        parent.includes('duties') || parent.includes('tax') ||
+        taxType === 'central tax' || taxType === 'state tax' || taxType === 'integrated tax' ||
+        nameLow.includes('cgst') || nameLow.includes('sgst') || nameLow.includes('igst')
+      ) gstLedgers.push(name);
+    }
+
+    // Parse godowns
+    const godowns = [];
+    for (const m of resp.matchAll(/<GODOWN[^>]*>([\s\S]*?)<\/GODOWN>/gi)) {
+      const name = (m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      if (name) godowns.push(name);
+    }
+
+    LOG(`fetchTallyMastersForValidation: stockItems=${stockItems.length} salesLedgers=${salesLedgers.length} gstLedgers=${gstLedgers.length} godowns=${godowns.length}`);
+    LOG(`  godowns: [${godowns.join(', ')}]`);
+    LOG(`  salesLedgers (first 10): [${salesLedgers.slice(0, 10).join(', ')}]`);
+    LOG(`  gstLedgers: [${gstLedgers.join(', ')}]`);
+
+    return { stockItems, salesLedgers, gstLedgers, godowns };
+  } catch (err) {
+    ERR('fetchTallyMastersForValidation failed (non-fatal):', err.message);
+    return null;
+  }
 }

@@ -384,11 +384,12 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const poDateTally = rawPoDate ? (toTallyDate(rawPoDate) || '') : '';
 
   // ── Ship To fields ────────────────────────────────────────────────────────
-  const shipToName    = (invoiceData.shipToName    || invoiceData.shipToMailingName || '').toString().trim();
-  const shipToAddress = (invoiceData.shipToAddress || '').toString().trim();
-  const shipToCity    = (invoiceData.shipToCity    || '').toString().trim();
-  const shipToState   = (invoiceData.shipToState   || '').toString().trim();
-  const shipToGST     = (invoiceData.shipToGST     || '').toString().trim();
+  const shipToName     = (invoiceData.shipToName    || invoiceData.shipToMailingName || '').toString().trim();
+  const shipToAddress  = (invoiceData.shipToAddress || '').toString().trim();
+  const shipToCity     = (invoiceData.shipToCity    || '').toString().trim();
+  const shipToState    = (invoiceData.shipToState   || '').toString().trim();
+  const shipToGST      = (invoiceData.shipToGST     || '').toString().trim();
+  const shipToPincode  = (invoiceData.shipToPincode || invoiceData.partyPostal || '').toString().trim();
 
   // ── Bill To fields ────────────────────────────────────────────────────────
   const billToName    = (invoiceData.billToName    || invoiceData.billToMailingName || partyLedgerName).toString().trim();
@@ -396,6 +397,18 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const billToCity    = (invoiceData.billToCity    || invoiceData.partyCity    || '').toString().trim();
   const billToState   = (invoiceData.billToState   || invoiceData.partyState   || '').toString().trim();
   const billToGST     = (invoiceData.billToGST     || invoiceData.partyGST     || '').toString().trim();
+
+  // ── Party GST / State (Step 6 fields) ────────────────────────────────────
+  const partyGST      = (invoiceData.partyGST   || '').toString().trim();
+  const partyState    = (invoiceData.partyState  || billToState || '').toString().trim();
+
+  // ── Company address ───────────────────────────────────────────────────────
+  const companyAddress = (invoiceData.companyAddress || '').toString().trim();
+
+  // ── Godown name — resolved from invoice warehouse field or left blank ─────
+  // The serializer in tallyExportService will resolve the final godown name
+  // (falling back to warehouseNames[] then "Main Location").
+  const godownName = (invoiceData.godownName || invoiceData.warehouse || '').toString().trim();
 
   console.log(`[normalizeToTallyVoucher] DEBUG extra fields for invoice ${invoiceNo}`);
   console.log(`  poDate       : "${rawPoDate}" → tally="${poDateTally}"`);
@@ -414,18 +427,26 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     buyersOrderNo:    (invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '').toString().trim(),
     poDate:           poDateTally,
     narration,
-    // Ship To — written to BASICBASEPARTYDETAILS.LIST in Tally XML
+    // Ship To — written as flat top-level tags on the <VOUCHER> element
     shipToName,
     shipToAddress,
     shipToCity,
     shipToState,
     shipToGST,
-    // Bill To — written to ADDRESS.LIST in Tally XML
+    shipToPincode,
+    // Bill To — written to BASICBUYERADDRESS.LIST (top-level, TYPE="String")
     billToName,
     billToAddress,
     billToCity,
     billToState,
     billToGST,
+    // Party identification (Step 6)
+    partyGST,
+    partyState,
+    // Company / dispatch address
+    companyAddress,
+    // Godown — resolved by serializer; blank means serializer picks first warehouse or "Main Location"
+    godownName,
     allLedgerEntries,
     allInventoryEntries,
     // Snapshot amounts — stored so export doesn't recompute

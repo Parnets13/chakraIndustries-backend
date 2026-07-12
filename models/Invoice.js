@@ -132,6 +132,7 @@ const invoiceSchema = new mongoose.Schema({
   shipToState:          { type: String, default: '' },
   shipToCountry:        { type: String, default: '' },
   shipToGST:            { type: String, default: '' },
+  shipToPincode:        { type: String, default: '' },
 
   // Company (billed from)
   companyName:  { type: String, default: 'Sri Chakra Industries' },
