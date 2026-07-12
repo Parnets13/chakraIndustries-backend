@@ -389,7 +389,10 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const shipToCity     = (invoiceData.shipToCity    || '').toString().trim();
   const shipToState    = (invoiceData.shipToState   || '').toString().trim();
   const shipToGST      = (invoiceData.shipToGST     || '').toString().trim();
-  const shipToPincode  = (invoiceData.shipToPincode || invoiceData.partyPostal || '').toString().trim();
+  // Ship-to data must not inherit the bill-to postal code.  Doing so creates a
+  // misleading partial consignee block (a name from ship-to plus a pin from the
+  // customer) which Tally can silently reject during GST validation.
+  const shipToPincode  = (invoiceData.shipToPincode || '').toString().trim();
 
   // ── Bill To fields ────────────────────────────────────────────────────────
   const billToName    = (invoiceData.billToName    || invoiceData.billToMailingName || partyLedgerName).toString().trim();

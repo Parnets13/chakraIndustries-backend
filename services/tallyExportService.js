@@ -863,16 +863,16 @@ async function fetchTallyExistingVoucherNumbers(cfg) {
   <TDL><TDLMESSAGE>
     <COLLECTION NAME="ERPSalesVoucherNumbers">
       <TYPE>Voucher</TYPE>
-      <FETCH>VoucherNumber, VoucherTypeName</FETCH>
+      <FETCH>GUID, VoucherNumber, VoucherTypeName</FETCH>
     </COLLECTION>
   </TDLMESSAGE></TDL>
 </DESC></BODY>
 </ENVELOPE>`;
 
     const resp = await postXmlWithRetry(cfg, xml, (cfg.useConnector && cfg.connectorId) ? 180000 : 30000);
-    if (!resp) return new Set();
+    if (!resp) return new Map();
 
-    const existingNos = new Set();
+    const existingNos = new Map();
     const vtypesSeen = new Set(); // diagnostic: log all unique VoucherTypeNames from Tally
     for (const m of resp.matchAll(/<VOUCHER[^>]*>([\s\S]*?)<\/VOUCHER>/gi)) {
       const block = m[1];
@@ -882,16 +882,17 @@ async function fetchTallyExistingVoucherNumbers(cfg) {
       // Some Tally editions / custom voucher types use "Sales Invoice" rather than plain "Sales".
       // Previously filtering only on exact "sales" was causing BIW01-style duplicates where
       // the dedup set missed vouchers and Tally silently returned CREATED=0 for a re-Create.
-      if (!vtype.startsWith('sales')) continue;
+      if (vtype !== 'sales') continue;
       const vno = (block.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/i)?.[1] || '').trim().toUpperCase();
-      if (vno) existingNos.add(vno);
+      const guid = (block.match(/<GUID>(.*?)<\/GUID>/i)?.[1] || '').trim();
+      if (vno) existingNos.set(vno, { guid, voucherTypeName: vtype });
     }
     LOG(`fetchTallyExistingVoucherNumbers: unique VoucherTypeNames seen in response: [${[...vtypesSeen].join(', ')}]`);
     LOG(`fetchTallyExistingVoucherNumbers: ${existingNos.size} Sales voucher numbers found in Tally`);
     return existingNos;
   } catch (err) {
     ERR('fetchTallyExistingVoucherNumbers failed (non-fatal, skipping dedup check):', err.message);
-    return new Set();
+    return new Map();
   }
 }
 
@@ -1355,14 +1356,27 @@ function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
   // direct children of <VOUCHER>, NOT nested inside BASICBASEPARTYDETAILS.LIST.
   // The old BASICBASEPARTYDETAILS.LIST block was the wrong location — Tally reads
   // consignee info from the flat tags only.
-  const shipToPlace         = esc(v.shipToState   || '');
-  const consigneeGSTIN      = esc(v.shipToGST     || '');
-  const consigneeName       = esc(v.shipToName    || v.partyLedgerName || '');
-  const consigneePincode    = esc(v.shipToPincode || '');
-  const consigneeState      = esc(v.shipToState   || '');
+  const rawConsigneeName    = (v.shipToName || '').trim();
+  const rawConsigneeGSTIN   = (v.shipToGST || '').trim();
+  const rawConsigneePincode = (v.shipToPincode || '').trim();
+  const rawConsigneeState   = (v.shipToState || '').trim();
+  // Tally silently rejects a named ship-to party with no GST/location context.
+  // Do not fall back to the bill-to party: a consignee is either complete or
+  // omitted as a unit.
+  const hasCompleteConsignee = Boolean(
+    rawConsigneeName && rawConsigneeGSTIN && rawConsigneePincode && rawConsigneeState
+  );
+  if (rawConsigneeName && !hasCompleteConsignee) {
+    LOG(`Voucher ${v.voucherNumber}: omitting incomplete consignee data (name="${rawConsigneeName}", state="${rawConsigneeState}", GSTIN=${rawConsigneeGSTIN ? 'present' : 'missing'}, pincode=${rawConsigneePincode ? 'present' : 'missing'}).`);
+  }
+  const shipToPlace         = esc(rawConsigneeState);
+  const consigneeGSTIN      = esc(rawConsigneeGSTIN);
+  const consigneeName       = esc(rawConsigneeName);
+  const consigneePincode    = esc(rawConsigneePincode);
+  const consigneeState      = esc(rawConsigneeState);
   const consigneeCountry    = 'India';
 
-  const shipToXml = (v.shipToState || v.shipToGST || v.shipToName) ? `
+  const shipToXml = hasCompleteConsignee ? `
   <SHIPTOPLACE>${shipToPlace}</SHIPTOPLACE>
   <CONSIGNEEGSTIN>${consigneeGSTIN}</CONSIGNEEGSTIN>
   <CONSIGNEEMAILINGNAME>${consigneeName}</CONSIGNEEMAILINGNAME>
@@ -1781,6 +1795,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     const failedItems  = [];
     const skippedItems = [];   // invoices skipped due to validation failure or dedup
     const vouchersXml = [];    // populated below after safeguard checks
+    const preflightErrors = [];
 
     for (let idx = 0; idx < invoices.length; idx++) {
       const inv = invoices[idx];
@@ -1806,11 +1821,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           LOG(`DEDUP CHECK invoice[${idx}] "${invNoUpper}" — already in Tally: ${tallyVoucherNumbers.has(invNoUpper)} (set size: ${tallyVoucherNumbers.size})`);
         }
         // Flag for Alter — will be used below when serializeTallyVoucher is called
-        const existsInTally = tallyVoucherNumbers.has(invNoUpper);
-        if (existsInTally) {
-          LOG(`Invoice ${inv.invoiceNo}: already in Tally — will send as Alter to sync ERP version`);
+        const existingVoucher = tallyVoucherNumbers.get(invNoUpper);
+        if (existingVoucher) {
+          const duplicateError = `Voucher ${inv.invoiceNo} already exists in Tally with GUID ${existingVoucher.guid || '(GUID was not returned)'} (type: ${existingVoucher.voucherTypeName || 'Sales'}). Create was not sent.`;
+          ERR(`Invoice ${inv.invoiceNo}: ${duplicateError}`);
+          failedItems.push({ id: inv.invoiceNo, error: duplicateError });
+          preflightErrors.push(duplicateError);
+          await logInvoiceExportResult(syncId, inv.invoiceNo, inv.partyName || '', 'Failed', duplicateError);
+          continue;
         }
-
         // ── Voucher date helpers (used by both primary and fallback paths) ─
         const freshToday = (() => {
           const n = new Date();
@@ -1875,7 +1894,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const poNumber     = (tv.buyersOrderNo || inv.buyersOrderNo || '').toUpperCase().trim();
           const existingByPO = poNumber ? tallyPOMap.get(poNumber) : null;
           // Force Alter if: PO map found it, or ERP has a GUID, or dedup set found the voucher number
-          const action       = (existingByPO || inv.tallyGuid || existsInTally) ? 'Alter' : 'Create';
+          const action       = (existingByPO || inv.tallyGuid) ? 'Alter' : 'Create';
           const guidTag      = existingByPO?.guid ? `<GUID>${esc(existingByPO.guid)}</GUID>`
                              : inv.tallyGuid      ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
 
@@ -1922,7 +1941,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     //  3. One failure doesn't block other invoices
     const BATCH_SIZE  = 1;
     let   totalCreated = 0, totalAltered = 0;
-    const batchErrors  = [];
+    const batchErrors  = [...preflightErrors];
     const successIds   = [];
 
     for (let b = 0; b < vouchersXml.length; b += BATCH_SIZE) {
@@ -1967,18 +1986,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         errorText.includes('master') ||
         errorText.includes('could not find');
 
-      const isSilentDuplicate = result.ok
-        && (result.created || 0) === 0
-        && (result.altered || 0) === 0
-        && batch.length === 1;
+      // A no-op is not proof of a duplicate, so it cannot trigger Alter/Delete.
+      const isSilentDuplicate = false;
 
       // Only retry as Alter when:
       //   a) Silent zero (voucher already exists in Tally — no error, just not created)
       //   b) Exception on Create AND the error is NOT a master-data failure
-      const isExceptionOnCreate = !result.ok
-        && (result.created || 0) === 0
-        && batch.length === 1
-        && !isMasterNotFoundError;   // ← master-data errors must never retry
+      // An exception is a validation failure unless the preflight Collection
+      // lookup found the exact voucher and returned a GUID.
+      const isExceptionOnCreate = false;
 
       if (isMasterNotFoundError && !result.ok) {
         // Master-data failure — nothing was created, nothing to Alter or Delete.
