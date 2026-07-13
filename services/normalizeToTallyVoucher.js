@@ -402,17 +402,14 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     );
   }
 
-  // ── Narration — COMPREHENSIVE item details (Tally config blocks inventory XML) ──
-  // This Tally company does NOT accept ALLINVENTORYENTRIES.LIST via XML import.
-  // All item details (name, qty, rate, amount) MUST go in NARRATION as plain text
-  // so they appear in Tally's voucher view and sales register.
+  // ── Narration — only include invoice metadata (no item details when inventory is used) ──
   const origDateFmt = invoiceData.invoiceDate
     ? new Date(invoiceData.invoiceDate).toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'numeric' })
     : '';
   const poRef = (invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '').toString().trim();
   
-  // Build item-by-item breakdown for narration
-  const itemLines = validItems.map((item, i) => {
+  // Only add item lines to narration when NOT using inventory entries
+  const itemLines = useInventory ? [] : validItems.map((item, i) => {
     const itemName   = (item.description || item.name || '').toString().trim();
     const itemQty    = +(item.qty || 1);
     const itemRate   = +(item.rate || 0);
@@ -426,11 +423,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     `Invoice: ${invoiceNo}`,
     origDateFmt ? `Date: ${origDateFmt}` : null,
     poRef ? `PO: ${poRef}` : null,
-    '', // blank line separator
-    ...itemLines,
-    '', // blank line before notes
-    invoiceData.notes || null,
-  ].filter(x => x !== null).join('\n');
+    ...(itemLines.length ? ['', ...itemLines] : []),
+    invoiceData.notes ? (itemLines.length ? ['', invoiceData.notes] : [invoiceData.notes]) : [],
+  ].flat().filter(x => x !== null).join('\n');
 
   // ── Assemble sub-document ─────────────────────────────────────────────────
   // ── PO Date → YYYYMMDD ────────────────────────────────────────────────────
