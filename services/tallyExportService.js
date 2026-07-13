@@ -1233,60 +1233,83 @@ function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
  * ACTION is determined by Create vs Alter based on PO map lookup (passed in).
  */
 export function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
+  // EXACT SAME IMPLEMENTATION AS buildSingleVoucherXml IN tallyService.js
   const v = tallyVoucher;
 
-  // EXACT format matching manually-created Tally Sales Invoices
-  // Based on visual inspection of SCI0919 (manually created, working):
-  //   OBJVIEW="Invoice Voucher View"
-  //   LEDGERENTRIES.LIST for party + GST + Sales ledger
-  //     Party: ISDEEMEDPOSITIVE=Yes, AMOUNT = NEGATIVE (-grandTotal)
-  //     Credits: ISDEEMEDPOSITIVE=No, AMOUNT = POSITIVE (+amount)
-  //   ALLINVENTORYENTRIES.LIST for each item
-  //     ISDEEMEDPOSITIVE=No, positive amount
-  //     ACCOUNTINGALLOCATIONS → Sales Accounts
+  // Use stored inventory entries and _useInventory flag
+  const validInventoryEntries = v?._useInventory && v?.allInventoryEntries?.length ? v.allInventoryEntries : [];
+  const hasInventoryEntries = validInventoryEntries.length > 0;
 
-  // Inventory entries
-  // This Tally installation rejects ALLINVENTORYENTRIES.LIST in Sales vouchers
-  // with silent EXCEPTIONS=1. Item names are included in the narration instead.
-  // Confirmed by exhaustive direct testing — every combination with inventory fails.
-  const inventoryEntriesXml = '';
-  const hasInventoryEntries = false;
-
-  // Ledger entries
-  // IMPORTANT: Do NOT suppress the "Sales Accounts" ledger entry when inventory
-  // entries are present. In Tally's Item Invoice format:
-  //   - LEDGERENTRIES.LIST carries the accounting credit (Sales Accounts / sales ledger)
-  //   - ALLINVENTORYENTRIES.LIST > ACCOUNTINGALLOCATIONS routes it to the specific ledger
-  // Both must be present. Suppressing Sales Accounts breaks the voucher balance
-  // and causes EXCEPTIONS=1 (Tally internally sums to non-zero).
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
+    // When inventory entries are present, omit the Sales Accounts or Sales ledger entry to
+    // prevent double-booking (inventory entries carry the sales value).
+    if (hasInventoryEntries) {
+      const name = (entry.ledgerName || '').toLowerCase().trim();
+      if (name === 'sales accounts' || name === 'sales') return '';
+    }
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
-      <BILLALLOCATIONS.LIST>
-        <NAME>${esc(ba.name || '')}</NAME>
-        <BILLTYPE>${esc(ba.billType || 'New Ref')}</BILLTYPE>
-        <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
-        <AMOUNT>${(-Math.abs(ba.amount || 0)).toFixed(2)}</AMOUNT>
-      </BILLALLOCATIONS.LIST>`).join('');
-
-    const amt = entry.isDeemedPositive
-      ? (-Math.abs(entry.amount || 0)).toFixed(2)
-      : Math.abs(entry.amount || 0).toFixed(2);
-
+    <BILLALLOCATIONS.LIST>
+      <NAME>${esc(ba.name || '')}</NAME>
+      <BILLTYPE>${esc(ba.billType || 'New Ref')}</BILLTYPE>
+      <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
+      <AMOUNT>${(ba.amount || 0).toFixed(2)}</AMOUNT>
+    </BILLALLOCATIONS.LIST>`).join('');
     return `
   <LEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(entry.ledgerName || '')}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${entry.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <ISPARTYLEDGER>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISPARTYLEDGER>
-    <AMOUNT>${amt}</AMOUNT>${billAllocsXml}
+    <AMOUNT>${(entry.amount || 0).toFixed(2)}</AMOUNT>${billAllocsXml}
   </LEDGERENTRIES.LIST>`;
   }).join('');
 
-  // Bill-to / Ship-to — stripped pending confirmed-working test
-  // Address tags removed while ship-to approach is being validated against Tally.
-  // Restore once CREATED=1 confirmed with the flat scalar tag format.
-  const billToXml = '';
-  const shipToXml = '';
+  const inventoryEntriesXml = validInventoryEntries.map(item => {
+    const absAmount = Math.abs(item.amount || 0);
+    const acctAllocsXml = (item.accountingAllocations || []).map(aa => `
+      <ACCOUNTINGALLOCATIONS.LIST>
+        <LEDGERNAME>${esc(aa.ledgerName || '')}</LEDGERNAME>
+        <ISDEEMEDPOSITIVE>${aa.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
+        <ISLASTDEEMEDPOSITIVE>${aa.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
+        <AMOUNT>${Math.abs(aa.amount || 0).toFixed(2)}</AMOUNT>
+      </ACCOUNTINGALLOCATIONS.LIST>`).join('');
+
+    const gstLedgerSrc = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
+    const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
+    const gstHsnName   = (item.gstHsnName || '').trim();
+    const isGenericLedger = !gstLedgerSrc
+      || gstLedgerSrc.toLowerCase() === 'sales accounts'
+      || gstLedgerSrc === (item.stockItemName || '').trim();
+    const gstSourceXml = !isGenericLedger ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
+    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : '';
+    const hsnSourceXml = !isGenericLedger && hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
+    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : '';
+    // Only emit GST override tags alongside a real GSTLEDGERSOURCE.
+    // Emitting them without a source causes silent EXCEPTIONS=1.
+    const gstOverrideXml = !isGenericLedger
+      ? `<GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
+    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`
+      : '';
+
+    return `
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${esc(item.stockItemName || '')}</STOCKITEMNAME>
+    <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
+    <RATE>${esc(item.rate || '')}</RATE>
+    <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
+    <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
+    <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
+    ${gstSourceXml}
+    ${hsnSourceXml}
+    ${gstOverrideXml}
+    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
+  </ALLINVENTORYENTRIES.LIST>`;
+  }).join('');
+
+  // ── Bill-to / Ship-to — stripped pending confirmed-working test ────────────
+  const billToXml  = '';
+  const shipToXml  = '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 

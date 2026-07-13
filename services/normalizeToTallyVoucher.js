@@ -166,11 +166,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     itemAmounts[itemAmounts.length - 1] = +(itemAmounts[itemAmounts.length - 1] + diff).toFixed(2);
   }
   const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-  // useInventory: send items as ALLINVENTORYENTRIES.LIST when items exist and amounts balance.
-  // Item-level ledger names are set inside the inventory builder — if no specific ledger
-  // is known, we'll use 'Sales Accounts' and omit GSTLEDGERSOURCE tags there.
-  const useInventory = validItems.length > 0 &&
-    Math.abs(itemsTotal - salesBase) <= 0.10;
+  // useInventory: send items as ALLINVENTORYENTRIES.LIST to show item columns in Tally
+  const useInventory = true;
 
   const isInterstate = totalIGST > 0;
 
@@ -181,31 +178,48 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const itemAmount = itemAmounts[i];
     const itemUnit   = tallyUnit(item.unit || 'Nos');
     const itemHSN    = (item.hsn || '').toString().trim();
-    // Sales ledger: use item.tallySalesLedger if set and valid, else 'Sales Accounts'
-    // INVALID ledger names (must fall back to 'Sales Accounts'):
-    //   - "Sales"          → partial/wrong name, not a Tally ledger (causes EXCEPTIONS=1)
-    //   - "Sales Accounts" → Tally group name, not a ledger
-    //   - any voucher type name (sales, purchase, receipt, etc.)
-    //   - the item description/name itself → it's a stock item, not a ledger
-    const INVALID_LEDGER_NAMES = new Set(['sales accounts', 'sales', 'purchase accounts', 'purchase', 'receipts', 'payments', '']);
+    const itemCGST   = +(item.cgst || 0);
+    const itemSGST   = +(item.sgst || 0);
+    const itemIGST   = +(item.igst || 0);
+    const itemSalesBase = +(itemAmount - itemCGST - itemSGST - itemIGST).toFixed(2);
+    
+    // Calculate tax rates from item amounts
+    const calculateRate = (taxAmount, base) => {
+      if (base <= 0 || taxAmount <= 0) return 0;
+      return +((taxAmount / base) * 100).toFixed(2);
+    };
+    const cgstRate = calculateRate(itemCGST, itemSalesBase);
+    const sgstRate = calculateRate(itemSGST, itemSalesBase);
+    const igstRate = calculateRate(itemIGST, itemSalesBase);
+    
+    // Sales ledger: use item.tallySalesLedger if set and valid, else 'Sales'
+    const INVALID_LEDGER_NAMES = new Set(['sales accounts', 'sales accounts (group)', '']);
     const TALLY_VOUCHER_TYPES = ['sales', 'purchase', 'receipt', 'payment', 'journal', 'contra', 'debit note', 'credit note', 'stock journal', 'vouchers'];
     const rawLedger = (item.tallySalesLedger || '').toString().trim();
     const rawLedgerLower = rawLedger.toLowerCase();
     const itemNameLower = itemName.toLowerCase();
-    // Reject if it's an invalid name, a voucher type, or if it matches the stock item name
-    // (item name used as fallback = not a real ledger)
     const isInvalidLedger = INVALID_LEDGER_NAMES.has(rawLedgerLower)
       || TALLY_VOUCHER_TYPES.includes(rawLedgerLower)
       || rawLedgerLower === itemNameLower;
-    const salesLedger = (rawLedger && !isInvalidLedger) ? rawLedger : 'Sales Accounts';
+    const salesLedger = (rawLedger && !isInvalidLedger) ? rawLedger : 'Sales';
     
     // Only emit GSTLEDGERSOURCE when salesLedger is NOT 'Sales Accounts'
-    const hasSpecificLedger = salesLedger.toLowerCase() !== 'sales accounts';
+    const hasSpecificLedger = salesLedger.toLowerCase() !== 'sales accounts' && salesLedger.toLowerCase() !== '';
+    const isInterstateItem = itemIGST > 0;
 
     return {
       stockItemName:  itemName,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
+      isGstAssessableValueOverridden: false,
+      strDisGstApplicable: false,
+      contentNegIsPos: false,
+      isAutoNegate: false,
+      isCustomsClearance: false,
+      isTrackComponent: false,
+      isTrackProduction: false,
+      isPrimaryItem: false,
+      isScrap: false,
       rate:    `${itemRate.toFixed(2)}/${itemUnit}`,
       amount:  -itemAmount,
       actualQty: `${itemQty} ${itemUnit}`,
@@ -217,11 +231,38 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       hsnLedgerSource:       hasSpecificLedger ? salesLedger : '',
       gstOverrideTaxability: 'Taxable',
       gstOverrideSupplyType: 'Goods',
+      gstOverrideStoredNature: isInterstateItem ? 'Interstate Sales - Taxable' : 'Intrastate Sales - Taxable',
+      gstRateInferApplicability: 'As per Masters/Company',
       gstHsnName:            itemHSN,
+      gstHsnInferApplicability: 'As per Masters/Company',
+      gstOvrdnIsRevchargeApplic: 'Not Applicable',
+      // Batch allocations (real godown "Srichakra Industries")
+      batchAllocations: [{
+        godownName: 'Srichakra Industries',
+        batchName: 'Primary Batch',
+        indentNo: 'Not Applicable',
+        orderNo: 'Not Applicable',
+        trackingNumber: 'Not Applicable',
+        dynamicCstIsCleared: false,
+        amount: -itemAmount,
+        actualQty: `${itemQty} ${itemUnit}`,
+        billedQty: `${itemQty} ${itemUnit}`,
+      }],
+      // Rate details (CGST, SGST/UTGST, or IGST)
+      rateDetails: [
+        ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: cgstRate }] : []),
+        ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate }] : []),
+        ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: igstRate }] : []),
+      ],
+      // Accounting allocations
       accountingAllocations: [{
         ledgerName: salesLedger,
         isDeemedPositive: false,
         isLastDeemedPositive: false,
+        ledgerFromItem: false,
+        removeZeroEntries: false,
+        isPartyLedger: false,
+        gstClass: 'Not Applicable',
         amount: -itemAmount,
       }],
     };

@@ -762,11 +762,7 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
       });
       const batchItemsTotal = +batchItemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
       const useBatchInventory = batchInvItems.length > 0
-        && Math.abs(batchItemsTotal - salesBase) <= 0.10
-        && batchInvItems.some(i => {
-          const l = (i.tallySalesLedger || '').trim().toLowerCase();
-          return l && l !== 'sales accounts';
-        });
+        && Math.abs(batchItemsTotal - salesBase) <= 0.10;
       let batchInvAllocated = 0;
       const batchInventoryXml = useBatchInventory ? batchInvItems.map((item, i) => {
         const itemName    = (item.description || item.name || '').trim();
@@ -780,7 +776,7 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
         // Sales inventory: ISDEEMEDPOSITIVE=No → amounts must be NEGATIVE
         const negItemAmt  = -Math.abs(itemAmt);
         const itemUnit    = 'Nos';
-        const salesLedger = (item.tallySalesLedger || '').trim();
+        const salesLedger = (item.tallySalesLedger || 'Sales').trim();
         return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
@@ -921,23 +917,16 @@ function buildSingleVoucherXml(inv, cfg) {
   const action  = inv.tallyGuid ? 'Alter' : 'Create';
   const guidTag = inv.tallyGuid ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
 
-  // Only include inventory entries that have a real (non-group) sales ledger.
-  // "Sales Accounts" in ACCOUNTINGALLOCATIONS causes silent EXCEPTIONS=1 because
-  // it's a Tally group, not a ledger. Items without a specific ledger fall through
-  // to the plain ledger-only format — their credit is in LEDGERENTRIES.LIST.
-  const validInventoryEntries = (v.allInventoryEntries || []).filter(item => {
-    if (!item.stockItemName) return false;
-    const allocLedger = (item.accountingAllocations?.[0]?.ledgerName || '').toLowerCase().trim();
-    return allocLedger && allocLedger !== 'sales accounts';
-  });
+  // Use stored inventory entries and _useInventory flag
+  const validInventoryEntries = v?._useInventory && v?.allInventoryEntries?.length ? v.allInventoryEntries : [];
   const hasInventoryEntries = validInventoryEntries.length > 0;
 
   const ledgerEntriesXml = (v.allLedgerEntries || []).map(entry => {
-    // When inventory entries are present, omit the Sales Accounts ledger entry to
+    // When inventory entries are present, omit the Sales Accounts or Sales ledger entry to
     // prevent double-booking (inventory entries carry the sales value).
     if (hasInventoryEntries) {
       const name = (entry.ledgerName || '').toLowerCase().trim();
-      if (name === 'sales accounts') return '';
+      if (name === 'sales accounts' || name === 'sales') return '';
     }
     const billAllocsXml = (entry.billAllocations || []).map(ba => `
     <BILLALLOCATIONS.LIST>
@@ -1155,7 +1144,7 @@ export async function pushSingleInvoiceToTally(invoiceId) {
         // Sales inventory: ISDEEMEDPOSITIVE=No → amounts must be NEGATIVE
         const negItemAmt  = -Math.abs(itemAmt);
         const itemUnit    = 'Nos';
-        const salesLedger = (item.tallySalesLedger || '').trim();
+        const salesLedger = (item.tallySalesLedger || 'Sales').trim();
         return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
