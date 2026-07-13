@@ -382,13 +382,22 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   console.log(`  Grand Total          : ${grandTotal}`);
 
   // Tally requires sum of all ledger entry amounts = 0.
-  // Party = -grandTotal (negative), GST + Sales credits = +grandTotal (positive sum).
+  // When using inventory entries, the sales credit is in ACCOUNTINGALLOCATIONS,
+  // not in LEDGERENTRIES, so we need to add the sum of inventory entry amounts
+  // (which are negative, representing the sales credit) to balance.
   const ledgerSum = +allLedgerEntries.reduce((s, e) => s + e.amount, 0).toFixed(2);
-  console.log(`  Final balance (sum)  : ${ledgerSum}  (must be 0 ± 0.01)`);
+  const inventorySum = useInventory 
+    ? +allInventoryEntries.reduce((s, e) => s + e.amount, 0).toFixed(2) 
+    : 0;
+  const totalSum = (+ledgerSum + +inventorySum).toFixed(2);
+  
+  console.log(`  Final balance (sum)  : ${totalSum}  (must be 0 ± 0.01)`);
+  console.log(`    Ledger sum         : ${ledgerSum}`);
+  if (useInventory) console.log(`    Inventory sum      : ${inventorySum}`);
 
-  if (Math.abs(ledgerSum) > 0.01) {
+  if (Math.abs(+totalSum) > 0.01) {
     throw new Error(
-      `normalizeToTallyVoucher: voucher imbalanced by ${ledgerSum.toFixed(2)} ` +
+      `normalizeToTallyVoucher: voucher imbalanced by ${totalSum} ` +
       `(invoice ${invoiceNo}, grandTotal=${grandTotal}, cgst=${totalCGST}, sgst=${totalSGST}, igst=${totalIGST}, salesBase=${salesBase})`
     );
   }

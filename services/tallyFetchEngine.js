@@ -377,8 +377,10 @@ async function postXml(cfg, xml, timeoutMs) {
   if (useConnectorPath) {
     if (!validateXml(xml)) throw new Error('Invalid XML format');
     LOG(`POST via connector ${cfg.connectorId} bytes=${xml.length} timeout=${timeoutMs}ms`);
+    console.log('[Tally] Full Request XML:\n', xml);
     const body = await sendTallyRequest(cfg.connectorId, xml, timeoutMs);
     LOG(`  → Received bytes=${body.length}`);
+    console.log('[Tally] Full Response XML:\n', body);
     const isImportResponse = body.includes('<RESPONSE>') || body.includes('<CREATED>');
     if (!isImportResponse && body.includes('<LINEERROR>')) {
       throw new Error(`Tally returned LINEERROR: ${body}`);
@@ -404,12 +406,14 @@ async function postXml(cfg, xml, timeoutMs) {
   const url = tallyBaseUrl(cfg); // throws if URL is not configured
   if (!validateXml(xml)) throw new Error('Invalid XML format');
   LOG(`POST ${url} bytes=${xml.length} timeout=${timeoutMs}ms`);
+  console.log('[Tally] Full Request XML:\n', xml);
   const resp = await axiosInstance.post(url, xml, {
     timeout: timeoutMs,
     headers: buildHeaders(cfg),
   });
   const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
   LOG(`  → HTTP ${resp.status} bytes=${body.length}`);
+  console.log('[Tally] Full Response XML:\n', body);
   const isImportResponse = body.includes('<RESPONSE>') || body.includes('<CREATED>');
   if (!isImportResponse && body.includes('<LINEERROR>')) {
     throw new Error(`Tally returned LINEERROR: ${body}`);
