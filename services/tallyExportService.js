@@ -882,7 +882,7 @@ async function fetchTallyExistingVoucherNumbers(cfg) {
       // Some Tally editions / custom voucher types use "Sales Invoice" rather than plain "Sales".
       // Previously filtering only on exact "sales" was causing BIW01-style duplicates where
       // the dedup set missed vouchers and Tally silently returned CREATED=0 for a re-Create.
-      if (vtype !== 'sales') continue;
+      if (!vtype.startsWith('sale')) continue;
       const vno = (block.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/i)?.[1] || '').trim().toUpperCase();
       const guid = (block.match(/<GUID>(.*?)<\/GUID>/i)?.[1] || '').trim();
       if (vno) existingNos.set(vno, { guid, voucherTypeName: vtype });
