@@ -350,13 +350,17 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       ? uniqueItemLedgers[0]
       : 'Sales';   // ← auto-created ledger under "Sales Accounts" group
 
-  allLedgerEntries.push({
-    ledgerName: salesCreditLedger,
-    isDeemedPositive: false,
-    isLastDeemedPositive: false,
-    amount: totalTax > 0 ? +salesBase : +grandTotal,
-    billAllocations: [],
-  });
+  // Only add sales credit ledger entry if we're not using inventory entries
+    // (inventory entries' ACCOUNTINGALLOCATIONS.LIST will handle the sales credit)
+    if (!useInventory) {
+      allLedgerEntries.push({
+        ledgerName: salesCreditLedger,
+        isDeemedPositive: false,
+        isLastDeemedPositive: false,
+        amount: totalTax > 0 ? +salesBase : +grandTotal,
+        billAllocations: [],
+      });
+    }
 
   // ── Balance check ─────────────────────────────────────────────────────────
   // Debug: log all entries before validation so any future imbalance is traceable.
