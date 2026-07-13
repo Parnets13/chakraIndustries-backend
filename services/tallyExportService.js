@@ -2153,10 +2153,8 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
       // grandTotal is the vendor credit (what we owe) — must be the source of truth.
       const grandTotal = +(po.grandTotal || subtotal + cgst + sgst + igst).toFixed(2);
 
-      // purchaseBase = grandTotal goes entirely to Purchase Accounts.
-      // Skip separate CGST/SGST/IGST ledger entries — client's Tally uses custom
-      // GST ledger names we cannot predict, so sending "CGST"/"SGST" causes EXCEPTIONS.
-      const purchaseBase = grandTotal;
+      // purchaseBase = subtotal (excluding GST) for inventory allocations
+      const purchaseBase = subtotal;
 
       // Distribute purchaseBase across inventory lines; last line absorbs rounding.
       let purAllocated = 0;
@@ -2225,12 +2223,22 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
       <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
     </BILLALLOCATIONS.LIST>
   </ALLLEDGERENTRIES.LIST>
-  <ALLLEDGERENTRIES.LIST>
-    <LEDGERNAME>Purchase Accounts</LEDGERNAME>
+  ${cgst > 0 ? `<ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>CGST</LEDGERNAME>
     <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
-    <AMOUNT>${grandTotal.toFixed(2)}</AMOUNT>
-  </ALLLEDGERENTRIES.LIST>
+    <AMOUNT>${cgst.toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>` : ''}
+  ${sgst > 0 ? `<ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>SGST</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <AMOUNT>${sgst.toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>` : ''}
+  ${igst > 0 ? `<ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>IGST</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <AMOUNT>${igst.toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>` : ''}
+  ${inventoryLines}
 </VOUCHER>`;
     }).filter(Boolean).join('');
 
