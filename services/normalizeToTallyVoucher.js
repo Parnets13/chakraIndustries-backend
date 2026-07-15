@@ -107,14 +107,15 @@ export function resolveGstLedgerName(taxType, salesBase, taxAmount, availableLed
  *
  * @param {Object} invoiceData  - Raw invoice fields (same shape as Invoice mongoose doc)
  * @param {Object} options
- * @param {string[]|null} options.gstLedgerNames  - GST ledger names fetched from Tally (can be null)
- * @param {string|null}   options.periodEnd       - YYYYMMDD period end cap (can be null)
- * @param {string|null}   options.companyName     - Tally company name (informational only)
+ * @param {Object|null} options.tallyGstLedgers  - GST ledger names fetched from Tally: { cgstNames, sgstNames, igstNames } (can be null)
+ * @param {string|null} options.periodEnd       - YYYYMMDD period end cap (can be null)
+ * @param {string|null} options.companyName     - Tally company name (informational only)
+ * @param {string}      options.salesVoucherTypeName - Sales voucher type name in Tally (default: 'Sales')
  * @returns {Object} TallyVoucher sub-document (NOT a Mongoose model instance)
  * @throws {Error} if required fields missing or voucher is imbalanced
  */
 export function normalizeToTallyVoucher(invoiceData, options = {}) {
-  const { gstLedgerNames = null, periodEnd = null, salesVoucherTypeName = 'Sales' } = options;
+  const { tallyGstLedgers = null, periodEnd = null, salesVoucherTypeName = 'Sales' } = options;
 
   // ── Required field validation ────────────────────────────────────────────
   const invoiceNo = (invoiceData.invoiceNo || '').toString().trim();
@@ -139,9 +140,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const salesBase = +(grandTotal - totalTax).toFixed(2);
 
   // ── GST ledger names ──────────────────────────────────────────────────────
-  const cgstLedger = totalCGST > 0 ? resolveGstLedgerName('cgst', salesBase, totalCGST, gstLedgerNames) : '';
-  const sgstLedger = totalSGST > 0 ? resolveGstLedgerName('sgst', salesBase, totalSGST, gstLedgerNames) : '';
-  const igstLedger = totalIGST > 0 ? resolveGstLedgerName('igst', salesBase, totalIGST, gstLedgerNames) : '';
+  const cgstLedger = totalCGST > 0 ? resolveGstLedgerName('cgst', salesBase, totalCGST, tallyGstLedgers?.cgstNames) : '';
+  const sgstLedger = totalSGST > 0 ? resolveGstLedgerName('sgst', salesBase, totalSGST, tallyGstLedgers?.sgstNames) : '';
+  const igstLedger = totalIGST > 0 ? resolveGstLedgerName('igst', salesBase, totalIGST, tallyGstLedgers?.igstNames) : '';
 
   // ── Inventory entries (only when item amounts balance against salesBase) ──
   // IMPORTANT: Inventory entries require a valid GSTLEDGERSOURCE ledger name.
@@ -168,6 +169,23 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
   // useInventory: send items as ALLINVENTORYENTRIES.LIST to show item columns in Tally
   const useInventory = true;
+
+  // First, calculate the sales ledger name (needed for tax source ledger)
+  const INVALID_SALES_NAMES = new Set(['sales accounts', 'sales accounts (group)', '']);
+  const itemLedgers = validItems
+    .map(item => {
+      const raw = (item.tallySalesLedger || '').toString().trim();
+      return INVALID_SALES_NAMES.has(raw.toLowerCase()) ? '' : raw;
+    })
+    .filter(Boolean);
+  // Unique ledger names used across all items
+  const uniqueItemLedgers = [...new Set(itemLedgers)];
+  // Use the single shared ledger if all items agree, else use first one, else fallback
+  const salesCreditLedger = uniqueItemLedgers.length === 1
+    ? uniqueItemLedgers[0]
+    : uniqueItemLedgers.length > 1
+      ? uniqueItemLedgers[0]
+      : 'Sales';   // ← auto-created ledger under "Sales Accounts" group
 
   const isInterstate = totalIGST > 0;
 
@@ -221,7 +239,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       isPrimaryItem: false,
       isScrap: false,
       rate:    `${itemRate.toFixed(2)}/${itemUnit}`,
-      amount:  -itemAmount,
+      amount:  itemAmount,
       actualQty: `${itemQty} ${itemUnit}`,
       billedQty:  `${itemQty} ${itemUnit}`,
       // GST source fields: only include when we have a specific (non-group) ledger
@@ -244,7 +262,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
         orderNo: 'Not Applicable',
         trackingNumber: 'Not Applicable',
         dynamicCstIsCleared: false,
-        amount: -itemAmount,
+        amount: itemAmount,
         actualQty: `${itemQty} ${itemUnit}`,
         billedQty: `${itemQty} ${itemUnit}`,
       }],
@@ -263,7 +281,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
         removeZeroEntries: false,
         isPartyLedger: false,
         gstClass: 'Not Applicable',
-        amount: -itemAmount,
+        amount: itemAmount,
       }],
     };
   }) : [];
@@ -289,13 +307,26 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // ISDEEMEDPOSITIVE=Yes (debit) → AMOUNT is NEGATIVE.
   // Party (debtor) is isDeemedPositive=true → amount=-grandTotal (negative).
   // Tax and Sales ledgers are isDeemedPositive=false → amount POSITIVE.
+  const calculateRate = (taxAmount, base) => {
+    if (base <= 0 || taxAmount <= 0) return 0;
+    return +((taxAmount / base) * 100).toFixed(2);
+  };
+  const overallCgstRate = calculateRate(totalCGST, salesBase);
+  const overallSgstRate = calculateRate(totalSGST, salesBase);
+  const overallIgstRate = calculateRate(totalIGST, salesBase);
+  // Get the sales ledger name to use as the source for tax calculations
+  const taxSourceLedger = uniqueItemLedgers.length === 1
+    ? uniqueItemLedgers[0]
+    : uniqueItemLedgers.length > 1
+      ? uniqueItemLedgers[0]
+      : 'Sales';
+
   if (totalCGST > 0 && cgstLedger) {
     allLedgerEntries.push({
       ledgerName: cgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +totalCGST,
-      billAllocations: [],
+      amount: +totalCGST
     });
   }
 
@@ -305,8 +336,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       ledgerName: sgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +totalSGST,
-      billAllocations: [],
+      amount: +totalSGST
     });
   }
 
@@ -316,39 +346,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       ledgerName: igstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +totalIGST,
-      billAllocations: [],
+      amount: +totalIGST
     });
   }
-
-  // 5. Sales credit ledger.
-  //    salesBase = grandTotal - totalTax
-  //    When there is no tax, salesBase === grandTotal (correct).
-  //
-  //    CRITICAL: "Sales Accounts" is a Tally GROUP — NOT a ledger.
-  //    Using a group name in LEDGERENTRIES.LIST causes silent EXCEPTIONS=1.
-  //    We MUST use an actual ledger under the "Sales Accounts" group.
-  //
-  //    Resolution priority:
-  //    1. If all items share the same tallySalesLedger → use that one ledger
-  //    2. If items have mixed ledgers → use the first non-empty one
-  //    3. Fallback: "Sales" — a generic ledger that is auto-created under
-  //       "Sales Accounts" by the export pre-flight step. Never "Sales Accounts".
-  const INVALID_SALES_NAMES = new Set(['sales accounts', 'sales accounts (group)', '']);
-  const itemLedgers = validItems
-    .map(item => {
-      const raw = (item.tallySalesLedger || '').toString().trim();
-      return INVALID_SALES_NAMES.has(raw.toLowerCase()) ? '' : raw;
-    })
-    .filter(Boolean);
-  // Unique ledger names used across all items
-  const uniqueItemLedgers = [...new Set(itemLedgers)];
-  // Use the single shared ledger if all items agree, else use first one, else fallback
-  const salesCreditLedger = uniqueItemLedgers.length === 1
-    ? uniqueItemLedgers[0]
-    : uniqueItemLedgers.length > 1
-      ? uniqueItemLedgers[0]
-      : 'Sales';   // ← auto-created ledger under "Sales Accounts" group
 
   // Only add sales credit ledger entry if we're not using inventory entries
     // (inventory entries' ACCOUNTINGALLOCATIONS.LIST will handle the sales credit)
@@ -387,7 +387,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // (which are negative, representing the sales credit) to balance.
   const ledgerSum = +allLedgerEntries.reduce((s, e) => s + e.amount, 0).toFixed(2);
   const inventorySum = useInventory 
-    ? +allInventoryEntries.reduce((s, e) => s + e.amount, 0).toFixed(2) 
+    ? +allInventoryEntries.reduce((s, e) => s + (e.amount || 0), 0).toFixed(2)
     : 0;
   const totalSum = (+ledgerSum + +inventorySum).toFixed(2);
   
@@ -444,11 +444,13 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const shipToPincode  = (invoiceData.shipToPincode || '').toString().trim();
 
   // ── Bill To fields ────────────────────────────────────────────────────────
-  const billToName    = (invoiceData.billToName    || invoiceData.billToMailingName || partyLedgerName).toString().trim();
-  const billToAddress = (invoiceData.billToAddress || invoiceData.partyAddress || '').toString().trim();
-  const billToCity    = (invoiceData.billToCity    || invoiceData.partyCity    || '').toString().trim();
-  const billToState   = (invoiceData.billToState   || invoiceData.partyState   || '').toString().trim();
-  const billToGST     = (invoiceData.billToGST     || invoiceData.partyGST     || '').toString().trim();
+  const billToName        = (invoiceData.billToName    || invoiceData.billToMailingName || partyLedgerName).toString().trim();
+  const billToMailingName = (invoiceData.billToMailingName || invoiceData.billToName || partyLedgerName).toString().trim();
+  const billToAddress     = (invoiceData.billToAddress || invoiceData.partyAddress || '').toString().trim();
+  const billToCity        = (invoiceData.billToCity    || invoiceData.partyCity    || '').toString().trim();
+  const billToState       = (invoiceData.billToState   || invoiceData.partyState   || '').toString().trim();
+  const billToGST         = (invoiceData.billToGST     || invoiceData.partyGST     || '').toString().trim();
+  const billToPincode     = (invoiceData.billToPincode || invoiceData.partyPostal || '').toString().trim();
 
   // ── Party GST / State (Step 6 fields) ────────────────────────────────────
   const partyGST      = (invoiceData.partyGST   || '').toString().trim();
@@ -488,10 +490,12 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     shipToPincode,
     // Bill To — written to BASICBUYERADDRESS.LIST (top-level, TYPE="String")
     billToName,
+    billToMailingName,
     billToAddress,
     billToCity,
     billToState,
     billToGST,
+    billToPincode,
     // Party identification (Step 6)
     partyGST,
     partyState,

@@ -38,8 +38,25 @@ function sseSetup(res) {
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
+
+  // Send periodic heartbeat (keepalive) to prevent connection from timing out
+  const heartbeatInterval = setInterval(() => {
+    try {
+      res.write(': heartbeat\n\n'); // Comment line as heartbeat, keeps SSE open
+    } catch (err) {
+      clearInterval(heartbeatInterval);
+    }
+  }, 15000); // Every 15 seconds
+
+  // Clear interval when client closes connection
+  res.on('close', () => {
+    clearInterval(heartbeatInterval);
+  });
+
   return (payload) => {
-    try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch (_) {}
+    try { 
+      res.write(`data: ${JSON.stringify(payload)}\n\n`); 
+    } catch (_) {}
   };
 }
 
@@ -1092,26 +1109,32 @@ export const exportToTallyStream = async (req, res) => {
     const exportTasks = [];
     const typeNorm = type.toLowerCase();
 
+    const wantsMasters = typeNorm === 'full' || typeNorm === 'masters' || typeNorm === 'purchase' || typeNorm === 'purchase vouchers' || typeNorm === 'sales' || typeNorm === 'sales vouchers' || typeNorm === 'payment' || typeNorm === 'payment vouchers' || typeNorm === 'receipt' || typeNorm === 'receipt vouchers' || typeNorm === 'po-generation' || typeNorm === 'pdf-invoices';
+    const wantsPurchase = typeNorm === 'purchase' || typeNorm === 'purchase vouchers';
+    const wantsSales = typeNorm === 'full' || typeNorm === 'sales' || typeNorm === 'sales vouchers' || typeNorm === 'po-generation' || typeNorm === 'pdf-invoices';
+    const wantsPayment = typeNorm === 'full' || typeNorm === 'payment' || typeNorm === 'payment vouchers';
+    const wantsReceipt = typeNorm === 'full' || typeNorm === 'receipt' || typeNorm === 'receipt vouchers';
+
     // Masters must always be pushed first so party ledgers and stock items exist in Tally
     // before any voucher references them. ACTION="Create" means Tally skips existing ones.
-    if (typeNorm === 'full' || typeNorm === 'masters' || typeNorm === 'purchase' || typeNorm === 'purchase vouchers' || typeNorm === 'sales' || typeNorm === 'sales vouchers' || typeNorm === 'payment' || typeNorm === 'payment vouchers' || typeNorm === 'receipt' || typeNorm === 'receipt vouchers') {
+    if (wantsMasters) {
       exportTasks.push({ label: 'Masters (Ledgers & Items)', fn: () => pushMastersToTally(cfg, user._id) });
     }
-    if (typeNorm === 'full' || typeNorm === 'purchase' || typeNorm === 'purchase vouchers') {
+    if (wantsPurchase) {
       exportTasks.push({ label: 'Purchase Vouchers', fn: () => pushPurchaseVouchersToTally(cfg, user._id) });
     }
-    if (typeNorm === 'full' || typeNorm === 'sales' || typeNorm === 'sales vouchers') {
+    if (wantsSales) {
       exportTasks.push({ label: 'Sales Vouchers', fn: () => pushSalesVouchersToTally(cfg, user._id) });
     }
-    if (typeNorm === 'full' || typeNorm === 'payment' || typeNorm === 'payment vouchers') {
+    if (wantsPayment) {
       exportTasks.push({ label: 'Payment Vouchers', fn: () => pushPaymentVouchersToTally(cfg, user._id) });
     }
-    if (typeNorm === 'full' || typeNorm === 'receipt' || typeNorm === 'receipt vouchers') {
+    if (wantsReceipt) {
       exportTasks.push({ label: 'Receipt Vouchers', fn: () => pushReceiptVouchersToTally(cfg, user._id) });
     }
 
     if (exportTasks.length === 0) {
-      send({ event: 'error', message: `Unknown export type: "${type}". Valid types: Full, masters, purchase, sales, payment, receipt` });
+      send({ event: 'error', message: `Unknown export type: "${type}". Valid types: Full, masters, purchase, sales, payment, receipt, po-generation, pdf-invoices` });
       return res.end();
     }
 
@@ -1235,13 +1258,13 @@ export const exportToTally = async (req, res) => {
     const results = [];
     const typeNorm = type.toLowerCase();
 
-    if (typeNorm === 'full' || typeNorm === 'purchase')
+    if (typeNorm === 'purchase' || typeNorm === 'purchase vouchers' || typeNorm === 'purchaseinvoices' || typeNorm === 'purchaseinvoices')
       results.push(await pushPurchaseVouchersToTally(cfg, req.user?._id));
-    if (typeNorm === 'full' || typeNorm === 'sales')
+    if (typeNorm === 'full' || typeNorm === 'sales' || typeNorm === 'sales vouchers' || typeNorm === 'salesinvoices' || typeNorm === 'salesinvoice' || typeNorm === 'po-generation' || typeNorm === 'pdf-invoices')
       results.push(await pushSalesVouchersToTally(cfg, req.user?._id));
-    if (typeNorm === 'full' || typeNorm === 'payment')
+    if (typeNorm === 'full' || typeNorm === 'payment' || typeNorm === 'payment vouchers')
       results.push(await pushPaymentVouchersToTally(cfg, req.user?._id));
-    if (typeNorm === 'full' || typeNorm === 'receipt')
+    if (typeNorm === 'full' || typeNorm === 'receipt' || typeNorm === 'receipt vouchers')
       results.push(await pushReceiptVouchersToTally(cfg, req.user?._id));
 
     const total  = results.reduce((s, r) => s + (r.records || 0), 0);
@@ -1381,11 +1404,12 @@ export const selectiveExportStream = async (req, res) => {
     return res.end();
   }
 
-  const key = req.query.key || '';
+  let key = (req.query.key || '').toString().trim();
   if (!key) {
     send({ event: 'error', message: 'Missing ?key= parameter' });
     return res.end();
   }
+  key = key.replace(/;$/, '');
 
   try {
     const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });

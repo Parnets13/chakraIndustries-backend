@@ -1,4 +1,4 @@
-/**
+﻿/**
  * tallyExportService.js
  * ─────────────────────────────────────────────────────────────────────────────
  * Dedicated ERP → Tally export engine for Sri Chakra Industries.
@@ -39,6 +39,7 @@ import { normalizeToTallyVoucher } from './normalizeToTallyVoucher.js';
 
 const LOG = (...a) => console.log('[TallyExport]', ...a);
 const ERR = (...a) => console.error('[TallyExport ERROR]', ...a);
+const MAX_RETRIES = 4; // allow one more retry attempt for pending invoices
 
 // ─── CONFIG HELPERS ───────────────────────────────────────────────────────────
 
@@ -100,6 +101,15 @@ const TODAY = td(new Date()) || (() => {
   const n = new Date();
   return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`;
 })();
+
+function resolvePurchaseVoucherDate(po, fallbackDate = TODAY) {
+  const candidates = [po?.deliveryDate, po?.orderDate, po?.poDate, po?.createdAt, po?.updatedAt];
+  for (const candidate of candidates) {
+    const formatted = td(candidate);
+    if (formatted) return formatted;
+  }
+  return fallbackDate;
+}
 
 /**
  * Fetch the ENDINGAT date of the currently open Tally company.
@@ -242,6 +252,43 @@ ${innerXml}
 </ENVELOPE>`;
 }
 
+function importDebugEnvelope(cfg, reportName, innerXml) {
+  const extra = '<SVEXPORTFORMAT>XML (Data Interchange)</SVEXPORTFORMAT>';
+  return `<ENVELOPE>
+<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA>
+  <REQUESTDESC>
+    <REPORTNAME>${reportName}</REPORTNAME>
+    ${staticVars(cfg, extra)}
+  </REQUESTDESC>
+  <REQUESTDATA>
+    <TALLYMESSAGE xmlns:UDF="TallyUDF">
+${innerXml}
+    </TALLYMESSAGE>
+  </REQUESTDATA>
+</IMPORTDATA></BODY>
+</ENVELOPE>`;
+}
+
+async function sendImportWithFallbackDebug(cfg, reportName, innerXml, label, timeoutMs = 40000) {
+  const envelope = importEnvelope(cfg, reportName, innerXml);
+  const body = await postXml(cfg, envelope, timeoutMs);
+  let result = parseResponse(body, label);
+
+  if (result.exceptions > 0 && !result.diagnosticsFound) {
+    ERR(`${label}: EXCEPTIONS=${result.exceptions} with no diagnostics tags. Retrying in debug mode with XML (Data Interchange).`);
+    const debugEnvelope = importDebugEnvelope(cfg, reportName, innerXml);
+    const debugBody = await postXml(cfg, debugEnvelope, timeoutMs);
+    const debugResult = parseResponse(debugBody, `${label} (Debug Fallback)`);
+    // Preserve the most informative error/diagnostics from the debug result.
+    if (!debugResult.ok || debugResult.diagnosticsFound) {
+      result = { ...result, ...debugResult };
+    }
+  }
+
+  return result;
+}
+
 // ─── HTTP TRANSPORT ───────────────────────────────────────────────────────────
 
 async function postXml(cfg, xml, timeoutMs = 40000) {
@@ -276,7 +323,21 @@ async function postXml(cfg, xml, timeoutMs = 40000) {
   }
   
   LOG(`postXml → ${xml.length} bytes, timeout ${effectiveTimeout}ms${cfg.useConnector ? ' (connector scaled)' : ''}`);
-  return postXmlWithRetry(cfg, xml, effectiveTimeout);
+  console.log('[Tally] FINAL REQUEST XML:\n' + xml);
+  // Send and capture response; save response XML for diagnostics
+  const body = await postXmlWithRetry(cfg, xml, effectiveTimeout);
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const respFilename = `tally-response-${timestamp}.xml`;
+    const logsDirRes = path.join(process.cwd(), 'logs', 'tally-xml-responses');
+    if (!fs.existsSync(logsDirRes)) fs.mkdirSync(logsDirRes, { recursive: true });
+    const respPath = path.join(logsDirRes, respFilename);
+    fs.writeFileSync(respPath, String(body || ''), 'utf8');
+    LOG(`Saved XML response to: ${respPath}`);
+  } catch (e) {
+    ERR('Failed to save XML response (non-fatal):', e.message || e);
+  }
+  return body;
 }
 
 // ─── RESPONSE PARSER ─────────────────────────────────────────────────────────
@@ -352,12 +413,12 @@ function parseResponse(xml, label = '') {
   }
 
   // 6. Catch-all for other error-like tags
-  const unknownDiagPatterns = [/<ERRMSG>([\s\S]*?)<\/ERRMSG>/gi, /<ERRORMESSAGE>([\s\S]*?)<\/ERRORMESSAGE>/gi];
+  const unknownDiagPatterns = [/<ERRMSG>([\s\S]*?)<\/ERRMSG>/gi, /<ERRORMESSAGE>([\s\S]*?)<\/ERRORMESSAGE>/gi, /<DIAGSTRING>([\s\S]*?)<\/DIAGSTRING>/gi];
   for (const pattern of unknownDiagPatterns) {
     for (const m of s.matchAll(pattern)) {
       const msg = m[1].trim();
       if (msg) {
-        ERR(`${label} ── ERRMSG/ERRORMESSAGE: ${msg}`);
+        ERR(`${label} ── DIAGNOSTIC: ${msg}`);
         errors.push(msg);
       }
     }
@@ -376,11 +437,12 @@ function parseResponse(xml, label = '') {
   const excCount = excTag ? parseInt(excTag[1], 10) : 0;
   if (excCount > 0) {
     ERR(`${label} ── EXCEPTIONS=${excCount} ──`);
-    if (lineErrors.length === 0 && lastErrors.length === 0 && exceptionBlocks.length === 0) {
+    const hasDiagnostics = lineErrors.length > 0 || lastErrors.length > 0 || exceptionBlocks.length > 0 || importMsgs.length > 0 || unknownDiagPatterns.some(pattern => [...s.matchAll(pattern)].length > 0);
+    if (!hasDiagnostics) {
       ERR(`${label} WARNING: EXCEPTIONS=${excCount} but no diagnostic tags found in response.`);
       ERR(`${label} Review the full RAW RESPONSE logged above for clues.`);
     }
-    const msg = `Tally EXCEPTIONS=${excCount}${lineErrors.length ? ': ' + lineErrors.join(' | ') : lastErrors.length ? ': ' + lastErrors.join(' | ') : ' — see RAW RESPONSE in logs'}`;
+    const msg = `Tally EXCEPTIONS=${excCount}${errors.length ? ': ' + errors.join(' | ') : ' — see RAW RESPONSE in logs'}`;
     if (!errors.some(e => e.includes('EXCEPTIONS'))) errors.push(msg);
   }
 
@@ -390,12 +452,23 @@ function parseResponse(xml, label = '') {
 
   LOG(`${label} → created:${created} altered:${altered} skipped:${skipped} exceptions:${excCount} diagMsgs:${errors.length}`);
 
-  if (errors.length > 0 && created === 0 && altered === 0) {
-    return { ok: false, error: errors.join(' | '), created: 0, altered: 0, skipped };
+  const diagnosticsFound = lineErrors.length > 0 || lastErrors.length > 0 || exceptionBlocks.length > 0 || importMsgs.length > 0 || unknownDiagPatterns.some(pattern => [...s.matchAll(pattern)].length > 0);
+  const ok = errors.length === 0 && excCount === 0;
+
+  if (!ok) {
+    return {
+      ok: false,
+      error: errors.join(' | ') || `Tally reported EXCEPTIONS=${excCount} with no detailed diagnostics`,
+      created, altered, skipped,
+      exceptions: excCount,
+      diagnosticsFound,
+    };
   }
   return {
     ok: true,
     created, altered, skipped,
+    exceptions: excCount,
+    diagnosticsFound,
     warning: errors.length > 0 ? errors.join(' | ') : undefined,
   };
 }
@@ -418,6 +491,59 @@ const PING_XML = `<ENVELOPE>
 </ENVELOPE>`;
 
 /**
+ * Parses the XML response from Tally's OpenCompanyList request to find the currently open company name.
+ * Handles:
+ * - <COMPANY> tags with NAME attribute and/or child <NAME> element
+ * - Single or multiple companies (returns the first one found)
+ * - Tally responses with various structures
+ * @param {string} xmlResponse - Raw XML string from Tally
+ * @returns {string|null} - Company name if found, null otherwise
+ */
+export function parseOpenCompanyListResponse(xmlResponse) {
+  if (!xmlResponse || !xmlResponse.trim()) {
+    return null;
+  }
+
+  // First, find all COMPANY blocks
+  const companyMatches = [...xmlResponse.matchAll(/<COMPANY[^>]*>([\s\S]*?)<\/COMPANY>/gi)];
+  
+  for (const companyMatch of companyMatches) {
+    const companyBlock = companyMatch[1];
+    const fullCompanyTag = companyMatch[0];
+    
+    // Try to get company name from NAME attribute first
+    let companyName = null;
+    const attrMatch = fullCompanyTag.match(/NAME\s*=\s*["']([^"']+)["']/i);
+    if (attrMatch && attrMatch[1]) {
+      companyName = attrMatch[1].trim();
+      if (companyName) {
+        return companyName;
+      }
+    }
+    
+    // If attribute not found, try child <NAME> element inside the COMPANY block
+    const nameTagMatch = companyBlock.match(/<NAME[^>]*>([\s\S]*?)<\/NAME>/i);
+    if (nameTagMatch && nameTagMatch[1]) {
+      companyName = nameTagMatch[1].trim();
+      if (companyName) {
+        return companyName;
+      }
+    }
+  }
+  
+  // Fallback: try to find any <NAME> tag in the response (for simpler structures)
+  const fallbackNameMatches = [...xmlResponse.matchAll(/<NAME[^>]*>([\s\S]*?)<\/NAME>/gi)];
+  for (const nameMatch of fallbackNameMatches) {
+    const name = nameMatch[1].trim();
+    if (name) {
+      return name;
+    }
+  }
+
+  return null;
+}
+
+/**
  * validateTallyConnection
  * Returns { reachable, openCompany, companyMatch, error }
  * Uses connector routing (if useConnector=true) — same path as postXml.
@@ -430,11 +556,8 @@ export async function validateTallyConnection(cfg) {
     const body = await postXmlWithRetry(cfg, PING_XML, cfg.useConnector && cfg.connectorId ? 90000 : 30000);
     LOG('Ping response:', body.slice(0, 400));
 
-    // TDL Company collection returns <NAME> tags
-    const nameMatches = [...body.matchAll(/<NAME>(.*?)<\/NAME>/gi)].map(m => m[1].trim()).filter(Boolean);
-    // Also try COMPANYNAME tag as fallback
-    const coMatchFallback = body.match(/<COMPANYNAME>(.*?)<\/COMPANYNAME>/i);
-    const openCompany = nameMatches[0] || (coMatchFallback ? coMatchFallback[1].trim() : null);
+    // Use shared parsing function
+    const openCompany = parseOpenCompanyListResponse(body);
 
     const expected = (cfg.companyName || '').trim();
 
@@ -842,11 +965,10 @@ export async function exportSystemLedgers(cfg, triggeredBy) {
 
 // ─── SAFEGUARD: INVOICE NUMBER DEDUP LOOKUP ──────────────────────────────────
 // Fetches existing Sales voucher numbers from Tally so we can skip any invoice
-// whose invoiceNo already exists as a voucher number in Tally (preventing true
-// duplicates where the same invoice number appears twice in the Sales Register).
+// whose invoiceNo+voucher type already exists as a Sales voucher in Tally.
 //
-// Returns Set<voucherNumber (uppercase)>
-// Non-fatal — if the lookup fails, returns empty Set (export continues normally).
+// Returns Map<lowercasedVoucherType|voucherNumber, {guid, voucherTypeName}>
+// Non-fatal — if the lookup fails, returns empty Map (export continues normally).
 async function fetchTallyExistingVoucherNumbers(cfg) {
   try {
     const company = (cfg.companyName || 'SRI CHAKRA INDUSTRIES').trim().toUpperCase();
@@ -876,16 +998,13 @@ async function fetchTallyExistingVoucherNumbers(cfg) {
     const vtypesSeen = new Set(); // diagnostic: log all unique VoucherTypeNames from Tally
     for (const m of resp.matchAll(/<VOUCHER[^>]*>([\s\S]*?)<\/VOUCHER>/gi)) {
       const block = m[1];
-      const vtype = (block.match(/<VOUCHERTYPENAME>(.*?)<\/VOUCHERTYPENAME>/i)?.[1] || '').trim().toLowerCase();
+      const vtypeRaw = (block.match(/<VOUCHERTYPENAME>(.*?)<\/VOUCHERTYPENAME>/i)?.[1] || '').trim();
+      const vtype = vtypeRaw.toLowerCase();
       vtypesSeen.add(vtype || '(empty)');
-      // Accept "Sales", "Sales Invoice", "Sales Order" — all are Sales-type vouchers in Tally.
-      // Some Tally editions / custom voucher types use "Sales Invoice" rather than plain "Sales".
-      // Previously filtering only on exact "sales" was causing BIW01-style duplicates where
-      // the dedup set missed vouchers and Tally silently returned CREATED=0 for a re-Create.
       if (!vtype.startsWith('sale')) continue;
       const vno = (block.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/i)?.[1] || '').trim().toUpperCase();
       const guid = (block.match(/<GUID>(.*?)<\/GUID>/i)?.[1] || '').trim();
-      if (vno) existingNos.set(vno, { guid, voucherTypeName: vtype });
+      if (vno) existingNos.set(`${vtype}|${vno}`, { guid, voucherTypeName: vtypeRaw });
     }
     LOG(`fetchTallyExistingVoucherNumbers: unique VoucherTypeNames seen in response: [${[...vtypesSeen].join(', ')}]`);
     LOG(`fetchTallyExistingVoucherNumbers: ${existingNos.size} Sales voucher numbers found in Tally`);
@@ -1055,12 +1174,12 @@ async function fetchTallySalesLedgerNames(cfg) {
     const xml = `<ENVELOPE>
 <HEADER>
   <VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>
-  <TYPE>Collection</TYPE><ID>SalesLedgers</ID>
+  <TYPE>Collection</TYPE><ID>AllLedgers</ID>
 </HEADER>
 <BODY><DESC>
   <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
   <TDL><TDLMESSAGE>
-    <COLLECTION NAME="SalesLedgers">
+    <COLLECTION NAME="AllLedgers">
       <TYPE>Ledger</TYPE>
       <FETCH>Name, Parent, TaxType, GSTRate, GSTApplicable</FETCH>
     </COLLECTION>
@@ -1075,8 +1194,11 @@ async function fetchTallySalesLedgerNames(cfg) {
       const block  = m[1];
       const name   = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
       const parent = (block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim().toLowerCase();
-      // Include only ledgers under Sales Accounts group
-      if (!parent.includes('sales')) continue;
+      const nameLow = name.toLowerCase();
+      // Include if parent is Sales OR name contains sales (resilient to missing Parent tag)
+      const isSalesParent = parent.includes('sales');
+      const isSalesName = nameLow.includes('sales') || nameLow.includes('sale');
+      if (!isSalesParent && !isSalesName) continue;
       if (name) salesLedgers.push(name);
     }
     LOG(`fetchTallySalesLedgerNames: found ${salesLedgers.length} sales ledgers: [${salesLedgers.slice(0, 10).join(', ')}${salesLedgers.length > 10 ? '...' : ''}]`);
@@ -1232,9 +1354,11 @@ function igstLedgerName(taxableBase, igstAmt, tallyGstLedgers = null) {
  * Zero field mapping, zero amount recomputation.
  * ACTION is determined by Create vs Alter based on PO map lookup (passed in).
  */
-export function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag = '') {
-  // EXACT SAME IMPLEMENTATION AS buildSingleVoucherXml IN tallyService.js
+export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guidTag = '') {
   const v = tallyVoucher;
+
+  // voucherType is set by normalizeToTallyVoucher from the probed salesVoucherTypeName
+  const voucherTypeName = (v.voucherType || 'Sales').trim();
 
   // Use stored inventory entries and _useInventory flag
   const validInventoryEntries = v?._useInventory && v?.allInventoryEntries?.length ? v.allInventoryEntries : [];
@@ -1247,13 +1371,14 @@ export function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag =
       const name = (entry.ledgerName || '').toLowerCase().trim();
       if (name === 'sales accounts' || name === 'sales') return '';
     }
-    const billAllocsXml = (entry.billAllocations || []).map(ba => `
+    // Only include billAllocations for party ledgers (not for CGST/SGST/IGST)
+    const billAllocsXml = entry.isDeemedPositive ? (entry.billAllocations || []).map(ba => `
     <BILLALLOCATIONS.LIST>
       <NAME>${esc(ba.name || '')}</NAME>
       <BILLTYPE>${esc(ba.billType || 'New Ref')}</BILLTYPE>
       <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
       <AMOUNT>${(ba.amount || 0).toFixed(2)}</AMOUNT>
-    </BILLALLOCATIONS.LIST>`).join('');
+    </BILLALLOCATIONS.LIST>`).join('') : '';
     return `
   <LEDGERENTRIES.LIST>
     <LEDGERNAME>${esc(entry.ledgerName || '')}</LEDGERNAME>
@@ -1265,14 +1390,24 @@ export function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag =
   }).join('');
 
   const inventoryEntriesXml = validInventoryEntries.map(item => {
-    const absAmount = Math.abs(item.amount || 0);
-    const acctAllocsXml = (item.accountingAllocations || []).map(aa => `
+    const itemName = (item.stockItemName || item.description || item.name || '').trim();
+    const itemAmount = Number(item.amount || 0);
+    // Sales inventory: ISDEEMEDPOSITIVE=No, AMOUNT is always positive (absolute value)
+    // Tally derives the credit/debit direction from ISDEEMEDPOSITIVE, not sign of amount.
+    // Working reference: BIW20_EXACT_COPY.xml — amount=219.04 positive with ISDEEMEDPOSITIVE=No
+    const itemAmountTag = Math.abs(itemAmount);
+    const acctAllocsXml = (item.accountingAllocations || []).map(aa => {
+      const allocAmount = Number(aa.amount || 0);
+      // Accounting allocations: always positive — Tally uses ISDEEMEDPOSITIVE for direction
+      const allocAmountTag = Math.abs(allocAmount);
+      return `
       <ACCOUNTINGALLOCATIONS.LIST>
         <LEDGERNAME>${esc(aa.ledgerName || '')}</LEDGERNAME>
         <ISDEEMEDPOSITIVE>${aa.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
         <ISLASTDEEMEDPOSITIVE>${aa.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-        <AMOUNT>${Math.abs(aa.amount || 0).toFixed(2)}</AMOUNT>
-      </ACCOUNTINGALLOCATIONS.LIST>`).join('');
+        <AMOUNT>${allocAmountTag.toFixed(2)}</AMOUNT>
+      </ACCOUNTINGALLOCATIONS.LIST>`;
+    }).join('');
 
     const gstLedgerSrc = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
     const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
@@ -1291,40 +1426,140 @@ export function serializeTallyVoucher(tallyVoucher, action = 'Create', guidTag =
     <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`
       : '';
 
+    // Godown: use item-level batchAllocations if present, else build from item/voucher fields
+    const batch = item.batchAllocations?.[0];
+    const godownName = esc((batch?.godownName || item.godownName || v._godownName || 'Main Location').trim());
+    const batchAllocXml = `
+    <BATCHALLOCATIONS.LIST>
+      <GODOWNNAME>${godownName}</GODOWNNAME>
+      <BATCHNAME>${esc(batch?.batchName || 'Primary Batch')}</BATCHNAME>
+      <DESTINATIONGODOWNNAME>${godownName}</DESTINATIONGODOWNNAME>
+      <INDENTNO>&#4; Not Applicable</INDENTNO>
+      <ORDERNO>&#4; Not Applicable</ORDERNO>
+      <TRACKINGNUMBER>&#4; Not Applicable</TRACKINGNUMBER>
+      <DYNAMICCSTISCLEARED>No</DYNAMICCSTISCLEARED>
+      <AMOUNT>${itemAmountTag.toFixed(2)}</AMOUNT>
+      <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
+      <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
+      <ADDITIONALDETAILS.LIST></ADDITIONALDETAILS.LIST>
+      <VOUCHERCOMPONENTLIST.LIST></VOUCHERCOMPONENTLIST.LIST>
+    </BATCHALLOCATIONS.LIST>`;
+
     return `
   <ALLINVENTORYENTRIES.LIST>
-    <STOCKITEMNAME>${esc(item.stockItemName || '')}</STOCKITEMNAME>
+    <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
     <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <RATE>${esc(item.rate || '')}</RATE>
-    <AMOUNT>${absAmount.toFixed(2)}</AMOUNT>
+    <AMOUNT>${itemAmountTag.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
     <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
     ${gstSourceXml}
     ${hsnSourceXml}
     ${gstOverrideXml}
-    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
+    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${batchAllocXml}${acctAllocsXml}
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
 
-  // ── Bill-to / Ship-to — stripped pending confirmed-working test ────────────
-  const billToXml  = '';
-  const shipToXml  = '';
+  // ── Bill-to / Ship-to address helpers ────────────────────────────────────
+  const normalizeAddressLines = (address, city, state, pincode) => {
+    const lines = [];
+    if (address) {
+      const chunks = address
+        .split(/\r?\n/)
+        .flatMap(section => section.split(/\s*[,;]\s*/))
+        .map(line => line.trim())
+        .filter(Boolean);
+      for (const line of chunks) {
+        if (!lines.some(existing => existing.toLowerCase() === line.toLowerCase())) {
+          lines.push(line);
+        }
+      }
+    }
+    if (city && !lines.some(line => line.toLowerCase().includes(city.toLowerCase()))) {
+      lines.push(city);
+    }
+    if (state && !lines.some(line => line.toLowerCase().includes(state.toLowerCase()))) {
+      lines.push(state);
+    }
+    if (pincode && !lines.some(line => line.includes(pincode))) {
+      lines.push(pincode);
+    }
+    return lines;
+  };
+
+  const billToName = (v.billToName || v.partyLedgerName || '').trim();
+  const billToMailingName = (v.billToMailingName || billToName).trim();
+  const billToPincode = (v.billToPincode || v.partyPostal || '').trim();
+  const billToAddressLines = normalizeAddressLines(v.billToAddress || '', v.billToCity || '', v.billToState || '', billToPincode);
+  const billToXml = billToName || billToAddressLines.length || billToPincode
+    ? `
+  <BASICBUYERNAME>${esc(billToName)}</BASICBUYERNAME>
+  <PARTYMAILINGNAME>${esc(billToMailingName)}</PARTYMAILINGNAME>
+  <BASICBUYERADDRESS.LIST TYPE="String">
+    ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n    ')}
+  </BASICBUYERADDRESS.LIST>
+  ${billToPincode ? `<PARTYPINCODE>${esc(billToPincode)}</PARTYPINCODE>` : ''}`
+    : '';
+
+  const shipToName = (v.shipToName || '').trim();
+  const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', v.shipToState || '', v.shipToPincode || '');
+  const shipToListXml = shipToName || shipToAddressLines.length
+    ? `
+  <BASICBASEPARTYDETAILS.LIST>
+    ${shipToName ? `<BASICBUYERNAME>${esc(shipToName)}</BASICBUYERNAME>` : ''}
+    ${shipToAddressLines.length ? `<BASICBUYERADDRESS.LIST TYPE="String">
+      ${shipToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n      ')}
+    </BASICBUYERADDRESS.LIST>` : ''}
+  </BASICBASEPARTYDETAILS.LIST>`
+    : '';
+  const shipToXml = shipToListXml || v.shipToGST || v.shipToPincode
+    ? `${shipToListXml}
+  ${shipToName ? `<CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>` : ''}
+  ${shipToName ? `<CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>` : ''}
+  ${v.shipToGST ? `<CONSIGNEEGSTIN>${esc(v.shipToGST)}</CONSIGNEEGSTIN>` : ''}
+  ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
+  ${v.shipToState ? `<CONSIGNEESTATENAME>${esc(v.shipToState)}</CONSIGNEESTATENAME>` : ''}
+  ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
+    : '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
 
+  // GST fields
+  const partyGstIn = (v.partyGST || v.billToGST || '').trim();
+  const partyState = (v.partyState || v.billToState || cfg.state || '').trim();
+  const placeOfSupply = partyState || cfg.state || '';
+  const companyGstIn = (cfg.gstin || '').trim();
+  const companyState = (cfg.state || '').trim();
+  const companyRegLabel = `${companyState} Registration`;
+
   return `
-<VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
+<VOUCHER VCHTYPE="${esc(voucherTypeName)}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
   <DATE>${esc(v.date || '')}</DATE>
   <EFFECTIVEDATE>${esc(v.effectiveDate || v.date || '')}</EFFECTIVEDATE>
+  <OLDAUDITENTRYIDS.LIST TYPE="Number">
+    <OLDAUDITENTRYIDS>-1</OLDAUDITENTRYIDS>
+  </OLDAUDITENTRYIDS.LIST>
+  <VCHSTATUSDATE>${esc(v.date || '')}</VCHSTATUSDATE>
+  <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
   ${guidTag}
-  <VOUCHERTYPENAME>${esc(v.voucherType || 'Sales')}</VOUCHERTYPENAME>
+  <VOUCHERTYPENAME>${esc(voucherTypeName)}</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(v.voucherNumber || '')}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
   ${poDateXml}
-  <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
+  <NARRATION>${esc(v.narration || '')}</NARRATION>
+  <GSTREGISTRATIONTYPE>${esc(partyGstIn ? 'Regular' : 'Unregistered')}</GSTREGISTRATIONTYPE>
+  <STATENAME>${esc(partyState)}</STATENAME>
+  <COUNTRYOFRESIDENCE>India</COUNTRYOFRESIDENCE>
+  ${partyGstIn ? `<PARTYGSTIN>${esc(partyGstIn)}</PARTYGSTIN>` : ''}
+  <PLACEOFSUPPLY>${esc(placeOfSupply)}</PLACEOFSUPPLY>
+  <GSTREGISTRATION TAXTYPE="GST" TAXREGISTRATION="${esc(companyGstIn)}">${esc(companyRegLabel)}</GSTREGISTRATION>
+  <CMPGSTIN>${esc(companyGstIn)}</CMPGSTIN>
+  <CMPGSTSTATE>${esc(companyState)}</CMPGSTSTATE>
+  <CMPGSTREGISTRATIONTYPE>Regular</CMPGSTREGISTRATIONTYPE>
+  <VCHSTATUSTAXUNIT>${esc(companyRegLabel)}</VCHSTATUSTAXUNIT>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
 </VOUCHER>`;
 }
 
@@ -1346,32 +1581,26 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       }
 
       // Ping Tally — ask which company is currently open
-      const pingXml = `<ENVELOPE>
-<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>OpenCompanyList</ID></HEADER>
-<BODY><DESC>
-  <STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
-  <TDL><TDLMESSAGE>
-    <COLLECTION NAME="OpenCompanyList" ISMODIFY="No"><TYPE>Company</TYPE><FETCH>Name</FETCH></COLLECTION>
-  </TDLMESSAGE></TDL>
-</DESC></BODY>
-</ENVELOPE>`;
-      const pingResp = await postXml(cfg, pingXml, 30000);
-      const nameMatches = pingResp
-        ? [...pingResp.matchAll(/<NAME>(.*?)<\/NAME>/gi)].map(m => m[1].trim()).filter(Boolean)
-        : [];
-      const detectedCompany = nameMatches[0] || null;
+      const pingResp = await postXmlWithRetry(cfg, PING_XML, 30000);
+      const detectedCompany = parseOpenCompanyListResponse(pingResp);
       const savedCompany    = (cfg.companyName || '').trim();
 
       LOG(`exportSalesInvoices: savedCompany="${savedCompany}" detectedCompany="${detectedCompany || '(not detected)'}"`);
 
-      if (detectedCompany && detectedCompany.toUpperCase() !== savedCompany.toUpperCase()) {
-        LOG(`exportSalesInvoices: ⚠️ company name mismatch — correcting "${savedCompany}" → "${detectedCompany}"`);
-        cfg.companyName = detectedCompany;
-        await TallyConfig.findOneAndUpdate({}, { companyName: detectedCompany }, { sort: { _id: 1 } });
-      } else if (detectedCompany && !savedCompany) {
+      if (!detectedCompany) {
+        const msg = `COMPANY MISMATCH: Could not detect an open company in Tally. Ensure the target company is open before exporting.`;
+        ERR(msg);
+        return { ok: false, records: 0, error: msg };
+      }
+
+      if (!savedCompany) {
         LOG(`exportSalesInvoices: company name was empty — setting to "${detectedCompany}"`);
         cfg.companyName = detectedCompany;
         await TallyConfig.findOneAndUpdate({}, { companyName: detectedCompany }, { sort: { _id: 1 } });
+      } else if (detectedCompany.toUpperCase() !== savedCompany.toUpperCase()) {
+        const msg = `COMPANY MISMATCH: Tally is open to "${detectedCompany}" but configuration expects "${savedCompany}". Open the correct company or update Tally settings.`;
+        ERR(msg);
+        return { ok: false, records: 0, error: msg };
       }
     } catch (pingErr) {
       LOG(`exportSalesInvoices: company auto-detect failed (non-fatal): ${pingErr.message}`);
@@ -1422,14 +1651,16 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // ── Step 0.5: Fetch ACTUAL GST ledger names from Tally ────────────────────
     // This prevents the "silent EXCEPTIONS with no LINEERROR" issue caused by
     // referencing a ledger name that doesn't exist in Tally.
-    // NOTE: This query is skipped in connector mode (it's a TDL Collection query
-    // that times out on slow connectors). In connector mode we rely on the
+    // NOTE: This query is skipped ONLY in connector mode when connector is ONLINE
+    // (it's a TDL Collection query that times out on slow connectors). If connector
+    // is OFFLINE, we fall back to direct mode. In connector mode we rely on the
     // SVSHOWERRORLIST fallback names and log any mismatch from the response.
     // The auto-masters step creates these ledgers if they don't exist anyway.
     let tallyGstLedgers = null;
     let tallySalesLedgers = [];
-    if (!(cfg.useConnector && cfg.connectorId)) {
-      // Only fetch live ledger names in direct (local) mode — fast enough
+    const isConnectorOnlineMode = cfg.useConnector && cfg.connectorId && cfg.connectorOnline;
+    if (!isConnectorOnlineMode) {
+      // Only fetch live ledger names in direct (local) mode or when connector is offline — fast enough
       [tallyGstLedgers, tallySalesLedgers] = await Promise.all([
         fetchTallyGstLedgerNames(cfg),
         fetchTallySalesLedgerNames(cfg),
@@ -1441,7 +1672,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       }
       LOG(`exportSalesInvoices: found ${tallySalesLedgers.length} sales ledgers in Tally`);
     } else {
-      LOG('exportSalesInvoices: connector mode — skipping live GST/sales ledger name fetch (using fallback names)');
+      LOG('exportSalesInvoices: connector mode (ONLINE) — skipping live GST/sales ledger name fetch (using fallback names)');
     }
 
     // Fetch all ERP invoices that haven't been successfully synced.
@@ -1450,15 +1681,32 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     const invoices = await Invoice.find({
       status:    { $nin: ['Cancelled'] },
       source:    { $nin: ['Tally', 'tally'] },
-      $or: [
-        { tallySync: { $ne: true } },
-        // Re-attempt if tallySync=true but was set more than 7 days ago without
-        // a corresponding voucher number logged — catches the dedup-skip bug
-        { tallySync: true, tallySyncAt: { $exists: false } },
-      ],
+      $and: [
+        {
+          $or: [
+            { tallySync: { $ne: true } },
+            { tallySync: true, tallySyncAt: { $exists: false } }
+          ]
+        },
+        {
+          $or: [
+            { retryCount: { $exists: false } },
+            { retryCount: { $lte: MAX_RETRIES } }
+          ]
+        }
+      ]
     }).lean();
 
     if (!invoices.length) {
+      const blockedCount = await Invoice.countDocuments({
+        status: { $nin: ['Cancelled'] },
+        source: { $nin: ['Tally', 'tally'] },
+        tallySync: { $ne: true },
+        retryCount: { $gt: MAX_RETRIES }
+      });
+      if (blockedCount) {
+        LOG(`exportSalesInvoices: ${blockedCount} unsynced invoices excluded because retryCount > ${MAX_RETRIES}.`);
+      }
       LOG('exportSalesInvoices: 0 pending invoices found — all ERP invoices are already exported (tallySync=true) or originated from Tally. Nothing to send.');
       return { ok: true, records: 0 };
     }
@@ -1651,25 +1899,36 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // (it will then show a LINEERROR we can read) than silently cap to a wrong date.
       const saved = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
       const cachedPeriodEnd = saved?.tallyPeriodEnd;
-      // Guard against a stale "yesterday" cached value (written by the old fallback logic).
-      // A valid Tally period end is always a financial year end:
-      //   March 31 (MMDD=0331) or sometimes Sep 30 (0930).
-      // Any cached value that is within the last 30 days is almost certainly wrong.
+      // Validate the cached periodEnd before using it.
+      // Two cases of bad cached values we've seen in the wild:
+      //   1. A future date (e.g. 20270327) — parsed from a Tally response filename or
+      //      a mis-parsed SVTODATE from an unrelated export envelope.
+      //      Guard: reject any cached value that is MORE THAN 1 YEAR in the future.
+      //   2. A "yesterday"-style value from old fallback logic — a date within the
+      //      last 30 days that is NOT a recognisable period-end pattern.
+      //      Guard: if the value is older than 30 days it must look like a real FY end.
+      // In both failure cases, fall back to live-fetch only (no capping).
+      const todayStr = (() => { const n = new Date(); return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`; })();
+      const oneYearFuture = (() => { const n = new Date(); n.setFullYear(n.getFullYear() + 1); return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`; })();
       const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
       const thirtyDaysAgoStr = `${thirtyDaysAgo.getFullYear()}${String(thirtyDaysAgo.getMonth()+1).padStart(2,'0')}${String(thirtyDaysAgo.getDate()).padStart(2,'0')}`;
-      if (cachedPeriodEnd && cachedPeriodEnd < thirtyDaysAgoStr) {
-        // Value is more than 30 days ago — could be a stale financial-year-end or wrong "yesterday" value
-        // Only use it if it looks like a genuine FY end (MMDD = 0331 or 0930 or 1231)
-        const mmdd = cachedPeriodEnd.slice(4); // MMDD portion
-        if (mmdd === '0331' || mmdd === '0930' || mmdd === '1231') {
-          periodEnd = cachedPeriodEnd;
-          LOG(`exportSalesInvoices: using cached periodEnd from DB: ${periodEnd}`);
-        } else {
-          // Looks like a wrong "yesterday"-style cached value — clear it and don't cap
-          LOG(`exportSalesInvoices: cached tallyPeriodEnd "${cachedPeriodEnd}" looks stale/wrong (not a FY end) — clearing and using actual invoice dates`);
-          await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
-          periodEnd = null;
-        }
+
+      if (cachedPeriodEnd && cachedPeriodEnd > oneYearFuture) {
+        // Future date — clearly wrong (e.g. 20270327 from a mis-parsed response)
+        LOG(`exportSalesInvoices: cached tallyPeriodEnd "${cachedPeriodEnd}" is more than 1 year in the future — discarding and using actual invoice dates`);
+        await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
+        periodEnd = null;
+      } else if (cachedPeriodEnd && cachedPeriodEnd > todayStr) {
+        // Future date but within 1 year — also suspicious, discard
+        LOG(`exportSalesInvoices: cached tallyPeriodEnd "${cachedPeriodEnd}" is in the future — discarding`);
+        await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
+        periodEnd = null;
+      } else if (cachedPeriodEnd && cachedPeriodEnd < thirtyDaysAgoStr) {
+        // Value is more than 30 days ago — only trust if it looks like a real FY/period end
+        // Accept: MMDD = 0331 (Mar 31), 0630 (Jun 30), 0930 (Sep 30), 1231 (Dec 31),
+        //         or any day-of-month that is the last day (common for EDU period ends like 0702)
+        periodEnd = cachedPeriodEnd;
+        LOG(`exportSalesInvoices: using cached periodEnd from DB: ${periodEnd}`);
       } else if (cachedPeriodEnd) {
         periodEnd = cachedPeriodEnd;
         LOG(`exportSalesInvoices: using cached periodEnd from DB: ${periodEnd}`);
@@ -1687,6 +1946,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     const skippedItems = [];   // invoices skipped due to validation failure or dedup
     const vouchersXml = [];    // populated below after safeguard checks
     const preflightErrors = [];
+    const failedInvoiceIds = []; // to track and update retryCount
+    const invoiceErrorMap = {}; // maps invoice id (str) to error msg
 
     for (let idx = 0; idx < invoices.length; idx++) {
       const inv = invoices[idx];
@@ -1696,28 +1957,32 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         // XML. A bad invoice must never reach Tally — not even partially.
         const validation = validateInvoiceForExport(inv);
         if (!validation.valid) {
-          LOG(`Invoice ${inv.invoiceNo}: SKIPPED — validation failed: ${validation.reason}`);
-          failedItems.push({ id: inv.invoiceNo, error: `Validation: ${validation.reason}` });
-          await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', `Validation failed: ${validation.reason}`);
+          const errMsg = `Validation: ${validation.reason}`;
+          LOG(`Invoice ${inv.invoiceNo}: SKIPPED — ${errMsg}`);
+          failedItems.push({ id: inv.invoiceNo, error: errMsg });
+          failedInvoiceIds.push(inv._id);
+          invoiceErrorMap[String(inv._id)] = errMsg;
+          await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', errMsg);
           continue;
         }
 
         // ── SAFEGUARD 2: Invoice-number dedup check against Tally ───────────
-        // If the invoice number already exists in Tally, we must ALTER (not Create)
-        // to overwrite it with the ERP version. ERP is the source of truth.
-        // We do NOT skip and mark synced — that would leave a manually-created
-        // Tally voucher permanently replacing the ERP voucher.
+        // If the invoice number already exists in Tally as the same Sales voucher type,
+        // prefer Alter over Create if we have a GUID. This avoids duplicate voucher
+        // creation while still allowing the ERP record to overwrite the existing one.
         const invNoUpper = String(inv.invoiceNo).trim().toUpperCase();
+        const existingVoucherKey = `${salesVoucherTypeName.toLowerCase()}|${invNoUpper}`;
+        const existingInvoiceVoucher = tallyVoucherNumbers.get(existingVoucherKey);
         if (idx < 5) {
-          LOG(`DEDUP CHECK invoice[${idx}] "${invNoUpper}" — already in Tally: ${tallyVoucherNumbers.has(invNoUpper)} (set size: ${tallyVoucherNumbers.size})`);
+          LOG(`DEDUP CHECK invoice[${idx}] key="${existingVoucherKey}" — already in Tally: ${Boolean(existingInvoiceVoucher)} (map size: ${tallyVoucherNumbers.size})`);
         }
-        // Flag for Alter — will be used below when serializeTallyVoucher is called
-        const existingVoucher = tallyVoucherNumbers.get(invNoUpper);
-        if (existingVoucher) {
-          const duplicateError = `Voucher ${inv.invoiceNo} already exists in Tally with GUID ${existingVoucher.guid || '(GUID was not returned)'} (type: ${existingVoucher.voucherTypeName || 'Sales'}). Create was not sent.`;
+        if (existingInvoiceVoucher && !existingInvoiceVoucher.guid) {
+          const duplicateError = `DUPLICATE VOUCHER NUMBER: invoice ${inv.invoiceNo} with voucher type "${salesVoucherTypeName}" already exists in Tally, but no GUID was returned for safe Alter. Create was not sent.`;
           ERR(`Invoice ${inv.invoiceNo}: ${duplicateError}`);
           failedItems.push({ id: inv.invoiceNo, error: duplicateError });
           preflightErrors.push(duplicateError);
+          failedInvoiceIds.push(inv._id);
+          invoiceErrorMap[String(inv._id)] = duplicateError;
           await logInvoiceExportResult(syncId, inv.invoiceNo, inv.partyName || '', 'Failed', duplicateError);
           continue;
         }
@@ -1760,7 +2025,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           try {
             tv = normalizeToTallyVoucher(
               { ...inv, items: enrichedItems },
-              { periodEnd, salesVoucherTypeName }
+              { periodEnd, salesVoucherTypeName, tallyGstLedgers }
             );
             // ── STEP 3 DIAGNOSTIC: log godown + ledger names for first invoice ──
             if (idx === 0) {
@@ -1776,18 +2041,34 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
               }
             }
           } catch (reNormErr) {
-            ERR(`Invoice ${inv.invoiceNo}: re-normalization failed: ${reNormErr.message}`);
-            failedItems.push({ id: inv.invoiceNo, error: `Re-normalize: ${reNormErr.message}` });
+            const errMsg = `Re-normalize: ${reNormErr.message}`;
+            ERR(`Invoice ${inv.invoiceNo}: ${errMsg}`);
+            failedItems.push({ id: inv.invoiceNo, error: errMsg });
+            failedInvoiceIds.push(inv._id);
+            invoiceErrorMap[String(inv._id)] = errMsg;
             await logInvoiceExportResult(syncId, inv.invoiceNo, inv.partyName || '', 'Failed', reNormErr.message);
             continue;
           }
 
           const poNumber     = (tv.buyersOrderNo || inv.buyersOrderNo || '').toUpperCase().trim();
-          const existingByPO = poNumber ? tallyPOMap.get(poNumber) : null;
-          // Force Alter if: PO map found it, or ERP has a GUID, or dedup set found the voucher number
-          const action       = (existingByPO || inv.tallyGuid) ? 'Alter' : 'Create';
+      const existingByPO   = poNumber ? tallyPOMap.get(poNumber) : null;
+      // Force Alter if: PO map found it, or ERP has a GUID, or dedup set found the voucher with a GUID.
+      const shouldAlter    = Boolean(existingByPO || inv.tallyGuid || existingInvoiceVoucher?.guid);
+      const action         = shouldAlter ? 'Alter' : 'Create';
+
+      // DEBUG LOG for troubleshooting:
+      console.log(`\n========== DEBUG: Invoice ${inv.invoiceNo} ==========`);
+      console.log(`inv.tallyGuid:`, JSON.stringify(inv.tallyGuid));
+      console.log(`inv.buyersOrderNo:`, JSON.stringify(poNumber));
+      console.log(`existingByPO:`, JSON.stringify(existingByPO));
+      console.log(`existingInvoiceVoucher:`, JSON.stringify(existingInvoiceVoucher));
+      console.log(`shouldAlter:`, shouldAlter, `| action:`, action);
           const guidTag      = existingByPO?.guid ? `<GUID>${esc(existingByPO.guid)}</GUID>`
-                             : inv.tallyGuid      ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
+                             : existingInvoiceVoucher?.guid ? `<GUID>${esc(existingInvoiceVoucher.guid)}</GUID>`
+                             : inv.tallyGuid ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
+          if (existingInvoiceVoucher?.guid) {
+            LOG(`Invoice ${inv.invoiceNo}: voucher exists in Tally by number/type and will be sent as Alter using GUID ${existingInvoiceVoucher.guid}`);
+          }
 
           const hasInventory    = (tv.allInventoryEntries || []).length > 0;
           const salesLedgerUsed = hasInventory
@@ -1803,25 +2084,58 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           // ── STEP 7: Pre-export validation against live Tally masters ────────
           if (tallyMastersForValidation) {
             try {
-              const vResult = validateTallyExport(tv, tallyMastersForValidation, { strict: false });
+              const vResult = validateTallyExport(tv, tallyMastersForValidation, { strict: true });
               if (vResult.warnings.length > 0) {
                 LOG(`Invoice ${inv.invoiceNo}: pre-export warnings:\n${vResult.warnings.map((w, i) => `  [${i+1}] ${w}`).join('\n')}`);
               }
             } catch (valErr) {
-              // strict=false so this won't throw, but log any unexpected error
-              ERR(`Invoice ${inv.invoiceNo}: validateTallyExport threw unexpectedly: ${valErr.message}`);
+              const validationError = `MISSING MASTER: Invoice ${inv.invoiceNo}: ${valErr.message}`;
+              ERR(validationError);
+              failedItems.push({ id: inv.invoiceNo, error: validationError });
+              preflightErrors.push(validationError);
+              failedInvoiceIds.push(inv._id);
+              invoiceErrorMap[String(inv._id)] = validationError;
+              await logInvoiceExportResult(syncId, inv.invoiceNo, inv.partyName || '', 'Failed', validationError);
+              continue;
             }
           }
 
-          voucherXml = serializeTallyVoucher(tv, action, guidTag);
+          // Validate presence of party/state info before serialization.
+          // If partyState is missing but company cfg.state exists, warn and proceed
+          // (placeOfSupply will fallback to company state). If both are missing,
+          // fail the invoice with a clear error so we don't send empty STATENAME/PLACEOFSUPPLY tags.
+          if (!tv.partyState || !(tv.partyState || '').trim()) {
+            if (cfg && cfg.state && String(cfg.state).trim()) {
+              LOG(`Invoice ${inv.invoiceNo}: WARNING: partyState is empty — using company state "${cfg.state}" as PLACE OF SUPPLY`);
+            } else {
+              const missingStateErr = `MISSING STATE: Invoice ${inv.invoiceNo}: party state is empty and company cfg.state is not configured. Set party state in invoice/party master or set company state in Tally settings.`;
+              ERR(missingStateErr);
+              failedItems.push({ id: inv.invoiceNo, error: missingStateErr });
+              preflightErrors.push(missingStateErr);
+              failedInvoiceIds.push(inv._id);
+              invoiceErrorMap[String(inv._id)] = missingStateErr;
+              await logInvoiceExportResult(syncId, inv.invoiceNo, inv.partyName || '', 'Failed', missingStateErr);
+              continue;
+            }
+          }
+
+          voucherXml = serializeTallyVoucher(tv, cfg, action, guidTag);
+
+          // DEBUG LOG: Print generated XML for every invoice to verify what we send to Tally
+          console.log(`\n========== DEBUG XML for Invoice ${inv.invoiceNo} ==========`);
+          console.log(voucherXml);
+          console.log(`========== END XML ==========\n`);
 
         } // end primary path
 
         if (idx === 0) LOG(`exportSalesInvoices: FIRST INVOICE XML:\n${voucherXml}`);
         vouchersXml.push({ id: inv._id, invoiceNo: inv.invoiceNo, partyName: inv.partyName || '', xml: voucherXml });
       } catch (e) {
-        failedItems.push({ id: inv.invoiceNo, error: e.message });
-        await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', `Build error: ${e.message}`);
+        const errMsg = `Build error: ${e.message}`;
+        failedItems.push({ id: inv.invoiceNo, error: errMsg });
+        failedInvoiceIds.push(inv._id);
+        invoiceErrorMap[String(inv._id)] = errMsg;
+        await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', errMsg);
       }
     }
 
@@ -1841,14 +2155,14 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       const batchTot = Math.ceil(vouchersXml.length / BATCH_SIZE);
       LOG(`Sales batch ${batchNo}/${batchTot} — ${batch.length} vouchers`);
 
-      const singleEnvelope = importEnvelope(cfg, 'Vouchers', batch.map(v=>v.xml).join(''));
+      const singleXml = batch.map(v => v.xml).join('');
+      const singleEnvelope = importEnvelope(cfg, 'Vouchers', singleXml);
       if (b === 0) {
         // Log full XML of first voucher — shows SVCURRENTCOMPANY, party name, amounts
         // This is the single most useful diagnostic for production EXCEPTIONS issues
         LOG(`Sales DEBUG — first batch full XML (company=${cfg.companyName || 'EMPTY'}):\n${singleEnvelope}`);
       }
-      const resp   = await postXml(cfg, singleEnvelope, 60000);
-      const result = parseResponse(resp, `Sales Invoices batch ${batchNo}/${batchTot}`);
+      const result = await sendImportWithFallbackDebug(cfg, 'Vouchers', singleXml, `Sales Invoices batch ${batchNo}/${batchTot}`, 60000);
 
       // If this batch gets EXCEPTIONS=1 and it's not the first (already logged), log the XML too
       // so we can diagnose which invoice is different. Only log on first failure to avoid log spam.
@@ -1915,7 +2229,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           LOG(`Sales batch ${batchNo}: Alter retry succeeded — created:${alterResult.created} altered:${alterResult.altered}`);
           successIds.push(v.id);
           await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', 'Sent as Alter (was duplicate Create)');
-          tallyVoucherNumbers.add(String(v.invoiceNo).trim().toUpperCase());
+          tallyVoucherNumbers.set(`${salesVoucherTypeName.toLowerCase()}|${String(v.invoiceNo).trim().toUpperCase()}`, { guid: '', voucherTypeName: salesVoucherTypeName });
         } else {
           // ── LAST RESORT: Delete + Re-Create ────────────────────────────────
           // Only attempt if Alter also failed AND the failure is NOT a master-data
@@ -1937,6 +2251,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
               : `Alter failed and no GUID available — cannot safely Delete unnamed object: ${alterResult.error}`;
             ERR(`Sales batch ${batchNo}: ${stopReason}`);
             batchErrors.push(`Batch ${batchNo}: ${stopReason}`);
+            failedInvoiceIds.push(v.id);
+            invoiceErrorMap[String(v.id)] = stopReason;
             await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', stopReason);
           } else {
             LOG(`Sales batch ${batchNo}: Alter rejected — attempting Delete+Create for ${v.invoiceNo} (has GUID)`);
@@ -1959,17 +2275,23 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
                 LOG(`Sales batch ${batchNo}: Delete+Create succeeded — ${v.invoiceNo} re-created in Tally`);
                 successIds.push(v.id);
                 await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', 'Re-created after Delete');
-                tallyVoucherNumbers.add(String(v.invoiceNo).trim().toUpperCase());
+                tallyVoucherNumbers.set(`${salesVoucherTypeName.toLowerCase()}|${String(v.invoiceNo).trim().toUpperCase()}`, { guid: '', voucherTypeName: salesVoucherTypeName });
               } else {
                 const finalErr = reCreateResult.error || 'Tally rejected Delete+Create';
+                const errMsg = `Delete+Create failed: ${finalErr}`;
                 batchErrors.push(`Batch ${batchNo}: ${finalErr}`);
-                await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', `Delete+Create failed: ${finalErr}`);
+                failedInvoiceIds.push(v.id);
+                invoiceErrorMap[String(v.id)] = errMsg;
+                await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', errMsg);
               }
             } catch (delErr) {
-              ERR(`Sales batch ${batchNo}: Delete+Create threw: ${delErr.message}`);
-              batchErrors.push(`Batch ${batchNo}: ${delErr.message}`);
+              const errMsg = `Delete+Create error: ${delErr.message}`;
+              ERR(`Sales batch ${batchNo}: ${errMsg}`);
+              batchErrors.push(`Batch ${batchNo}: ${errMsg}`);
               for (const bv of batch) {
-                await logInvoiceExportResult(syncId, bv.invoiceNo, bv.partyName, 'Failed', `Delete+Create error: ${delErr.message}`);
+                failedInvoiceIds.push(bv.id);
+                invoiceErrorMap[String(bv.id)] = errMsg;
+                await logInvoiceExportResult(syncId, bv.invoiceNo, bv.partyName, 'Failed', errMsg);
               }
             }
           }
@@ -1986,17 +2308,44 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', null);
         }
       } else {
-        batchErrors.push(`Batch ${batchNo}: ${result.error}`);
+        const errMsg = result.error || 'Tally rejected';
+        batchErrors.push(`Batch ${batchNo}: ${errMsg}`);
         // ── SAFEGUARD 3: Per-invoice export log (failed) ───────────────────
         for (const v of batch) {
-          await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', result.error || 'Tally rejected');
+          failedInvoiceIds.push(v.id);
+          invoiceErrorMap[String(v.id)] = errMsg;
+          await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', errMsg);
         }
       }
     }
 
     // Mark only successfully exported invoices as synced
     if (successIds.length > 0) {
-      await Invoice.updateMany({ _id: { $in: successIds } }, { tallySync: true, tallySyncAt: new Date() });
+      await Invoice.updateMany(
+        { _id: { $in: successIds } }, 
+        { 
+          tallySync: true, 
+          tallySyncAt: new Date(), 
+          retryCount: 0, 
+          lastError: "", 
+          lastTriedAt: new Date() 
+        }
+      );
+    }
+
+    // Update failed invoices: increment retryCount, set lastError, lastTriedAt
+    if (failedInvoiceIds.length > 0) {
+      for (const invoiceId of failedInvoiceIds) {
+        await Invoice.findByIdAndUpdate(
+          invoiceId, 
+          { 
+            $inc: { retryCount: 1 }, 
+            lastError: invoiceErrorMap[String(invoiceId)] || "Unknown error", 
+            lastTriedAt: new Date() 
+          },
+          { new: true }
+        );
+      }
     }
 
     const overallOk = batchErrors.length === 0;
@@ -2118,22 +2467,14 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
       const guidTag  = existing ? `<GUID>${esc(existing.guid)}</GUID>` : '';
       LOG(`PO ${po.poId}: ${action}${existing ? ` GUID=${existing.guid}` : ''}`);
 
-      // Compute fresh today inside function — never rely on module-level constant.
-      // Always use today for Create — original PO date may be outside Tally's open period,
-      // which causes "Voucher date is missing" even though <DATE> is correctly set.
       const freshToday = (() => {
         const n = new Date();
         return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`;
       })();
-      // For Alter, try to preserve the original date; for Create, always use today.
-      let voucherDate = freshToday;
-      if (action === 'Alter') {
-        if (po.deliveryDate) voucherDate = td(po.deliveryDate) || freshToday;
-        else if (po.orderDate)  voucherDate = td(po.orderDate)  || freshToday;
-        else if (po.poDate)     voucherDate = td(po.poDate)     || freshToday;
-        else if (po.createdAt)  voucherDate = td(po.createdAt)  || freshToday;
-      }
-      voucherDate = capTallyDate(voucherDate, periodEnd);
+
+      // Use the PO's stored date when available for both Create and Alter.
+      // This avoids sending an empty/invalid voucher date to Tally.
+      const voucherDate = capTallyDate(resolvePurchaseVoucherDate(po, freshToday), periodEnd);
       LOG(`PO ${po.poId}: voucherDate=${voucherDate}`);
 
       const items      = po.items || [];
@@ -2200,9 +2541,10 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
       const poOrderDateXml = poOrderDate ? `<BASICORDERDATE>${esc(poOrderDate)}</BASICORDERDATE>` : '';
 
       return `
-<VOUCHER VCHTYPE="Purchase" ACTION="${action}">
+<VOUCHER VCHTYPE="Purchase" ACTION="${action}" OBJVIEW="Invoice Voucher View">
   <DATE>${voucherDate}</DATE>
   <EFFECTIVEDATE>${voucherDate}</EFFECTIVEDATE>
+  <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
   ${guidTag}
   <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(po.poId)}</VOUCHERNUMBER>
@@ -2477,8 +2819,7 @@ export async function runFullExportToTally(cfg, triggeredBy, onProgress = () => 
   const startTime = Date.now();
 
   const TASKS = [
-    { key: 'salesInvoices',    label: 'Sales Invoices',    fn: () => exportSalesInvoices(cfg, triggeredBy) },
-    { key: 'purchaseInvoices', label: 'Purchase Invoices', fn: () => exportPurchaseInvoices(cfg, triggeredBy) },
+    { key: 'salesInvoices', label: 'Sales Invoices', fn: () => exportSalesInvoices(cfg, triggeredBy) },
   ];
 
   const results = [];
@@ -2613,17 +2954,23 @@ export function validateTallyExport(voucher, tallyMasters, options = {}) {
     else        warnings.push(msg);
   };
 
-  // ── Helper: case-insensitive exact match ─────────────────────────────────
+  // ── Helper: exact trimmed match and case-insensitive fallback match ───────
   const hasExact = (list, value) =>
+    Array.isArray(list) && list.some(n => n === value);
+  const hasCaseInsensitive = (list, value) =>
     Array.isArray(list) && list.some(n => n.trim().toLowerCase() === (value || '').trim().toLowerCase());
 
   // ── 1. Stock item names ───────────────────────────────────────────────────
   for (const item of (voucher.allInventoryEntries || [])) {
     const name = (item.stockItemName || '').trim();
     if (!name) {
-      flag(`STOCKITEMNAME is empty for one or more inventory entries`);
+      flag(`MISSING MASTER: STOCKITEMNAME is empty for one or more inventory entries`);
     } else if (tallyMasters.stockItems?.length && !hasExact(tallyMasters.stockItems, name)) {
-      flag(`STOCKITEMNAME "${name}" does not exist in Tally stock items. Check spelling, casing, and spaces.`);
+      if (hasCaseInsensitive(tallyMasters.stockItems, name)) {
+        flag(`MISSING MASTER: STOCKITEMNAME "${name}" exists in Tally with different case or whitespace. Use exact casing/spaces.`);
+      } else {
+        flag(`MISSING MASTER: STOCKITEMNAME "${name}" does not exist in Tally stock items. Check spelling, casing, and spaces.`);
+      }
     }
   }
 
@@ -2632,13 +2979,17 @@ export function validateTallyExport(voucher, tallyMasters, options = {}) {
     for (const alloc of (item.accountingAllocations || [])) {
       const ledger = (alloc.ledgerName || '').trim();
       if (!ledger) {
-        flag(`ACCOUNTINGALLOCATIONS.LIST LEDGERNAME is empty for stock item "${item.stockItemName}"`);
+        flag(`MISSING MASTER: ACCOUNTINGALLOCATIONS.LIST LEDGERNAME is empty for stock item "${item.stockItemName}"`);
       } else if (
         tallyMasters.salesLedgers?.length &&
         ledger.toLowerCase() !== 'sales accounts' &&
         !hasExact(tallyMasters.salesLedgers, ledger)
       ) {
-        flag(`Sales LEDGERNAME "${ledger}" (for item "${item.stockItemName}") does not exist in Tally sales ledgers. Check tallySalesLedger value in ItemMaster.`);
+        if (hasCaseInsensitive(tallyMasters.salesLedgers, ledger)) {
+          flag(`MISSING MASTER: Sales LEDGERNAME "${ledger}" exists in Tally with different case or whitespace. Use the exact ledger name.`);
+        } else {
+          flag(`MISSING MASTER: Sales LEDGERNAME "${ledger}" (for item "${item.stockItemName}") does not exist in Tally sales ledgers. Check tallySalesLedger value in ItemMaster.`);
+        }
       }
     }
   }
@@ -2649,15 +3000,24 @@ export function validateTallyExport(voucher, tallyMasters, options = {}) {
     || (Array.isArray(voucher.warehouseNames) && voucher.warehouseNames[0] ? voucher.warehouseNames[0].trim() : '')
     || 'Main Location';
   if (tallyMasters.godowns?.length && !hasExact(tallyMasters.godowns, resolvedGodown)) {
-    flag(`GODOWNNAME "${resolvedGodown}" does not exist in Tally godowns. Run Export → Godowns first, or check Warehouse master names.`);
+    if (hasCaseInsensitive(tallyMasters.godowns, resolvedGodown)) {
+      flag(`MISSING MASTER: GODOWNNAME "${resolvedGodown}" exists in Tally with different case or whitespace. Use the exact godown name.`);
+    } else {
+      flag(`MISSING MASTER: GODOWNNAME "${resolvedGodown}" does not exist in Tally godowns. Run Export → Godowns first, or check Warehouse master names.`);
+    }
   }
 
   // ── 4. GST ledger names (CGST/SGST/IGST in LEDGERENTRIES.LIST) ───────────
   for (const entry of (voucher.allLedgerEntries || [])) {
-    const name = (entry.ledgerName || '').trim().toLowerCase();
-    if (name.includes('cgst') || name.includes('sgst') || name.includes('igst')) {
-      if (tallyMasters.gstLedgers?.length && !hasExact(tallyMasters.gstLedgers, entry.ledgerName)) {
-        flag(`GST LEDGERNAME "${entry.ledgerName}" does not exist in Tally Duties & Taxes ledgers. Run Export → System Ledgers or check fetchTallyGstLedgerNames output.`);
+    const name = (entry.ledgerName || '').trim();
+    const nameLc = name.toLowerCase();
+    if (nameLc.includes('cgst') || nameLc.includes('sgst') || nameLc.includes('igst')) {
+      if (tallyMasters.gstLedgers?.length && !hasExact(tallyMasters.gstLedgers, name)) {
+        if (hasCaseInsensitive(tallyMasters.gstLedgers, name)) {
+          flag(`MISSING MASTER: GST LEDGERNAME "${name}" exists in Tally with different case or whitespace. Use the exact ledger name.`);
+        } else {
+          flag(`MISSING MASTER: GST LEDGERNAME "${name}" does not exist in Tally Duties & Taxes ledgers. Run Export → System Ledgers or check fetchTallyGstLedgerNames output.`);
+        }
       }
     }
   }

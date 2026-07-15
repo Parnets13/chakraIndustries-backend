@@ -166,7 +166,7 @@ This auto-waits until Tally responds, then imports all vendors/clients/ledgers.
 |---|---|---|
 | Cloudflare tunnel service | `sc query cloudflared` | `STATE: 4 RUNNING` |
 | Backend running via PM2 | `pm2 list` | `chakra-erp-backend` → `online` |
-| Backend responding | `curl http://localhost:5001/api/api/health` | `{"ok":true}` |
+| Backend responding | `curl http://localhost:5000/api/api/health` | `{"ok":true}` |
 | Tally reachable locally | `curl -X POST http://localhost:9000 -d "<test/>"` | Any response (not refused) |
 | Tunnel reachable externally | Open `https://erp.majesticmall.net/api/health` | `{"ok":true}` |
 

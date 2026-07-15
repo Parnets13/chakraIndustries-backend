@@ -1,0 +1,110 @@
+#!/usr/bin/env node
+
+import axios from 'axios';
+import { readFileSync } from 'fs';
+
+const TallyUrl = 'http://localhost:9000';
+
+// Minimal voucher - just party ledger + tax ledgers, NO inventory
+const minimalVoucher = `<ENVELOPE>
+<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA>
+  <REQUESTDESC>
+    <REPORTNAME>Vouchers</REPORTNAME>
+    <STATICVARIABLES>
+      <SVCURRENTCOMPANY>SRI CHAKRA INDUSTRIES</SVCURRENTCOMPANY>
+      <SVSHOWERRORLIST>Yes</SVSHOWERRORLIST>
+      <SVEXPORTFORMAT>XML (Data Interchange)</SVEXPORTFORMAT>
+    </STATICVARIABLES>
+  </REQUESTDESC>
+  <REQUESTDATA>
+    <TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+<VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">
+  <DATE TYPE="Date">20260714</DATE>
+  <EFFECTIVEDATE TYPE="Date">20260714</EFFECTIVEDATE>
+  <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
+  
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>TEST-MINIMAL-001</VOUCHERNUMBER>
+  <BASICORDERDATE>20260714</BASICORDERDATE>
+  <NARRATION>Test Minimal Voucher</NARRATION>
+  <PARTYLEDGERNAME>BI Worldwide India PVT LTD</PARTYLEDGERNAME>
+  <ISINVOICE>Yes</ISINVOICE>
+  <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>
+  <STATENAME>Karnataka</STATENAME>
+  <COUNTRYOFRESIDENCE>India</COUNTRYOFRESIDENCE>
+  <PARTYGSTIN>29AAECB5878L1ZY</PARTYGSTIN>
+  <PLACEOFSUPPLY>Karnataka</PLACEOFSUPPLY>
+  <GSTREGISTRATION TAXTYPE="GST" TAXREGISTRATION="29ABWFS0002M1ZR">Karnataka Registration</GSTREGISTRATION>
+  <CMPGSTIN>29ABWFS0002M1ZR</CMPGSTIN>
+  <CMPGSTSTATE>Karnataka</CMPGSTSTATE>
+  <CMPGSTREGISTRATIONTYPE>Regular</CMPGSTREGISTRATIONTYPE>
+  <VCHSTATUSTAXUNIT>Karnataka Registration</VCHSTATUSTAXUNIT>
+  
+  <LEDGERENTRIES.LIST>
+    <LEDGERNAME>BI Worldwide India PVT LTD</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
+    <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
+    <AMOUNT>-100.00</AMOUNT>
+  </LEDGERENTRIES.LIST>
+  
+  <LEDGERENTRIES.LIST>
+    <LEDGERNAME>CGST</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <AMOUNT>2.50</AMOUNT>
+  </LEDGERENTRIES.LIST>
+  
+  <LEDGERENTRIES.LIST>
+    <LEDGERNAME>SGST</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <AMOUNT>2.50</AMOUNT>
+  </LEDGERENTRIES.LIST>
+  
+  <LEDGERENTRIES.LIST>
+    <LEDGERNAME>Sales</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+    <ISPARTYLEDGER>No</ISPARTYLEDGER>
+    <AMOUNT>95.00</AMOUNT>
+  </LEDGERENTRIES.LIST>
+
+</VOUCHER>
+
+    </TALLYMESSAGE>
+  </REQUESTDATA>
+</IMPORTDATA></BODY>
+</ENVELOPE>`;
+
+async function test() {
+  console.log('Sending minimal test voucher to Tally...\n');
+  
+  try {
+    const res = await axios.post(TallyUrl, minimalVoucher, {
+      headers: { 'Content-Type': 'text/xml' },
+      timeout: 10000
+    });
+    
+    const response = res.data;
+    console.log('✓ Response received:');
+    console.log(response);
+    
+    if (response.includes('EXCEPTIONS>1')) {
+      console.log('\n❌ EXCEPTIONS=1 - Tally still rejecting');
+    } else if (response.includes('CREATED>1')) {
+      console.log('\n✓ CREATED=1 - Voucher accepted!');
+    } else {
+      console.log('\n⚠ Unexpected response format');
+    }
+    
+  } catch (e) {
+    console.error('ERROR:', e.message);
+  }
+}
+
+test();

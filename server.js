@@ -182,7 +182,7 @@ app.use(cors({
     // Allow requests with no origin (mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
     const allowed = [
-      'http://localhost:5001/api/api',
+      'http://localhost:5000/api/api',
       'https://erp.majesticmall.net',
       'https://majesticmall.net',
       'http://localhost:3000',
@@ -313,6 +313,10 @@ connectDB();
 // Create HTTP server and attach Socket.IO
 const httpServer = http.createServer(app);
 initConnectorServer(httpServer);
+
+// Increase server timeout for long-running SSE export connections (2 hours)
+httpServer.timeout = 2 * 60 * 60 * 1000; // 2 hours
+httpServer.keepAliveTimeout = 65000; // 65 seconds, longer than heartbeat interval
 
 httpServer.listen(PORT, async () => {
   console.log(`✓ Server running on port ${PORT}`);

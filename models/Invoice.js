@@ -232,6 +232,10 @@ const invoiceSchema = new mongoose.Schema({
     sparse: true,
     index: true
   },
+  // Tally retry tracking
+  retryCount: { type: Number, default: 0 },
+  lastError: { type: String, default: '' },
+  lastTriedAt: { type: Date },
   tallyAlterId: {
     type: String,
     trim: true

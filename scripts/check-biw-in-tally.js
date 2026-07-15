@@ -1,32 +1,49 @@
-import 'dotenv/config';
+/**
+ * check-biw-in-tally.js
+ * Checks if BIW11-BIW20 vouchers already exist in Tally
+ */
+import dotenv from 'dotenv';
+dotenv.config();
 import mongoose from 'mongoose';
-import axios from 'axios';
+import { postXmlWithRetry } from '../services/tallyFetchEngine.js';
 import TallyConfig from '../models/TallyConfig.js';
 
-await mongoose.connect(process.env.MONGO_URI);
-const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
-const url = cfg.tallyLocalUrl || 'http://localhost:9000';
-const co  = (cfg.companyName || 'SRI CHAKRA INDUSTRIES').trim().toUpperCase();
+await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URI);
+const cfg = await TallyConfig.findOne({}).lean();
 
 const xml = `<ENVELOPE>
-<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>BIWList</ID></HEADER>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>BIWVouchers</ID></HEADER>
 <BODY><DESC>
-<STATICVARIABLES><SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
-<TDL><TDLMESSAGE><COLLECTION NAME="BIWList"><TYPE>Voucher</TYPE><FETCH>VoucherNumber,VoucherTypeName,Date</FETCH></COLLECTION></TDLMESSAGE></TDL>
-</DESC></BODY></ENVELOPE>`;
+  <STATICVARIABLES>
+    <SVCURRENTCOMPANY>SRI CHAKRA INDUSTRIES</SVCURRENTCOMPANY>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    <SVFROMDATE>20260701</SVFROMDATE>
+    <SVTODATE>20260731</SVTODATE>
+  </STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="BIWVouchers">
+      <TYPE>Voucher</TYPE>
+      <FETCH>VoucherNumber, Date, VoucherTypeName, PartyLedgerName, Amount</FETCH>
+    </COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
+</ENVELOPE>`;
 
-const r = await axios.post(url, xml, { headers:{'Content-Type':'text/xml'}, timeout:20000 });
-const b = String(r.data||'');
-const blocks = [...b.matchAll(/<VOUCHER[^>]*>([\s\S]*?)<\/VOUCHER>/gi)].map(m=>m[1]);
-const biw = blocks
-  .map(bl=>({
-    vno:  (bl.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/i)?.[1]||'').trim(),
-    type: (bl.match(/<VOUCHERTYPENAME>(.*?)<\/VOUCHERTYPENAME>/i)?.[1]||'').trim(),
-    date: (bl.match(/<DATE>(.*?)<\/DATE>/i)?.[1]||'').trim(),
-  }))
-  .filter(v => v.vno.startsWith('BIW'));
+const resp = await postXmlWithRetry(cfg, xml, 30000, 1);
 
-console.log(`BIW vouchers in Tally (${biw.length}):`);
-biw.forEach(v => console.log(`  ${v.vno}  type=${v.type}  date=${v.date}`));
+// Extract voucher numbers
+const voucherMatches = [...resp.matchAll(/<VOUCHERNUMBER[^>]*>(.*?)<\/VOUCHERNUMBER>/gi)];
+const dateMatches = [...resp.matchAll(/<DATE[^>]*>(.*?)<\/DATE>/gi)];
+
+console.log(`\nVouchers in Tally for July 2026 (${voucherMatches.length} found):`);
+for (let i = 0; i < voucherMatches.length; i++) {
+  const vno = voucherMatches[i][1];
+  const dt = dateMatches[i]?.[1] || '?';
+  if (/BIW/i.test(vno)) {
+    console.log(`  *** BIW: ${vno} | date: ${dt}`);
+  } else {
+    console.log(`  ${vno} | date: ${dt}`);
+  }
+}
 
 await mongoose.disconnect();

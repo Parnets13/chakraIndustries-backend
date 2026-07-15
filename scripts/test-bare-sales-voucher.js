@@ -23,7 +23,7 @@ function esc(s) {
 }
 
 async function main() {
-  await mongoose.connect(process.env.MONGODB_URI);
+  await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URI);
   console.log('✓ MongoDB connected');
 
   const cfg = await TallyConfig.findOne().lean();

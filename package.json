@@ -5,8 +5,8 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js",
+    "start": "node scripts/kill-port.js && node server.js",
+    "dev": "node scripts/kill-port.js && nodemon server.js",
     "tally:sync": "node scripts/tallySyncNow.js",
     "tally:fix-config": "node scripts/fixTallyConfig.js",
     "seed": "node seed.js",
@@ -17,8 +17,8 @@
   },
   "dependencies": {
     "axios": "^1.6.0",
-    
     "bcryptjs": "^2.4.3",
+    "chokidar": "^3.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.18.2",
@@ -29,6 +29,7 @@
     "mongoose": "^7.0.0",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.9.14",
+    "semver": "^7.7.1",
     "socket.io": "^4.8.3",
     "xlsx": "^0.18.5"
   },
