@@ -363,37 +363,11 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     }
 
   // ── Balance check ─────────────────────────────────────────────────────────
-  // Debug: log all entries before validation so any future imbalance is traceable.
-  console.log('[normalizeToTallyVoucher] DEBUG balance check for invoice', invoiceNo);
-  console.log('  allLedgerEntries:');
-  allLedgerEntries.forEach((e, i) =>
-    console.log(`    [${i}] ${e.ledgerName} => amount=${e.amount}`)
-  );
-  console.log('  allInventoryEntries:');
-  allInventoryEntries.forEach((e, i) =>
-    console.log(`    [${i}] ${e.stockItemName} => amount=${e.amount}`)
-  );
-  console.log(`  Party Ledger amount  : ${-grandTotal}`);
-  console.log(`  Sales Credit Ledger  : "${salesCreditLedger}" amount=${totalTax > 0 ? +salesBase : +grandTotal}`);
-  console.log(`  CGST amount          : ${totalCGST}`);
-  console.log(`  SGST amount          : ${totalSGST}`);
-  console.log(`  IGST amount          : ${totalIGST}`);
-  console.log(`  Sales Base           : ${salesBase}`);
-  console.log(`  Grand Total          : ${grandTotal}`);
-
-  // Tally requires sum of all ledger entry amounts = 0.
-  // When using inventory entries, the sales credit is in ACCOUNTINGALLOCATIONS,
-  // not in LEDGERENTRIES, so we need to add the sum of inventory entry amounts
-  // (which are negative, representing the sales credit) to balance.
   const ledgerSum = +allLedgerEntries.reduce((s, e) => s + e.amount, 0).toFixed(2);
   const inventorySum = useInventory 
     ? +allInventoryEntries.reduce((s, e) => s + (e.amount || 0), 0).toFixed(2)
     : 0;
   const totalSum = (+ledgerSum + +inventorySum).toFixed(2);
-  
-  console.log(`  Final balance (sum)  : ${totalSum}  (must be 0 ± 0.01)`);
-  console.log(`    Ledger sum         : ${ledgerSum}`);
-  if (useInventory) console.log(`    Inventory sum      : ${inventorySum}`);
 
   if (Math.abs(+totalSum) > 0.01) {
     throw new Error(
@@ -435,13 +409,47 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // ── Ship To fields ────────────────────────────────────────────────────────
   const shipToName     = (invoiceData.shipToName    || invoiceData.shipToMailingName || '').toString().trim();
   const shipToAddress  = (invoiceData.shipToAddress || '').toString().trim();
-  const shipToCity     = (invoiceData.shipToCity    || '').toString().trim();
-  const shipToState    = (invoiceData.shipToState   || '').toString().trim();
+  let   shipToCity     = (invoiceData.shipToCity    || '').toString().trim();
+  let   shipToState    = (invoiceData.shipToState   || '').toString().trim();
   const shipToGST      = (invoiceData.shipToGST     || '').toString().trim();
   // Ship-to data must not inherit the bill-to postal code.  Doing so creates a
   // misleading partial consignee block (a name from ship-to plus a pin from the
   // customer) which Tally can silently reject during GST validation.
-  const shipToPincode  = (invoiceData.shipToPincode || '').toString().trim();
+  let   shipToPincode  = (invoiceData.shipToPincode || '').toString().trim();
+
+  // ── Extract pincode/state from shipToAddress when separate fields are empty ─
+  // Raw data from Tally sync often arrives as one concatenated string like:
+  // "BASHA FOOTWEARSADUMNEAR POLICE STATION, SADUMAP517123"
+  // where state code + pincode are concatenated with no space.
+  if (shipToAddress && !shipToPincode) {
+    const pinMatch = shipToAddress.match(/[A-Za-z]?(\d{6})(?:\D|$)/);
+    if (pinMatch) shipToPincode = pinMatch[1];
+  }
+  // Derive state from pincode ranges (reliable, no regex ambiguity)
+  if (shipToPincode && !shipToState) {
+    const pin = parseInt(shipToPincode, 10);
+    if      (pin >= 110001 && pin <= 110099) shipToState = 'Delhi';
+    else if (pin >= 120001 && pin <= 135999) shipToState = 'Haryana';
+    else if (pin >= 140001 && pin <= 160099) shipToState = 'Punjab';
+    else if (pin >= 171001 && pin <= 177999) shipToState = 'Himachal Pradesh';
+    else if (pin >= 180001 && pin <= 194599) shipToState = 'Jammu and Kashmir';
+    else if (pin >= 201001 && pin <= 285999) shipToState = 'Uttar Pradesh';
+    else if (pin >= 301001 && pin <= 345999) shipToState = 'Rajasthan';
+    else if (pin >= 360001 && pin <= 396999) shipToState = 'Gujarat';
+    else if (pin >= 400001 && pin <= 445999) shipToState = 'Maharashtra';
+    else if (pin >= 450001 && pin <= 480999) shipToState = 'Madhya Pradesh';
+    else if (pin >= 481001 && pin <= 497999) shipToState = 'Chhattisgarh';
+    else if (pin >= 500001 && pin <= 509999) shipToState = 'Telangana';
+    else if (pin >= 515001 && pin <= 535999) shipToState = 'Andhra Pradesh';
+    else if (pin >= 560001 && pin <= 591999) shipToState = 'Karnataka';
+    else if (pin >= 600001 && pin <= 643999) shipToState = 'Tamil Nadu';
+    else if (pin >= 682001 && pin <= 695999) shipToState = 'Kerala';
+    else if (pin >= 700001 && pin <= 743999) shipToState = 'West Bengal';
+    else if (pin >= 751001 && pin <= 770099) shipToState = 'Odisha';
+    else if (pin >= 800001 && pin <= 813999) shipToState = 'Bihar';
+    else if (pin >= 814001 && pin <= 835999) shipToState = 'Jharkhand';
+    else if (pin >= 900001 && pin <= 999999) shipToState = 'Assam';
+  }
 
   // ── Bill To fields ────────────────────────────────────────────────────────
   const billToName        = (invoiceData.billToName    || invoiceData.billToMailingName || partyLedgerName).toString().trim();
@@ -463,13 +471,6 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // The serializer in tallyExportService will resolve the final godown name
   // (falling back to warehouseNames[] then "Main Location").
   const godownName = (invoiceData.godownName || invoiceData.warehouse || '').toString().trim();
-
-  console.log(`[normalizeToTallyVoucher] DEBUG extra fields for invoice ${invoiceNo}`);
-  console.log(`  poDate       : "${rawPoDate}" → tally="${poDateTally}"`);
-  console.log(`  shipToName   : "${shipToName}"`);
-  console.log(`  shipToAddress: "${shipToAddress}"`);
-  console.log(`  billToName   : "${billToName}"`);
-  console.log(`  buyersOrderNo: "${(invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '')}"`);
 
   return {
     voucherType:      salesVoucherTypeName,   // exact name from Tally's VoucherType list
