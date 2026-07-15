@@ -1176,18 +1176,25 @@ function buildSingleVoucherXml(inv, cfg) {
   const billToMailingName = (v.billToMailingName || billToName).trim();
   const billToPincode = (v.billToPincode || '').trim();
   const billToAddressLines = normalizeAddressLines(v.billToAddress || '', v.billToCity || '', v.billToState || '', billToPincode);
-  const billToXml = billToName || billToAddressLines.length || billToPincode
-    ? `
-  <BASICBUYERNAME>${esc(billToName)}</BASICBUYERNAME>
-  <PARTYMAILINGNAME>${esc(billToMailingName)}</PARTYMAILINGNAME>
-  <BASICBUYERADDRESS.LIST TYPE="String">
-    ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n    ')}
-  </BASICBUYERADDRESS.LIST>
-  ${billToPincode ? `<PARTYPINCODE>${esc(billToPincode)}</PARTYPINCODE>` : ''}`
-    : '';
 
   const shipToName = (v.shipToName || '').trim();
   const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', v.shipToState || '', v.shipToPincode || '');
+
+  // ROOT level: ship-to data when present, else bill-to
+  const rootName         = shipToName || billToName;
+  const rootMailingName  = shipToName || billToMailingName;
+  const rootAddressLines = shipToName ? shipToAddressLines : billToAddressLines;
+  const rootPincode      = shipToName ? (v.shipToPincode || '') : billToPincode;
+
+  const billToXml = rootName || rootAddressLines.length || rootPincode
+    ? `
+  <BASICBUYERNAME>${esc(rootName)}</BASICBUYERNAME>
+  <PARTYMAILINGNAME>${esc(rootMailingName)}</PARTYMAILINGNAME>
+  <BASICBUYERADDRESS.LIST TYPE="String">
+    ${rootAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n    ')}
+  </BASICBUYERADDRESS.LIST>
+  ${rootPincode ? `<PARTYPINCODE>${esc(rootPincode)}</PARTYPINCODE>` : ''}`
+    : '';
 
   const shipToListXml = shipToName || shipToAddressLines.length
     ? `

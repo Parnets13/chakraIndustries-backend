@@ -1492,22 +1492,29 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const billToMailingName = (v.billToMailingName || billToName).trim();
   const billToPincode = (v.billToPincode || v.partyPostal || '').trim();
   const billToAddressLines = normalizeAddressLines(v.billToAddress || '', v.billToCity || '', v.billToState || '', billToPincode);
-  const billToXml = billToName || billToAddressLines.length || billToPincode
-    ? `
-  <BASICBUYERNAME>${esc(billToName)}</BASICBUYERNAME>
-  <PARTYMAILINGNAME>${esc(billToMailingName)}</PARTYMAILINGNAME>
-  <BASICBUYERADDRESS.LIST TYPE="String">
-    ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n    ')}
-  </BASICBUYERADDRESS.LIST>
-  ${billToPincode ? `<PARTYPINCODE>${esc(billToPincode)}</PARTYPINCODE>` : ''}`
-    : '';
 
   const shipToName = (v.shipToName || '').trim();
   const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', v.shipToState || '', v.shipToPincode || '');
 
-  // shipToListXml — BASICBASEPARTYDETAILS.LIST: Tally reads consignee Name + Address from here
-  // BASICBUYERNAME inside this block = Consignee "Name" field (top) in Tally
-  // BASICBUYERADDRESS.LIST inside this block = Consignee Address in Tally
+  // ── ROOT-level buyer/consignee tags ──────────────────────────────────────
+  // Tally reads Consignee "Name" from ROOT BASICBUYERNAME and
+  // Consignee "Address" from ROOT BASICBUYERADDRESS.LIST.
+  // When a ship-to exists: root = ship-to data, buyer block = bill-to data.
+  // When no ship-to: root = bill-to data only.
+  const rootName         = shipToName || billToName;
+  const rootMailingName  = shipToName || billToMailingName;
+  const rootAddressLines = shipToName ? shipToAddressLines : billToAddressLines;
+  const rootPincode      = shipToName ? (v.shipToPincode || '') : billToPincode;
+
+  const billToXml = rootName || rootAddressLines.length || rootPincode
+    ? `
+  <BASICBUYERNAME>${esc(rootName)}</BASICBUYERNAME>
+  <PARTYMAILINGNAME>${esc(rootMailingName)}</PARTYMAILINGNAME>
+  <BASICBUYERADDRESS.LIST TYPE="String">
+    ${rootAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n    ')}
+  </BASICBUYERADDRESS.LIST>
+  ${rootPincode ? `<PARTYPINCODE>${esc(rootPincode)}</PARTYPINCODE>` : ''}`
+    : '';
   // This must use shipTo data, NOT billTo data
   const shipToListXml = shipToName || shipToAddressLines.length
     ? `
