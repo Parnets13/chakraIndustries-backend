@@ -1504,19 +1504,24 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
 
   const shipToName = (v.shipToName || '').trim();
   const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', v.shipToState || '', v.shipToPincode || '');
+
+  // shipToListXml — BASICBASEPARTYDETAILS.LIST: Tally reads consignee Name + Address from here
+  // BASICBUYERNAME inside this block = Consignee "Name" field (top) in Tally
+  // BASICBUYERADDRESS.LIST inside this block = Consignee Address in Tally
+  // This must use shipTo data, NOT billTo data
   const shipToListXml = shipToName || shipToAddressLines.length
     ? `
   <BASICBASEPARTYDETAILS.LIST>
-    ${shipToName ? `<BASICBUYERNAME>${esc(shipToName)}</BASICBUYERNAME>` : ''}
+    <BASICBUYERNAME>${esc(shipToName)}</BASICBUYERNAME>
     ${shipToAddressLines.length ? `<BASICBUYERADDRESS.LIST TYPE="String">
       ${shipToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n      ')}
-    </BASICBUYERADDRESS.LIST>` : ''}
+    </BASICBUYERADDRESS.LIST>` : '<BASICBUYERADDRESS.LIST TYPE="String"></BASICBUYERADDRESS.LIST>'}
   </BASICBASEPARTYDETAILS.LIST>`
     : '';
   const shipToXml = shipToListXml || v.shipToGST || v.shipToPincode
     ? `${shipToListXml}
-  ${shipToName ? `<CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>` : ''}
-  ${shipToName ? `<CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>` : ''}
+  <CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
+  <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>
   ${v.shipToGST ? `<CONSIGNEEGSTIN>${esc(v.shipToGST)}</CONSIGNEEGSTIN>` : ''}
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
   ${v.shipToState ? `<CONSIGNEESTATENAME>${esc(v.shipToState)}</CONSIGNEESTATENAME>` : ''}
