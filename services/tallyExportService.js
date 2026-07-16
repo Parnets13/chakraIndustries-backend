@@ -1497,23 +1497,17 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', v.shipToState || '', v.shipToPincode || '');
 
   // ── ROOT-level buyer/consignee tags ──────────────────────────────────────
-  // Tally reads Consignee "Name" from ROOT BASICBUYERNAME and
-  // Consignee "Address" from ROOT BASICBUYERADDRESS.LIST.
-  // When a ship-to exists: root = ship-to data, buyer block = bill-to data.
-  // When no ship-to: root = bill-to data only.
-  const rootName         = shipToName || billToName;
-  const rootMailingName  = shipToName || billToMailingName;
-  const rootAddressLines = shipToName ? shipToAddressLines : billToAddressLines;
-  const rootPincode      = shipToName ? (v.shipToPincode || '') : billToPincode;
+  // BASICBUYERNAME / PARTYMAILINGNAME / BASICBUYERADDRESS always carry Bill-To data.
+  // Ship-to data goes exclusively into the consignee / BASICBASEPARTYDETAILS block.
 
-  const billToXml = rootName || rootAddressLines.length || rootPincode
+  const billToXml = billToName || billToAddressLines.length || billToPincode
     ? `
-  <BASICBUYERNAME>${esc(rootName)}</BASICBUYERNAME>
-  <PARTYMAILINGNAME>${esc(rootMailingName)}</PARTYMAILINGNAME>
+  <BASICBUYERNAME>${esc(billToName)}</BASICBUYERNAME>
+  <PARTYMAILINGNAME>${esc(billToMailingName)}</PARTYMAILINGNAME>
   <BASICBUYERADDRESS.LIST TYPE="String">
-    ${rootAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n    ')}
+    ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n    ')}
   </BASICBUYERADDRESS.LIST>
-  ${rootPincode ? `<PARTYPINCODE>${esc(rootPincode)}</PARTYPINCODE>` : ''}`
+  ${billToPincode ? `<PARTYPINCODE>${esc(billToPincode)}</PARTYPINCODE>` : ''}`
     : '';
   // This must use shipTo data, NOT billTo data
   const shipToListXml = shipToName || shipToAddressLines.length
@@ -1536,6 +1530,8 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     : '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
+  // BASICORDERREF = "Order No(s)" in Tally's Dispatch/Order Details section (visible on e-invoice print)
+  const poOrderRefXml = v.buyersOrderNo ? `<BASICORDERREF>${esc(v.buyersOrderNo)}</BASICORDERREF>` : '';
 
   // GST fields
   const partyGstIn = (v.partyGST || v.billToGST || '').trim();
@@ -1560,6 +1556,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
+  ${poOrderRefXml}
   ${poDateXml}
   <NARRATION>${esc(v.narration || '')}</NARRATION>
   <GSTREGISTRATIONTYPE>${esc(partyGstIn ? 'Regular' : 'Unregistered')}</GSTREGISTRATIONTYPE>

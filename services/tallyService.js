@@ -1216,6 +1216,8 @@ function buildSingleVoucherXml(inv, cfg) {
     : '';
 
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
+  // BASICORDERREF = "Order No(s)" in Tally's Dispatch/Order Details section (visible on e-invoice print)
+  const poOrderRefXml = v.buyersOrderNo ? `<BASICORDERREF>${esc(v.buyersOrderNo)}</BASICORDERREF>` : '';
 
   return `
 <VOUCHER VCHTYPE="${esc(v.voucherType || 'Sales')}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
@@ -1232,6 +1234,7 @@ function buildSingleVoucherXml(inv, cfg) {
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
+  ${poOrderRefXml}
   ${poDateXml}
   <NARRATION>${esc(v.narration || '')}</NARRATION>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
 </VOUCHER>`;
