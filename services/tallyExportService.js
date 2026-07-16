@@ -1500,10 +1500,14 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   // In Tally's XML:
   //   ROOT BASICBUYERNAME / BASICBUYERADDRESS  = Consignee (Ship To) on print
   //   BASICBASEPARTYDETAILS.LIST               = Bill To (Buyer) on print
-  // When ship-to exists: root = ship-to data, BASICBASEPARTYDETAILS = bill-to data.
+  //   ROOT PARTYMAILINGNAME                    = Bill To Mailing Name on print (always buyer)
+  // When ship-to exists: root name/address = ship-to data, BASICBASEPARTYDETAILS = bill-to data.
   // When no ship-to: root = bill-to data only.
   const rootName         = shipToName || billToName;
-  const rootMailingName  = shipToName || billToMailingName;
+  // FIX: PARTYMAILINGNAME is the Bill To mailing name — must always be billToMailingName,
+  // NOT shipToName. Previously this was `shipToName || billToMailingName` which caused
+  // the consignee name to appear in the Mailing Name field under Bill To.
+  const rootMailingName  = billToMailingName;
   const rootAddressLines = shipToName ? shipToAddressLines : billToAddressLines;
   const rootPincode      = shipToName ? (v.shipToPincode || '') : billToPincode;
 
@@ -1516,11 +1520,15 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   </BASICBUYERADDRESS.LIST>
   ${rootPincode ? `<PARTYPINCODE>${esc(rootPincode)}</PARTYPINCODE>` : ''}`
     : '';
-  // BASICBASEPARTYDETAILS.LIST = Bill To (Buyer) block — always bill-to data
+  // BASICBASEPARTYDETAILS.LIST = Bill To (Buyer) block — always bill-to data.
+  // Only written when ship-to is present (otherwise root tags already carry bill-to data).
+  // FIX: Include PARTYMAILINGNAME inside this block so Tally can render it in the
+  // Bill To section of the invoice print.
   const billToDetailsXml = shipToName && (billToName || billToAddressLines.length)
     ? `
   <BASICBASEPARTYDETAILS.LIST>
     <BASICBUYERNAME>${esc(billToName)}</BASICBUYERNAME>
+    <PARTYMAILINGNAME>${esc(billToMailingName)}</PARTYMAILINGNAME>
     ${billToAddressLines.length ? `<BASICBUYERADDRESS.LIST TYPE="String">
       ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n      ')}
     </BASICBUYERADDRESS.LIST>` : '<BASICBUYERADDRESS.LIST TYPE="String"></BASICBUYERADDRESS.LIST>'}

@@ -483,9 +483,24 @@ async function syncVouchers(url, cfg, onProgress) {
         // ── Bill To / Ship To extraction ────────────────────────────────────
         // Bill To fields
         const billToName = gVal(block, 'BASICBUYERNAME') || gVal(block, 'BUYERNAME') || gVal(block, 'BILLTOLEDGERNAME') || gVal(block, 'BILLTONAME') || party;
-        const billToMailingName = gVal(block, 'BILLTOMAILINGNAME') || gVal(block, 'BUYERMAILINGNAME') || gVal(block, 'PARTYMAILINGNAME');
-        const billToAddressLines = [...block.matchAll(/<BASICBUYERADDRESS>([\s\S]*?)<\/BASICBUYERADDRESS>/gi), ...block.matchAll(/<BUYERADDRESS>([\s\S]*?)<\/BUYERADDRESS>/gi), ...block.matchAll(/<BILLTOADDRESS>([\s\S]*?)<\/BILLTOADDRESS>/gi)].map(a => decodeXml(a[1].trim())).filter(Boolean);
-        const billToAddress = billToAddressLines.join(', ');
+        // FIX: Do NOT fall back to PARTYMAILINGNAME — when ship-to exists, Tally's root
+        // PARTYMAILINGNAME holds the ship-to/consignee name, not the bill-to mailing name.
+        // Only read dedicated bill-to mailing name tags to avoid cross-contamination.
+        const billToMailingName = gVal(block, 'BILLTOMAILINGNAME') || gVal(block, 'BUYERMAILINGNAME');
+        // FIX: Prefer dedicated BILLTOADDRESS tags for bill-to address. BASICBUYERADDRESS at
+        // root level can contain ship-to address when a consignee exists; bill-to address
+        // in that case lives inside BASICBASEPARTYDETAILS.LIST. Using BILLTOADDRESS tags
+        // avoids accidentally reading the ship-to address as the bill-to address.
+        const billToAddressLines = [
+          ...block.matchAll(/<BILLTOADDRESS>([\s\S]*?)<\/BILLTOADDRESS>/gi),
+          ...block.matchAll(/<BUYERADDRESS>([\s\S]*?)<\/BUYERADDRESS>/gi),
+        ].map(a => decodeXml(a[1].trim())).filter(Boolean);
+        // Only fall back to BASICBUYERADDRESS when no dedicated bill-to address tags exist
+        const billToAddressLinesFinal = billToAddressLines.length > 0 ? billToAddressLines :
+          [...block.matchAll(/<BASICBASEPARTYDETAILS\.LIST>([\s\S]*?)<\/BASICBASEPARTYDETAILS\.LIST>/gi)]
+            .flatMap(m => [...m[1].matchAll(/<BASICBUYERADDRESS>([\s\S]*?)<\/BASICBUYERADDRESS>/gi)])
+            .map(a => decodeXml(a[1].trim())).filter(Boolean);
+        const billToAddress = billToAddressLinesFinal.join(', ');
         const billToCity = gVal(block, 'BILLTOCITY') || gVal(block, 'BUYERCITY');
         const billToState = gVal(block, 'BILLTOSTATE') || gVal(block, 'BUYERSTATE');
         const billToCountry = gVal(block, 'BILLTOCOUNTRY') || gVal(block, 'BUYERCOUNTRY');

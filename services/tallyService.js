@@ -1181,8 +1181,11 @@ function buildSingleVoucherXml(inv, cfg) {
   const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', v.shipToState || '', v.shipToPincode || '');
 
   // ROOT level: ship-to data when present, else bill-to
+  // FIX: PARTYMAILINGNAME is the Bill To mailing name — must always be billToMailingName,
+  // NOT shipToName. Previously `shipToName || billToMailingName` caused the consignee name
+  // to appear in the Mailing Name field under Bill To.
   const rootName         = shipToName || billToName;
-  const rootMailingName  = shipToName || billToMailingName;
+  const rootMailingName  = billToMailingName;
   const rootAddressLines = shipToName ? shipToAddressLines : billToAddressLines;
   const rootPincode      = shipToName ? (v.shipToPincode || '') : billToPincode;
 
@@ -1196,12 +1199,15 @@ function buildSingleVoucherXml(inv, cfg) {
   ${rootPincode ? `<PARTYPINCODE>${esc(rootPincode)}</PARTYPINCODE>` : ''}`
     : '';
 
-  const shipToListXml = shipToName || shipToAddressLines.length
+  // FIX: BASICBASEPARTYDETAILS.LIST = Bill To (Buyer) block — must be bill-to data, not ship-to.
+  // Previously this incorrectly used shipToName/shipToAddressLines (copy-paste bug).
+  const shipToListXml = shipToName && (billToName || billToAddressLines.length)
     ? `
   <BASICBASEPARTYDETAILS.LIST>
-    <BASICBUYERNAME>${esc(shipToName)}</BASICBUYERNAME>
-    ${shipToAddressLines.length ? `<BASICBUYERADDRESS.LIST TYPE="String">
-      ${shipToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n      ')}
+    <BASICBUYERNAME>${esc(billToName)}</BASICBUYERNAME>
+    <PARTYMAILINGNAME>${esc(billToMailingName)}</PARTYMAILINGNAME>
+    ${billToAddressLines.length ? `<BASICBUYERADDRESS.LIST TYPE="String">
+      ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n      ')}
     </BASICBUYERADDRESS.LIST>` : '<BASICBUYERADDRESS.LIST TYPE="String"></BASICBUYERADDRESS.LIST>'}
   </BASICBASEPARTYDETAILS.LIST>`
     : '';
