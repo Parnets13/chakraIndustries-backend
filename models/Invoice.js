@@ -67,6 +67,7 @@ const tallyVoucherSchema = new mongoose.Schema({
   billToCity:          { type: String, default: '' },
   billToState:         { type: String, default: '' },
   billToGST:           { type: String, default: '' },
+  billToPincode:       { type: String, default: '' },   // Buyer/Bill To postal code
   allLedgerEntries:    { type: [ledgerEntrySchema],    default: [] },
   allInventoryEntries: { type: [inventoryEntrySchema], default: [] },
   // Cached computed amounts — stored to avoid recomputation on export

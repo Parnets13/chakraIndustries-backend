@@ -1509,7 +1509,12 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   // the consignee name to appear in the Mailing Name field under Bill To.
   const rootMailingName  = billToMailingName;
   const rootAddressLines = shipToName ? shipToAddressLines : billToAddressLines;
-  const rootPincode      = shipToName ? (v.shipToPincode || '') : billToPincode;
+  // FIX (Bug 2): PARTYPINCODE is the Buyer/Bill To pincode in Tally XML — it must
+  // always use billToPincode, regardless of whether a ship-to (consignee) is present.
+  // Previously: `shipToName ? (v.shipToPincode || '') : billToPincode`
+  // That incorrectly wrote the consignee pincode into the Buyer pincode field whenever
+  // a ship-to was present. The consignee pincode is written separately via CONSIGNEEPINCODE.
+  const rootPincode      = billToPincode;
 
   const billToXml = rootName || rootAddressLines.length || rootPincode
     ? `
