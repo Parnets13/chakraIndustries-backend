@@ -908,9 +908,9 @@ export async function exportSystemLedgers(cfg, triggeredBy) {
     // With ACTION="Create", Tally silently skips records that already exist.
     // Also: never send OPENINGBALANCE on these — it resets the client's balances.
     const systemXml = `
-<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><GSTRATE>0</GSTRATE></LEDGER>
-<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><GSTRATE>0</GSTRATE></LEDGER>
-<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><GSTRATE>0</GSTRATE></LEDGER>
+<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>
+<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>
+<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>
 <LEDGER NAME="Purchase Accounts" ACTION="Create"><NAME>Purchase Accounts</NAME><PARENT>Purchase Accounts</PARENT></LEDGER>
 <LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT></LEDGER>
 <LEDGER NAME="Freight &amp; Forwarding Charges" ACTION="Create"><NAME>Freight &amp; Forwarding Charges</NAME><PARENT>Indirect Expenses</PARENT></LEDGER>

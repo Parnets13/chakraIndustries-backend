@@ -161,12 +161,31 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // Fix rounding: force the last item amount to absorb any 1-paisa discrepancy
   // so sum of items always exactly equals salesBase. This prevents Tally EXCEPTIONS
   // caused by a ±0.01 mismatch between inventory entries and ledger entries.
+  // IMPORTANT: This adjustment MUST happen BEFORE per-item tax rates are computed
+  // so that itemSalesBase and rateDetails are derived from the final adjusted amount,
+  // not the pre-adjustment amount. Computing rates before this adjustment causes
+  // Tally's e-invoice engine to recalculate adjustedBase × rate% ≠ sent tax amount.
   const rawItemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
   if (itemAmounts.length > 0 && Math.abs(rawItemsTotal - salesBase) <= 0.10 && rawItemsTotal !== salesBase) {
     const diff = +(salesBase - rawItemsTotal).toFixed(2);
     itemAmounts[itemAmounts.length - 1] = +(itemAmounts[itemAmounts.length - 1] + diff).toFixed(2);
   }
   const itemsTotal = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
+
+  // ── Invoice-level GST rate fallbacks ─────────────────────────────────────
+  // When invoice data stores CGST/SGST only at invoice level (not per-item) —
+  // common from Excel bulk upload — item.cgst is 0 for every line item.
+  // Back-calculating cgstRate = 0 / itemAmount = 0 sends 0% to rateDetails
+  // while LEDGERENTRIES carries a nonzero CGST amount → e-invoice mismatch.
+  // Fallback: derive the effective rate from invoice-level totals so rateDetails
+  // always reflects a nonzero rate when CGST/SGST is present on the voucher.
+  const invoiceCgstRate = salesBase > 0 && totalCGST > 0
+    ? +((totalCGST / salesBase) * 100).toFixed(2) : 0;
+  const invoiceSgstRate = salesBase > 0 && totalSGST > 0
+    ? +((totalSGST / salesBase) * 100).toFixed(2) : 0;
+  const invoiceIgstRate = salesBase > 0 && totalIGST > 0
+    ? +((totalIGST / salesBase) * 100).toFixed(2) : 0;
+
   // useInventory: send items as ALLINVENTORYENTRIES.LIST to show item columns in Tally
   const useInventory = true;
 
@@ -199,16 +218,21 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const itemCGST   = +(item.cgst || 0);
     const itemSGST   = +(item.sgst || 0);
     const itemIGST   = +(item.igst || 0);
+    // itemSalesBase derived from the ALREADY-ADJUSTED itemAmount (rounding done above).
     const itemSalesBase = +(itemAmount - itemCGST - itemSGST - itemIGST).toFixed(2);
     
-    // Calculate tax rates from item amounts
+    // Calculate tax rates from the adjusted item amounts.
+    // When per-item cgst/sgst are zero (invoice-level-only tax data from Excel upload),
+    // fall back to the invoice-level effective rate so rateDetails is never sent as 0%
+    // while LEDGERENTRIES carries a nonzero tax amount (which triggers the e-invoice
+    // "Tax amount does not match" warning).
     const calculateRate = (taxAmount, base) => {
       if (base <= 0 || taxAmount <= 0) return 0;
       return +((taxAmount / base) * 100).toFixed(2);
     };
-    const cgstRate = calculateRate(itemCGST, itemSalesBase);
-    const sgstRate = calculateRate(itemSGST, itemSalesBase);
-    const igstRate = calculateRate(itemIGST, itemSalesBase);
+    const cgstRate = itemCGST > 0 ? calculateRate(itemCGST, itemSalesBase) : invoiceCgstRate;
+    const sgstRate = itemSGST > 0 ? calculateRate(itemSGST, itemSalesBase) : invoiceSgstRate;
+    const igstRate = itemIGST > 0 ? calculateRate(itemIGST, itemSalesBase) : invoiceIgstRate;
     
     // Sales ledger: use item.tallySalesLedger if set and valid, else 'Sales'
     const INVALID_LEDGER_NAMES = new Set(['sales accounts', 'sales accounts (group)', '']);
