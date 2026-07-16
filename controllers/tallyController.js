@@ -421,10 +421,16 @@ export const fixBillToData = async (req, res) => {
     // Helper: reject dot-only Tally TDL placeholders (".", "..", "...")
     const cleanVal = (v) => {
       if (!v) return '';
+      // If somehow an object was stored (e.g. AccountsLedger nested address), stringify it safely
+      if (typeof v === 'object') return '';
       const t = String(v).trim();
       return /^\.+$/.test(t) ? '' : t.replace(/<[^>]+>/g, '').trim();
     };
-    const isDirty = (v) => !v || /^\.+$/.test(String(v).trim()) || /<[A-Za-z]/.test(String(v));
+    const isDirty = (v) => {
+      if (!v) return false;
+      if (typeof v === 'object') return true; // object stored in string field — always dirty
+      return /^\.+$/.test(String(v).trim()) || /<[A-Za-z]/.test(String(v));
+    };
 
     // ── Build ledger lookup map from AccountsLedger + Client ──
     const [ledgerDocs, clientDocs] = await Promise.all([

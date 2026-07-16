@@ -2614,7 +2614,7 @@ async function backfillBillToFromLedger(vouchers) {
   // Collect unique party names that have missing bill-to data
   const missingNames = new Set();
   for (const v of vouchers) {
-    if (!v.billToAddress || !v.billToGST) {
+    if (!v.billToAddress || !v.billToGST || !v.billToPincode) {
       const name = (v.billToName || v.partyName || '').trim();
       if (name) missingNames.add(name);
     }
@@ -2633,39 +2633,67 @@ async function backfillBillToFromLedger(vouchers) {
     { name: 1, address: 1, city: 1, state: 1, country: 1, pincode: 1, gstin: 1 }
   ).lean();
 
-  // Build lookup map: partyName (lower) → {address, city, state, country, gstin}
+  // Build lookup map: partyName (lower) → { address, city, state, country, pincode, gstin }
+  // AccountsLedger.address is a NESTED OBJECT { street, area, city, state, pincode, country }
+  // — flatten it to a plain string for billToAddress.
+  const flattenAddr = (addrField) => {
+    if (!addrField) return '';
+    if (typeof addrField === 'string') return addrField.trim();
+    // nested object — join meaningful parts
+    const parts = [addrField.street, addrField.area].filter(Boolean);
+    return parts.join(', ').trim();
+  };
   const ledgerMap = new Map();
   for (const l of ledgerDocs) {
     const key = (l.ledgerName || '').trim().toLowerCase();
-    if (key) ledgerMap.set(key, { address: l.address || '', city: l.city || '', state: l.state || '', country: l.country || '', gstin: l.gstin || l.gstNumber || '' });
+    if (!key) continue;
+    const addrObj = (typeof l.address === 'object' && l.address !== null) ? l.address : {};
+    ledgerMap.set(key, {
+      address: flattenAddr(l.address),
+      city:    addrObj.city    || l.city    || '',
+      state:   addrObj.state   || l.state   || '',
+      country: addrObj.country || l.country || '',
+      pincode: addrObj.pincode || l.pincode || '',
+      gstin:   l.gstin || l.gstNumber || '',
+    });
   }
   for (const c of clientDocs) {
     const key = (c.name || '').trim().toLowerCase();
-    if (key && !ledgerMap.has(key)) ledgerMap.set(key, { address: c.address || '', city: c.city || '', state: c.state || '', country: c.country || '', gstin: c.gstin || '' });
+    if (key && !ledgerMap.has(key)) {
+      ledgerMap.set(key, {
+        address: typeof c.address === 'string' ? c.address.trim() : '',
+        city:    c.city    || '',
+        state:   c.state   || '',
+        country: c.country || '',
+        pincode: c.pincode || '',
+        gstin:   c.gstin   || '',
+      });
+    }
   }
 
   let filled = 0;
   for (const v of vouchers) {
-    if (!v.billToAddress || !v.billToGST) {
+    if (!v.billToAddress || !v.billToGST || !v.billToPincode) {
       const key = (v.billToName || v.partyName || '').trim().toLowerCase();
       const ledger = ledgerMap.get(key);
       if (ledger) {
         if (!v.billToAddress && ledger.address) { v.billToAddress = ledger.address; filled++; }
-        if (!v.billToCity    && ledger.city)    v.billToCity = ledger.city;
-        if (!v.billToState   && ledger.state)   v.billToState = ledger.state;
+        if (!v.billToCity    && ledger.city)    v.billToCity    = ledger.city;
+        if (!v.billToState   && ledger.state)   v.billToState   = ledger.state;
         if (!v.billToCountry && ledger.country) v.billToCountry = ledger.country;
-        if (!v.billToGST     && ledger.gstin)   v.billToGST = ledger.gstin;
-        // If ship-to is also blank, set it equal to bill-to (same party)
-        if (!v.shipToName    && v.billToName)   v.shipToName = v.billToName;
+        if (!v.billToPincode && ledger.pincode) v.billToPincode = ledger.pincode;
+        if (!v.billToGST     && ledger.gstin)   v.billToGST     = ledger.gstin;
+        // Ship-to: only backfill if also blank — do NOT touch if ship-to already has real data
+        if (!v.shipToName    && v.billToName)    v.shipToName    = v.billToName;
         if (!v.shipToAddress && v.billToAddress) v.shipToAddress = v.billToAddress;
-        if (!v.shipToCity    && v.billToCity)   v.shipToCity = v.billToCity;
-        if (!v.shipToState   && v.billToState)  v.shipToState = v.billToState;
+        if (!v.shipToCity    && v.billToCity)    v.shipToCity    = v.billToCity;
+        if (!v.shipToState   && v.billToState)   v.shipToState   = v.billToState;
         if (!v.shipToCountry && v.billToCountry) v.shipToCountry = v.billToCountry;
-        if (!v.shipToGST     && v.billToGST)    v.shipToGST = v.billToGST;
+        if (!v.shipToGST     && v.billToGST)     v.shipToGST     = v.billToGST;
       }
     }
   }
-  LOG(`[backfillBillTo] Backfilled address/GST data for ${filled} vouchers from ledger master`);
+  LOG(`[backfillBillTo] Backfilled address/GST/pincode data for ${filled} vouchers from ledger master`);
 }
 
 async function autoCreateMissingLedgers(vouchers) {
