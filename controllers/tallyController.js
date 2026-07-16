@@ -420,10 +420,10 @@ export const fixBillToData = async (req, res) => {
   try {
     const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
 
-    // ── Step 1: Collect all unique party names that have blank billToAddress or billToPincode ──
+    // ── Step 1: Collect vouchers with blank billToAddress or billToPincode ──
     const vouchers = await TallyVoucher.find({ voucherType: 'Sales' },
       { partyName: 1, billToName: 1, billToAddress: 1, billToPincode: 1,
-        billToCity: 1, billToState: 1, billToGST: 1 }).lean();
+        billToCity: 1, billToState: 1, billToGST: 1, partyGstin: 1 }).lean();
 
     const needsFix = vouchers.filter(v =>
       !v.billToAddress || !String(v.billToAddress).trim() ||
@@ -434,86 +434,123 @@ export const fixBillToData = async (req, res) => {
       return res.json({ success: true, message: 'All vouchers already have Bill To address and pincode.', data: { invoiceFixed: 0, voucherFixed: 0 } });
     }
 
-    const partyNames = [...new Set(needsFix.map(v => (v.billToName || v.partyName || '').trim()).filter(Boolean))];
-
-    // ── Step 2: Fetch full ledger address data from Tally ──────────────────
+    // ── Step 2: Fetch ALL ledgers from Tally with full address using FETCH>* ──
     const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
-    if (!cfg) {
-      return res.status(500).json({ success: false, message: 'Tally not configured. Go to Tally Settings first.' });
-    }
+    if (!cfg) return res.status(500).json({ success: false, message: 'Tally not configured.' });
 
     const co    = (cfg.companyName || '').trim().toUpperCase();
     const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    const timeout = (cfg.useConnector && cfg.connectorId) ? 180000 : 90000;
 
+    // Use FETCH>* to get every field Tally has on the ledger.
+    // This is the only reliable way to get Address, Pincode, City, State
+    // across all Tally versions (Prime, ERP 9, EDU).
     const ledgerXml = `<ENVELOPE>
-<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerAddress</ID></HEADER>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>AllLedgersFull</ID></HEADER>
 <BODY><DESC>
   <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
   <TDL><TDLMESSAGE>
-    <COLLECTION NAME="LedgerAddress">
+    <COLLECTION NAME="AllLedgersFull">
       <TYPE>Ledger</TYPE>
-      <FETCH>Name, MailingName, Address, LedgerCity, LedgerState, StateName, Pincode, LedgerPincode, CountryName, GSTIN, PartyGSTIN, GSTRegistrationDetails</FETCH>
+      <FETCH>*</FETCH>
     </COLLECTION>
   </TDLMESSAGE></TDL>
 </DESC></BODY>
 </ENVELOPE>`;
 
-    const timeout = (cfg.useConnector && cfg.connectorId) ? 180000 : 60000;
     const resp = await postXmlWithRetry(cfg, ledgerXml, timeout, 1);
 
-    // ── Step 3: Parse Tally response into a map: ledgerName → { address, city, state, pincode, gstin } ──
+    // ── Step 3: Parse every ledger block and extract address fields ──────────
+    // Tally uses multiple tag names across versions:
+    //   Address lines: ADDRESS.LIST > ADDRESS  or  MAILINGADDRESS.LIST > MAILINGADDRESS
+    //   City:  LEDGERCITY  or  $LedgerCity
+    //   State: LEDGERSTATE or  STATENAME
+    //   Pin:   PINCODE     or  LEDGERPINCODE
+    //   GST:   GSTIN       or  PARTYGSTIN
     const tallyLedgerMap = new Map();
-    const ledgerBlocks = [...(resp || '').matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)];
-    for (const m of ledgerBlocks) {
+
+    const getTag = (block, ...tags) => {
+      for (const t of tags) {
+        const m = block.match(new RegExp(`<${t}[^>]*>([^<]*)<\\/${t}>`, 'i'));
+        if (m && m[1].trim() && !/^\.+$/.test(m[1].trim())) return m[1].trim();
+      }
+      return '';
+    };
+
+    const getAddressLines = (block) => {
+      // Try ADDRESS.LIST first (most common in Tally Prime)
+      const listMatch = block.match(/<ADDRESS\.LIST[^>]*>([\s\S]*?)<\/ADDRESS\.LIST>/i);
+      if (listMatch) {
+        const lines = [...listMatch[1].matchAll(/<ADDRESS>([\s\S]*?)<\/ADDRESS>/gi)]
+          .map(m => m[1].trim()).filter(l => l && !/^\.+$/.test(l));
+        if (lines.length) return lines;
+      }
+      // Try individual ADDRESS tags
+      const direct = [...block.matchAll(/<ADDRESS>([^<]*)<\/ADDRESS>/gi)]
+        .map(m => m[1].trim()).filter(l => l && !/^\.+$/.test(l));
+      if (direct.length) return direct;
+      // Try MAILINGADDRESS
+      const mailing = [...block.matchAll(/<MAILINGADDRESS>([^<]*)<\/MAILINGADDRESS>/gi)]
+        .map(m => m[1].trim()).filter(l => l && !/^\.+$/.test(l));
+      return mailing;
+    };
+
+    for (const m of (resp || '').matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
       const block = m[1];
-      const name  = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      const name  = getTag(block, 'NAME');
       if (!name) continue;
 
-      // Address lines
-      const addrLines = [...block.matchAll(/<ADDRESS>(.*?)<\/ADDRESS>/gi)].map(a => a[1].trim()).filter(Boolean);
+      const addrLines = getAddressLines(block);
       const address   = addrLines.join(', ');
+      const city      = getTag(block, 'LEDGERCITY', 'CITY');
+      const state     = getTag(block, 'LEDGERSTATE', 'STATENAME', 'STATE');
+      const gstin     = getTag(block, 'GSTIN', 'PARTYGSTIN', 'GSTREGISTRATIONNUMBER');
 
-      const city    = (block.match(/<LEDGERCITY>(.*?)<\/LEDGERCITY>/i)?.[1]   || '').trim();
-      const state   = (block.match(/<LEDGERSTATE>(.*?)<\/LEDGERSTATE>/i)?.[1]  ||
-                       block.match(/<STATENAME>(.*?)<\/STATENAME>/i)?.[1]      || '').trim();
-      // Pincode: try PINCODE first, then LEDGERPINCODE, then extract 6 digits from address
-      let pincode   = (block.match(/<PINCODE>(.*?)<\/PINCODE>/i)?.[1]          ||
-                       block.match(/<LEDGERPINCODE>(.*?)<\/LEDGERPINCODE>/i)?.[1] || '').trim().replace(/\D/g, '').slice(0, 6);
+      // Pincode: explicit tag first, then extract 6 digits from address lines
+      let pincode = getTag(block, 'PINCODE', 'LEDGERPINCODE');
+      pincode = pincode.replace(/\D/g, '').slice(0, 6);
       if (!pincode) {
-        const pin = (address + ' ' + city).match(/\b(\d{6})\b/);
-        if (pin) pincode = pin[1];
+        const allText = addrLines.join(' ') + ' ' + city;
+        const pinMatch = allText.match(/\b(\d{6})\b/);
+        if (pinMatch) pincode = pinMatch[1];
       }
-      const gstin   = (block.match(/<GSTIN>(.*?)<\/GSTIN>/i)?.[1]             ||
-                       block.match(/<PARTYGSTIN>(.*?)<\/PARTYGSTIN>/i)?.[1]    || '').trim();
 
       tallyLedgerMap.set(name.toLowerCase(), { address, city, state, pincode, gstin });
     }
 
-    // ── Step 4: Update TallyVoucher documents from Tally ledger map ────────
+    console.log(`[fixBillToData] Tally returned ${tallyLedgerMap.size} ledgers`);
+    // Log a sample to verify address parsing works
+    const sample = [...tallyLedgerMap.entries()].find(([, v]) => v.address || v.pincode);
+    if (sample) console.log('[fixBillToData] Sample with data:', sample[0], JSON.stringify(sample[1]));
+
+    // ── Step 4: Update TallyVoucher documents ────────────────────────────────
     let voucherFixed = 0;
-    for (const v of needsFix) {
-      const partyKey = (v.billToName || v.partyName || '').trim().toLowerCase();
-      const ld = tallyLedgerMap.get(partyKey);
-      if (!ld) continue;
+    const partyNames = [...new Set(needsFix.map(v => (v.billToName || v.partyName || '').trim()).filter(Boolean))];
+
+    for (const partyName of partyNames) {
+      const ld = tallyLedgerMap.get(partyName.toLowerCase());
+      if (!ld || (!ld.address && !ld.pincode && !ld.city && !ld.state)) continue;
+
       const updates = {};
-      if ((!v.billToAddress || !String(v.billToAddress).trim()) && ld.address) updates.billToAddress = ld.address;
-      if (!v.billToCity    && ld.city)    updates.billToCity    = ld.city;
-      if (!v.billToState   && ld.state)   updates.billToState   = ld.state;
-      if ((!v.billToPincode || !String(v.billToPincode).trim()) && ld.pincode) updates.billToPincode = ld.pincode;
-      if (!v.billToGST     && ld.gstin)   updates.billToGST     = ld.gstin;
+      if (ld.address) updates.billToAddress = ld.address;
+      if (ld.city)    updates.billToCity    = ld.city;
+      if (ld.state)   updates.billToState   = ld.state;
+      if (ld.pincode) updates.billToPincode = ld.pincode;
+      if (ld.gstin)   updates.billToGST     = ld.gstin;
+
       if (Object.keys(updates).length > 0) {
-        await TallyVoucher.updateMany(
-          { $or: [{ billToName: v.billToName || v.partyName }, { partyName: v.partyName }],
-            voucherType: 'Sales' },
+        const result = await TallyVoucher.updateMany(
+          { $or: [{ billToName: partyName }, { partyName: partyName }], voucherType: 'Sales' },
           { $set: updates }
         );
-        voucherFixed++;
+        voucherFixed += result.modifiedCount || 0;
+        console.log(`[fixBillToData] Updated ${result.modifiedCount} vouchers for "${partyName}" → addr="${ld.address}" pin="${ld.pincode}"`);
       }
     }
 
     res.json({
       success: true,
-      message: `Fetched ${tallyLedgerMap.size} ledgers from Tally. Fixed ${voucherFixed} voucher party records.`,
+      message: `Fetched ${tallyLedgerMap.size} ledgers from Tally. Updated ${voucherFixed} voucher(s) with Bill To address/pincode.`,
       data: { invoiceFixed: 0, voucherFixed, tallyLedgersFound: tallyLedgerMap.size, partiesNeedingFix: partyNames.length },
     });
   } catch (e) {
