@@ -434,7 +434,19 @@ export const fixBillToData = async (req, res) => {
     const ledgerMap = new Map();
     for (const l of ledgerDocs) {
       const key = (l.ledgerName || '').trim().toLowerCase();
-      if (key) ledgerMap.set(key, { address: l.address || '', city: l.city || '', state: l.state || '', country: l.country || '', gstin: l.gstin || l.gstNumber || '', pincode: l.pincode || '' });
+      if (!key) continue;
+      // AccountsLedger.address is a nested object { street, area, city, state, pincode, country }
+      // Flatten it to a string for billToAddress
+      const addrObj = l.address || {};
+      const addrStr = [addrObj.street, addrObj.area].filter(Boolean).join(', ').trim();
+      ledgerMap.set(key, {
+        address: addrStr,
+        city:    addrObj.city    || l.city    || '',
+        state:   addrObj.state   || l.state   || '',
+        country: addrObj.country || l.country || '',
+        gstin:   l.gstin || l.gstNumber || '',
+        pincode: addrObj.pincode || l.pincode || '',
+      });
     }
     for (const c of clientDocs) {
       const key = (c.name || '').trim().toLowerCase();
