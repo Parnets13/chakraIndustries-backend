@@ -428,17 +428,17 @@ export const fixBillToData = async (req, res) => {
 
     // ── Build ledger lookup map from AccountsLedger + Client ──
     const [ledgerDocs, clientDocs] = await Promise.all([
-      AccountsLedger.find({}, { ledgerName: 1, address: 1, city: 1, state: 1, country: 1, gstin: 1, gstNumber: 1 }).lean(),
-      Client.find({}, { name: 1, address: 1, city: 1, state: 1, country: 1, gstin: 1 }).lean(),
+      AccountsLedger.find({}, { ledgerName: 1, address: 1, city: 1, state: 1, country: 1, gstin: 1, gstNumber: 1, pincode: 1 }).lean(),
+      Client.find({}, { name: 1, address: 1, city: 1, state: 1, country: 1, gstin: 1, pincode: 1 }).lean(),
     ]);
     const ledgerMap = new Map();
     for (const l of ledgerDocs) {
       const key = (l.ledgerName || '').trim().toLowerCase();
-      if (key) ledgerMap.set(key, { address: l.address || '', city: l.city || '', state: l.state || '', country: l.country || '', gstin: l.gstin || l.gstNumber || '' });
+      if (key) ledgerMap.set(key, { address: l.address || '', city: l.city || '', state: l.state || '', country: l.country || '', gstin: l.gstin || l.gstNumber || '', pincode: l.pincode || '' });
     }
     for (const c of clientDocs) {
       const key = (c.name || '').trim().toLowerCase();
-      if (key && !ledgerMap.has(key)) ledgerMap.set(key, { address: c.address || '', city: c.city || '', state: c.state || '', country: c.country || '', gstin: c.gstin || '' });
+      if (key && !ledgerMap.has(key)) ledgerMap.set(key, { address: c.address || '', city: c.city || '', state: c.state || '', country: c.country || '', gstin: c.gstin || '', pincode: c.pincode || '' });
     }
 
     // ── Fix Invoice collection ──
@@ -462,6 +462,7 @@ export const fixBillToData = async (req, res) => {
         if (!inv.billToState)   updates.billToState   = ledger.state;
         if (!inv.billToCountry) updates.billToCountry = ledger.country;
         if (!cleanVal(inv.billToGST) && ledger.gstin) updates.billToGST = ledger.gstin;
+        if (!inv.billToPincode  && ledger.pincode) updates.billToPincode = ledger.pincode;
       }
       if (Object.keys(updates).length > 0) {
         await Invoice.updateOne({ _id: inv._id }, { $set: updates });
@@ -488,6 +489,7 @@ export const fixBillToData = async (req, res) => {
         if (!v.billToState)   updates.billToState   = ledger.state;
         if (!v.billToCountry) updates.billToCountry = ledger.country;
         if (!cleanVal(v.billToGST) && ledger.gstin) updates.billToGST = ledger.gstin;
+        if (!v.billToPincode  && ledger.pincode) updates.billToPincode = ledger.pincode;
       }
       if (Object.keys(updates).length > 0) {
         await TallyVoucher.updateOne({ _id: v._id }, { $set: updates });
