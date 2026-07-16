@@ -52,6 +52,7 @@ const tallyVoucherSchema = new mongoose.Schema({
   billToCountry:     { type: String, trim: true },
   billToGST:         { type: String, trim: true },
   billToGstRegType:  { type: String, trim: true },
+  billToPincode:     { type: String, trim: true },
   shipToName:        { type: String, trim: true },
   shipToMailingName: { type: String, trim: true },
   shipToAddress:     { type: String, trim: true },
