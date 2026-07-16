@@ -418,109 +418,108 @@ export const resetVoucherSyncStates = async (req, res) => {
 // and populate empty billToName from partyName ─────────────────────────────────
 export const fixBillToData = async (req, res) => {
   try {
-    // Helper: reject dot-only Tally TDL placeholders (".", "..", "...")
-    const cleanVal = (v) => {
-      if (!v) return '';
-      // If somehow an object was stored (e.g. AccountsLedger nested address), stringify it safely
-      if (typeof v === 'object') return '';
-      const t = String(v).trim();
-      return /^\.+$/.test(t) ? '' : t.replace(/<[^>]+>/g, '').trim();
-    };
-    const isDirty = (v) => {
-      if (!v) return false;
-      if (typeof v === 'object') return true; // object stored in string field — always dirty
-      return /^\.+$/.test(String(v).trim()) || /<[A-Za-z]/.test(String(v));
-    };
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
 
-    // ── Build ledger lookup map from AccountsLedger + Client ──
-    const [ledgerDocs, clientDocs] = await Promise.all([
-      AccountsLedger.find({}, { ledgerName: 1, address: 1, city: 1, state: 1, country: 1, gstin: 1, gstNumber: 1, pincode: 1 }).lean(),
-      Client.find({}, { name: 1, address: 1, city: 1, state: 1, country: 1, gstin: 1, pincode: 1 }).lean(),
-    ]);
-    const ledgerMap = new Map();
-    for (const l of ledgerDocs) {
-      const key = (l.ledgerName || '').trim().toLowerCase();
-      if (!key) continue;
-      // AccountsLedger.address is a nested object { street, area, city, state, pincode, country }
-      // Flatten it to a string for billToAddress
-      const addrObj = l.address || {};
-      const addrStr = [addrObj.street, addrObj.area].filter(Boolean).join(', ').trim();
-      ledgerMap.set(key, {
-        address: addrStr,
-        city:    addrObj.city    || l.city    || '',
-        state:   addrObj.state   || l.state   || '',
-        country: addrObj.country || l.country || '',
-        gstin:   l.gstin || l.gstNumber || '',
-        pincode: addrObj.pincode || l.pincode || '',
-      });
-    }
-    for (const c of clientDocs) {
-      const key = (c.name || '').trim().toLowerCase();
-      if (key && !ledgerMap.has(key)) ledgerMap.set(key, { address: c.address || '', city: c.city || '', state: c.state || '', country: c.country || '', gstin: c.gstin || '', pincode: c.pincode || '' });
+    // ── Step 1: Collect all unique party names that have blank billToAddress or billToPincode ──
+    const vouchers = await TallyVoucher.find({ voucherType: 'Sales' },
+      { partyName: 1, billToName: 1, billToAddress: 1, billToPincode: 1,
+        billToCity: 1, billToState: 1, billToGST: 1 }).lean();
+
+    const needsFix = vouchers.filter(v =>
+      !v.billToAddress || !String(v.billToAddress).trim() ||
+      !v.billToPincode || !String(v.billToPincode).trim()
+    );
+
+    if (!needsFix.length) {
+      return res.json({ success: true, message: 'All vouchers already have Bill To address and pincode.', data: { invoiceFixed: 0, voucherFixed: 0 } });
     }
 
-    // ── Fix Invoice collection ──
-    const invoices = await Invoice.find({}).lean();
-    let invoiceFixed = 0;
-    for (const inv of invoices) {
-      const updates = {};
-      // Clean dirty fields
-      if (isDirty(inv.billToAddress))     updates.billToAddress     = cleanVal(inv.billToAddress);
-      if (isDirty(inv.billToName))        updates.billToName        = inv.partyName || '';
-      if (isDirty(inv.billToGST))         updates.billToGST         = '';
-      if (isDirty(inv.shipToName))        updates.shipToName        = '';
-      if (isDirty(inv.shipToAddress))     updates.shipToAddress     = '';
-      if (isDirty(inv.shipToGST))         updates.shipToGST         = '';
-      // Backfill from ledger if still missing
-      const partyKey = ((updates.billToName || inv.billToName || inv.partyName) || '').trim().toLowerCase();
-      const ledger = ledgerMap.get(partyKey);
-      if (ledger) {
-        if (!updates.billToAddress && !cleanVal(inv.billToAddress)) updates.billToAddress = ledger.address;
-        if (!inv.billToCity)    updates.billToCity    = ledger.city;
-        if (!inv.billToState)   updates.billToState   = ledger.state;
-        if (!inv.billToCountry) updates.billToCountry = ledger.country;
-        if (!cleanVal(inv.billToGST) && ledger.gstin) updates.billToGST = ledger.gstin;
-        if (!inv.billToPincode  && ledger.pincode) updates.billToPincode = ledger.pincode;
+    const partyNames = [...new Set(needsFix.map(v => (v.billToName || v.partyName || '').trim()).filter(Boolean))];
+
+    // ── Step 2: Fetch full ledger address data from Tally ──────────────────
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    if (!cfg) {
+      return res.status(500).json({ success: false, message: 'Tally not configured. Go to Tally Settings first.' });
+    }
+
+    const co    = (cfg.companyName || '').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+
+    const ledgerXml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerAddress</ID></HEADER>
+<BODY><DESC>
+  <STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="LedgerAddress">
+      <TYPE>Ledger</TYPE>
+      <FETCH>Name, MailingName, Address, LedgerCity, LedgerState, StateName, Pincode, LedgerPincode, CountryName, GSTIN, PartyGSTIN, GSTRegistrationDetails</FETCH>
+    </COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
+</ENVELOPE>`;
+
+    const timeout = (cfg.useConnector && cfg.connectorId) ? 180000 : 60000;
+    const resp = await postXmlWithRetry(cfg, ledgerXml, timeout, 1);
+
+    // ── Step 3: Parse Tally response into a map: ledgerName → { address, city, state, pincode, gstin } ──
+    const tallyLedgerMap = new Map();
+    const ledgerBlocks = [...(resp || '').matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)];
+    for (const m of ledgerBlocks) {
+      const block = m[1];
+      const name  = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      if (!name) continue;
+
+      // Address lines
+      const addrLines = [...block.matchAll(/<ADDRESS>(.*?)<\/ADDRESS>/gi)].map(a => a[1].trim()).filter(Boolean);
+      const address   = addrLines.join(', ');
+
+      const city    = (block.match(/<LEDGERCITY>(.*?)<\/LEDGERCITY>/i)?.[1]   || '').trim();
+      const state   = (block.match(/<LEDGERSTATE>(.*?)<\/LEDGERSTATE>/i)?.[1]  ||
+                       block.match(/<STATENAME>(.*?)<\/STATENAME>/i)?.[1]      || '').trim();
+      // Pincode: try PINCODE first, then LEDGERPINCODE, then extract 6 digits from address
+      let pincode   = (block.match(/<PINCODE>(.*?)<\/PINCODE>/i)?.[1]          ||
+                       block.match(/<LEDGERPINCODE>(.*?)<\/LEDGERPINCODE>/i)?.[1] || '').trim().replace(/\D/g, '').slice(0, 6);
+      if (!pincode) {
+        const pin = (address + ' ' + city).match(/\b(\d{6})\b/);
+        if (pin) pincode = pin[1];
       }
-      if (Object.keys(updates).length > 0) {
-        await Invoice.updateOne({ _id: inv._id }, { $set: updates });
-        invoiceFixed++;
-      }
+      const gstin   = (block.match(/<GSTIN>(.*?)<\/GSTIN>/i)?.[1]             ||
+                       block.match(/<PARTYGSTIN>(.*?)<\/PARTYGSTIN>/i)?.[1]    || '').trim();
+
+      tallyLedgerMap.set(name.toLowerCase(), { address, city, state, pincode, gstin });
     }
 
-    // ── Fix TallyVoucher collection ──
-    const vouchers = await TallyVoucher.find({}).lean();
+    // ── Step 4: Update TallyVoucher documents from Tally ledger map ────────
     let voucherFixed = 0;
-    for (const v of vouchers) {
+    for (const v of needsFix) {
+      const partyKey = (v.billToName || v.partyName || '').trim().toLowerCase();
+      const ld = tallyLedgerMap.get(partyKey);
+      if (!ld) continue;
       const updates = {};
-      if (isDirty(v.billToAddress))   updates.billToAddress   = cleanVal(v.billToAddress);
-      if (isDirty(v.billToName))      updates.billToName      = v.partyName || '';
-      if (isDirty(v.billToGST))       updates.billToGST       = '';
-      if (isDirty(v.shipToName))      updates.shipToName      = '';
-      if (isDirty(v.shipToAddress))   updates.shipToAddress   = '';
-      if (isDirty(v.shipToGST))       updates.shipToGST       = '';
-      const partyKey = ((updates.billToName || v.billToName || v.partyName) || '').trim().toLowerCase();
-      const ledger = ledgerMap.get(partyKey);
-      if (ledger) {
-        if (!updates.billToAddress && !cleanVal(v.billToAddress)) updates.billToAddress = ledger.address;
-        if (!v.billToCity)    updates.billToCity    = ledger.city;
-        if (!v.billToState)   updates.billToState   = ledger.state;
-        if (!v.billToCountry) updates.billToCountry = ledger.country;
-        if (!cleanVal(v.billToGST) && ledger.gstin) updates.billToGST = ledger.gstin;
-        if (!v.billToPincode  && ledger.pincode) updates.billToPincode = ledger.pincode;
-      }
+      if ((!v.billToAddress || !String(v.billToAddress).trim()) && ld.address) updates.billToAddress = ld.address;
+      if (!v.billToCity    && ld.city)    updates.billToCity    = ld.city;
+      if (!v.billToState   && ld.state)   updates.billToState   = ld.state;
+      if ((!v.billToPincode || !String(v.billToPincode).trim()) && ld.pincode) updates.billToPincode = ld.pincode;
+      if (!v.billToGST     && ld.gstin)   updates.billToGST     = ld.gstin;
       if (Object.keys(updates).length > 0) {
-        await TallyVoucher.updateOne({ _id: v._id }, { $set: updates });
+        await TallyVoucher.updateMany(
+          { $or: [{ billToName: v.billToName || v.partyName }, { partyName: v.partyName }],
+            voucherType: 'Sales' },
+          { $set: updates }
+        );
         voucherFixed++;
       }
     }
 
     res.json({
       success: true,
-      message: `Fixed ${invoiceFixed} invoices and ${voucherFixed} vouchers`,
-      data: { invoiceFixed, voucherFixed },
+      message: `Fetched ${tallyLedgerMap.size} ledgers from Tally. Fixed ${voucherFixed} voucher party records.`,
+      data: { invoiceFixed: 0, voucherFixed, tallyLedgersFound: tallyLedgerMap.size, partiesNeedingFix: partyNames.length },
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) {
+    console.error('[fixBillToData]', e);
+    res.status(500).json({ success: false, message: e.message });
+  }
 };
 
 export const createVoucher = async (req, res) => {
