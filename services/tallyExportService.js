@@ -1490,9 +1490,9 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     if (state && !lines.some(line => line.toLowerCase().includes(state.toLowerCase()))) {
       lines.push(state);
     }
-    if (pincode && !lines.some(line => line.includes(pincode))) {
-      lines.push(pincode);
-    }
+    // Pincode is NOT added to address lines — it is emitted separately via
+    // <PARTYPINCODE> / <CONSIGNEEPINCODE> tags. Adding it here causes Tally
+    // to render it appended to the city line (e.g. "Bangalore-560995").
     return lines;
   };
 
