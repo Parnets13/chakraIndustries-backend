@@ -9,16 +9,61 @@ import { genOrderId } from '../utils/orderIdGenerator.js';
 // Get all dealer orders grouped by status
 export const getDealerOrders = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, source, search, page = 1, limit = 50 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
     const filter = {};
-    if (status) filter.status = status;
-    
-    const orders = await SalesOrder.find(filter)
-      .populate('dealerId')
-      .populate('createdBy')
-      .sort({ createdAt: -1 });
-    
-    res.status(200).json({ success: true, data: orders });
+    // By default show DealerApp orders; pass source=all to see everything
+    if (source === 'all') {
+      // no filter
+    } else {
+      filter.source = 'DealerApp';
+    }
+    if (status && status !== 'All') filter.status = status;
+    if (search) {
+      filter.$or = [
+        { orderId:  { $regex: search, $options: 'i' } },
+        { customer: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const [orders, total] = await Promise.all([
+      SalesOrder.find(filter)
+        .populate('dealerId', 'name businessName mobile email dealerCode')
+        .populate('lineItems.productId', 'name sku')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      SalesOrder.countDocuments(filter),
+    ]);
+
+    // Enrich with invoice data
+    const orderIds = orders.map(o => o._id);
+    const invoices = await Invoice.find({ salesOrderId: { $in: orderIds } }).lean();
+    const invMap   = new Map(invoices.map(i => [String(i.salesOrderId), i]));
+
+    const data = orders.map(order => {
+      const inv = invMap.get(String(order._id));
+      return {
+        ...order,
+        invoice: inv || null,
+        dealerName:    order.dealerId?.businessName || order.dealerId?.name || order.customer,
+        dealerMobile:  order.dealerId?.mobile || '',
+        dealerCode:    order.dealerId?.dealerCode || '',
+        invoiceNo:     inv?.invoiceNo || null,
+        invoiceStatus: inv ? 'Generated' : 'Pending',
+        paymentStatus: inv?.paymentStatus || 'Unpaid',
+        grandTotal:    inv?.grandTotal || order.value || 0,
+        paidAmount:    inv?.paidAmount || 0,
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      data,
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) },
+    });
   } catch (error) {
     console.error('getDealerOrders error:', error);
     res.status(500).json({ success: false, message: error.message });

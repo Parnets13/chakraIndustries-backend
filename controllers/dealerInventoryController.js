@@ -119,6 +119,107 @@ export const getDealerWarehouseItems = async (req, res) => {
   }
 };
 
+// Get full inventory stock for the Dealer App InventoryPage
+// Returns items with name, sku, qty, warehouse, category, status
+export const getDealerInventoryStock = async (req, res) => {
+  try {
+    const search = String(req.query.search || '').trim();
+
+    const match = {};
+    if (search) {
+      match.$or = [
+        { sku:  { $regex: search, $options: 'i' } },
+        { name: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    console.log('=== getDealerInventoryStock called ===');
+
+    const items = await InventoryItem.find(match)
+      .populate('category', 'name')
+      .lean();
+
+    console.log(`Found ${items.length} InventoryItem records`);
+
+    // Enrich with ItemMaster data where possible
+    const skus = [...new Set(items.map(i => normalizeSku(i.sku)).filter(Boolean))];
+    const masters = await ItemMaster.find({ sku: { $in: skus } })
+      .populate('category', 'name')
+      .lean();
+    const masterBySku = {};
+    masters.forEach(m => { masterBySku[normalizeSku(m.sku)] = m; });
+
+    const mappedItems = items.map((item, index) => {
+      const master = masterBySku[normalizeSku(item.sku)] || {};
+
+      const name = item.name || master.name || item.sku || `Item-${index}`;
+      const sku  = item.sku  || master.sku  || master.itemId || `ITEM-${index}`;
+      const qty  = getQty(item);
+
+      // Category
+      let categoryName = null;
+      if (item.category?.name)        categoryName = item.category.name;
+      else if (master.category?.name) categoryName = master.category.name;
+      else if (typeof item.category === 'string' && item.category) categoryName = item.category;
+
+      // Status
+      const rawStatus = item.status || 'Active';
+      let status = 'Active';
+      if (rawStatus === 'Dead'     || rawStatus === 'Inactive') status = 'Dead';
+      else if (rawStatus === 'Critical' || rawStatus === 'Low Stock') status = 'Critical';
+      else status = 'Active';
+
+      // Warehouse — keep null/empty as null so the stats count is accurate
+      const warehouseRaw = String(item.warehouse || '').trim();
+      const warehouse = warehouseRaw || null;
+
+      return {
+        _id:             item._id,
+        name,
+        itemName:        name,
+        sku,
+        itemCode:        sku,
+        qty,
+        currentQuantity: qty,
+        available:       qty,
+        warehouse:       warehouse || 'Main Warehouse', // display fallback only
+        warehouseRaw:    warehouse,                     // null when truly unset
+        category:        categoryName,
+        categoryName,
+        status,
+        unit:            item.unit || master.unit || 'Nos',
+        unitPrice:       master.unitPrice || master.sellingPrice || 0,
+      };
+    });
+
+    // Stats — count only items that have a real warehouse value
+    const totalSKU      = mappedItems.length;
+    const criticalItems = mappedItems.filter(i => i.status === 'Critical').length;
+    const deadItems     = mappedItems.filter(i => i.status === 'Dead').length;
+    const totalUnits    = mappedItems.reduce((s, i) => s + i.qty, 0);
+    // Only count warehouses that actually exist in data (not the 'Main Warehouse' fallback)
+    const warehouseSet  = new Set(mappedItems.map(i => i.warehouseRaw).filter(Boolean));
+    const warehouses    = warehouseSet.size || 1; // at least 1 if any items exist
+
+    console.log(`=== Stock response: ${totalSKU} items, ${warehouses} warehouses ===`);
+
+    res.json({
+      success: true,
+      data: mappedItems,
+      statistics: {
+        totalSKU,
+        criticalItems,
+        deadItems,
+        totalUnits,
+        warehouses,
+      },
+    });
+  } catch (error) {
+    console.error('getDealerInventoryStock error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to fetch inventory stock' });
+  }
+};
+
 // Get overall inventory (kept for backward compatibility)
 export const getDealerInventory = async (req, res) => {
   try {

@@ -120,10 +120,28 @@ const materialReturnSchema = new mongoose.Schema({
   warehouseName:      { type: String, default: '' },
   requestedBy:        { type: String, default: '' },
   approvedBy:         { type: String, default: '' },
-  reason:             { type: String, default: '' }
+  reason:             { type: String, default: '' },
+  remarks:            { type: String, default: '' },
+  photoUrl:           { type: String, default: '' },
+  orderedQty:         { type: Number, default: 0 },
+
+  // Dealer app link — set when return is raised from dealer portal
+  dealerId:           { type: mongoose.Schema.Types.ObjectId, ref: 'Dealer', default: null },
+
+  // Idempotency key — prevents duplicate submissions from network retries / double-tap
+  // Sparse + unique: only enforced when a key is present; absent/undefined allowed multiple times.
+  // IMPORTANT: no `default` here — when the frontend sends no key the field must be
+  // completely absent from the document so the sparse compound index skips it.
+  idempotencyKey:     { type: String, sparse: true },
 }, {
   timestamps: true
 });
+
+// Compound sparse unique index: same key for same dealer = duplicate
+materialReturnSchema.index(
+  { dealerId: 1, idempotencyKey: 1 },
+  { unique: true, sparse: true, name: 'dealer_idempotency_key' }
+);
 
 const MaterialReturn = mongoose.models.MaterialReturn || mongoose.model('MaterialReturn', materialReturnSchema);
 export default MaterialReturn;

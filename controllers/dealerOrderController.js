@@ -56,21 +56,29 @@ const belongsToDealer = (order, dealer) => {
 };
 
 const toDealerOrderSummary = (order) => ({
-  mongodbId:   order._id,
-  id:          order.orderId,
-  customer:    order.customer,
-  status:      order.status,
-  priority:    order.priority || 'Normal',
-  totalItems:  order.itemCount || (Array.isArray(order.lineItems) ? order.lineItems.length : 0),
-  totalQty:    order.totalQuantity || 0,
-  amount:      `₹${Number(order.value || 0).toLocaleString('en-IN')}`,
-  value:       order.value || 0,
-  subTotal:    order.subTotal || 0,
-  totalGst:    order.totalGst || 0,
-  source:      order.source || 'ERP',
-  createdAt:   order.createdAt,
-  orderDate:   order.orderDate,
-  lineItems:   order.lineItems || [],
+  mongodbId:    order._id,
+  orderId:      order.orderId,
+  id:           order.orderId,
+  customer:     order.customer,
+  status:       order.status,
+  priority:     order.priority || 'Normal',
+  totalItems:   order.itemCount || (Array.isArray(order.lineItems) ? order.lineItems.length : 0),
+  totalQty:     order.totalQuantity || 0,
+  amount:       `₹${Number(order.value || 0).toLocaleString('en-IN')}`,
+  value:        order.value || 0,
+  subTotal:     order.subTotal || 0,
+  totalGst:     order.totalGst || 0,
+  source:       order.source || 'ERP',
+  createdAt:    order.createdAt,
+  orderDate:    order.orderDate,
+  lineItems:    order.lineItems || [],
+  notes:        order.notes || '',
+  remarks:      order.remarks || '',
+  paymentMode:  order.paymentMode || '',
+  poNumber:     order.poNumber || '',
+  referenceNumber: order.referenceNumber || '',
+  deliveryAddress: order.deliveryAddress || '',
+  expectedDeliveryDate: order.expectedDeliveryDate || null,
   statusHistory: order.statusHistory || [],
 });
 
@@ -96,15 +104,12 @@ export const getDealerOrders = async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
     const skip  = (page - 1) * limit;
 
-    const dealerCustomer = req.dealer.businessName || req.dealer.name;
-
-    // Build a union filter: orders placed by this dealer (by clientId, name, or dealerId)
-    const baseOr = [];
-    if (req.dealer.erpClientId) baseOr.push({ customerId: req.dealer.erpClientId });
-    if (dealerCustomer)         baseOr.push({ customer: dealerCustomer });
-    if (req.dealer._id)         baseOr.push({ dealerId: req.dealer._id });
-
-    const filter = baseOr.length ? { $or: baseOr } : {};
+    // Only show orders created from the Dealer App by this specific dealer.
+    // We do NOT show ERP orders (source !== 'DealerApp') on the dealer-facing screen.
+    const filter = {
+      source: 'DealerApp',
+      dealerId: req.dealer._id,
+    };
 
     if (status && status !== 'All') {
       // Map UI filter labels to actual DB status values
@@ -530,6 +535,197 @@ export const repeatDealerOrder = async (req, res) => {
 };
 
 /**
+ * PUT /api/dealer/orders/:id
+ * Update priority and notes on an editable order (Order Placed / Pending Approval).
+ */
+export const updateDealerOrder = async (req, res) => {
+  try {
+    const order = await findDealerOrder(req.params.id, req.dealer);
+    if (!order)              return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order === 'forbidden') return res.status(403).json({ success: false, message: 'Access denied' });
+
+    const EDITABLE = ['Order Placed', 'Pending Approval'];
+    if (!EDITABLE.includes(order.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot edit an order with status "${order.status}"`,
+      });
+    }
+
+    const { priority, notes } = req.body;
+    if (priority) order.priority = priority;
+    if (notes !== undefined) order.notes = notes;
+    await order.save();
+
+    res.json({ success: true, data: toDealerOrderSummary(order) });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message || 'Failed to update order' });
+  }
+};
+
+/**
+ * POST /api/dealer/orders/create-form
+ * Create a new order directly from the Create Order form (without cart).
+ * Body: {
+ *   categoryId, vendorIds[], productId, quantity, unitPrice,
+ *   discount, gstPercent, expectedDeliveryDate, remarks, priority, saveDraft
+ * }
+ */
+export const createDealerOrderForm = async (req, res) => {
+  const maxRetries = 3;
+  let attempts = 0;
+  const idempotencyKey = req.headers['x-idempotency-key'];
+
+  while (attempts < maxRetries) {
+    try {
+      const {
+        productId, quantity, unitPrice: bodyUnitPrice, discount = 0,
+        gstPercent: bodyGst, expectedDeliveryDate, orderDate, remarks, priority = 'Normal',
+        saveDraft = false, paymentMode = '', poNumber = '', referenceNumber = '',
+        deliveryAddress = '', vendor = '',
+      } = req.body;
+
+      if (!productId) {
+        return res.status(400).json({ success: false, message: 'Product is required' });
+      }
+      const qty = parseInt(quantity, 10) || 1;
+      if (qty < 1) {
+        return res.status(400).json({ success: false, message: 'Quantity must be at least 1' });
+      }
+
+      // Idempotency check
+      if (idempotencyKey) {
+        const existing = await SalesOrder.findOne({
+          dealerId: req.dealer._id,
+          source: 'DealerApp',
+          'metadata.idempotencyKey': idempotencyKey,
+        });
+        if (existing) {
+          return res.status(200).json({
+            success: true,
+            message: 'Order already placed (idempotent)',
+            data: toDealerOrderSummary(existing),
+          });
+        }
+      }
+
+      // Fetch product
+      const product = await ItemMaster.findById(productId).populate('category', 'name');
+      if (!product) {
+        return res.status(400).json({ success: false, message: 'Product not found' });
+      }
+
+      // Pricing
+      const basePrice    = bodyUnitPrice != null ? Number(bodyUnitPrice) : (product.sellingPrice || product.unitPrice || 0);
+      const discPct      = Math.max(0, Math.min(100, Number(discount) || 0));
+      const unitPrice    = +(basePrice * (1 - discPct / 100)).toFixed(2);
+      const gstPct       = bodyGst != null ? Number(bodyGst) : (product.gst || 0);
+      const itemSubTotal = +(unitPrice * qty).toFixed(2);
+      const itemGst      = +((itemSubTotal * gstPct) / 100).toFixed(2);
+      const itemTotal    = +(itemSubTotal + itemGst).toFixed(2);
+
+      const lineItems = [{
+        productId:  product._id,
+        sku:        product.sku,
+        name:       product.name,
+        category:   product.category?.name || '',
+        quantity:   qty,
+        unitPrice,
+        gstPercent: gstPct,
+        gstAmount:  itemGst,
+        total:      itemTotal,
+      }];
+
+      const dealerCustomer = req.dealer.businessName || req.dealer.name;
+      const orderStatus    = saveDraft ? 'Order Placed' : 'Order Placed';
+      const orderId        = await genOrderId();
+
+      const order = await SalesOrder.create({
+        orderId,
+        customer:        dealerCustomer,
+        customerId:      req.dealer.erpClientId || undefined,
+        dealerId:        req.dealer._id,
+        source:          'DealerApp',
+        status:          orderStatus,
+        priority,
+        orderDate:       orderDate ? new Date(orderDate) : new Date(),
+        expectedDeliveryDate: expectedDeliveryDate ? new Date(expectedDeliveryDate) : undefined,
+        deliveryAddress: deliveryAddress || req.dealer.address || '',
+        remarks:         remarks || `Order placed from dealer app by ${dealerCustomer}`,
+        notes:           remarks || '',
+        paymentMode:     paymentMode || '',
+        poNumber:        poNumber || '',
+        referenceNumber: referenceNumber || '',
+        itemCount:       1,
+        totalQuantity:   qty,
+        subTotal:        itemSubTotal,
+        totalGst:        itemGst,
+        value:           itemTotal,
+        lineItems,
+        statusHistory: [
+          { status: 'Order Placed',     at: new Date(), note: `Order placed from dealer app by ${dealerCustomer}` },
+          { status: 'Pending Approval', at: new Date(), note: 'Order awaiting approval' },
+        ],
+        metadata: { idempotencyKey: idempotencyKey || undefined },
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: saveDraft ? 'Draft saved successfully' : 'Order created successfully',
+        data: toDealerOrderSummary(order),
+      });
+    } catch (error) {
+      if (error.code === 11000 && error.keyPattern?.orderId) {
+        attempts++;
+        if (attempts >= maxRetries) {
+          return res.status(409).json({ success: false, message: 'Order ID collision — please try again' });
+        }
+        await new Promise(resolve => setTimeout(resolve, 100 * attempts));
+      } else {
+        return res.status(400).json({ success: false, message: error.message || 'Failed to create order' });
+      }
+    }
+  }
+};
+
+/**
+ * POST /api/dealer/orders/:id/place
+ * Dealer submits an "Order Placed" order to the ERP for approval.
+ * Transitions status: "Order Placed" → "Pending Approval"
+ */
+export const placeDealerOrder = async (req, res) => {
+  try {
+    const order = await findDealerOrder(req.params.id, req.dealer);
+    if (!order)              return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order === 'forbidden') return res.status(403).json({ success: false, message: 'Access denied' });
+
+    if (order.status !== 'Order Placed') {
+      return res.status(400).json({
+        success: false,
+        message: `Only "Order Placed" orders can be submitted. Current status: "${order.status}"`,
+      });
+    }
+
+    order.status = 'Pending Approval';
+    order.statusHistory = order.statusHistory || [];
+    order.statusHistory.push({
+      status: 'Pending Approval',
+      at:     new Date(),
+      note:   `Order submitted for approval by ${req.dealer.businessName || req.dealer.name}`,
+    });
+    await order.save();
+
+    res.json({
+      success: true,
+      message: 'Order placed successfully. Awaiting ERP approval.',
+      data: toDealerOrderSummary(order),
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || 'Failed to place order' });
+  }
+};
+
+/**
  * DELETE /api/dealer/orders/:id
  * Delete a pending or cancelled dealer order and its linked invoices.
  */
@@ -539,8 +735,9 @@ export const deleteDealerOrder = async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     if (order === 'forbidden') return res.status(403).json({ success: false, message: 'Access denied' });
 
-    // Only allow deleting orders that are Pending or Cancelled
-    if (!['Pending', 'Cancelled'].includes(order.status)) {
+    // Only allow deleting orders that haven't been approved/processed yet
+    const DELETABLE_STATUSES = ['Order Placed', 'Pending Approval', 'Pending', 'Cancelled', 'Rejected'];
+    if (!DELETABLE_STATUSES.includes(order.status)) {
       return res.status(400).json({ success: false, message: `Cannot delete an order with status "${order.status}"` });
     }
 

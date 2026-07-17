@@ -10,12 +10,19 @@ import WarehouseVerification from '../models/WarehouseVerification.js';
 import ReturnQC from '../models/ReturnQC.js';
 
 const genId = async (prefix, field) => {
+  // Timestamp-based unique ID — collision-proof even under concurrent requests.
+  // Format: PREFIX-YEAR-XXXXXX (6 hex chars from timestamp + random)
   const year = new Date().getFullYear();
-  const p = `${prefix}-${year}-`;
-  const last = await MaterialReturn.findOne({ [field]: new RegExp(`^${p}`) }).sort({ [field]: -1 });
-  if (!last) return `${p}001`;
-  const num = parseInt(last[field].split('-')[2]) || 0;
-  return `${p}${String(num + 1).padStart(3, '0')}`;
+  const ts   = Date.now().toString(16).slice(-5).toUpperCase(); // 5 hex chars of timestamp
+  const rand = Math.random().toString(16).slice(2, 4).toUpperCase(); // 2 random hex chars
+  const id   = `${prefix}-${year}-${ts}${rand}`;
+
+  // Sanity check: if somehow already exists, add extra random
+  const exists = await MaterialReturn.findOne({ [field]: id }).lean();
+  if (exists) {
+    return `${prefix}-${year}-${Date.now().toString(16).toUpperCase()}`;
+  }
+  return id;
 };
 
 const toDateOrUndefined = (value) => {

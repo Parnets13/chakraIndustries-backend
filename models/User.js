@@ -9,8 +9,9 @@ const userSchema = new mongoose.Schema({
   },
   email: {
     type: String,
-    required: [true, 'Email is required'],
+    required: false,
     unique: true,
+    sparse: true,  // allows multiple docs without email (null is not unique)
     lowercase: true,
     trim: true,
   },
@@ -37,6 +38,33 @@ const userSchema = new mongoose.Schema({
   zone: {
     type: String,
     trim: true,
+  },
+  // Registration / profile fields
+  address: {
+    type: String,
+    trim: true,
+  },
+  city: {
+    type: String,
+    trim: true,
+  },
+  state: {
+    type: String,
+    trim: true,
+  },
+  pincode: {
+    type: String,
+    trim: true,
+  },
+  // Dealer status: 'pending' until admin approves
+  status: {
+    type: String,
+    enum: ['pending', 'approved', 'rejected'],
+    default: 'pending',
+  },
+  // Profile photo — stored as base64 data URI or HTTPS URL
+  photo: {
+    type: String,
   },
   isVerified: {
     type: Boolean,

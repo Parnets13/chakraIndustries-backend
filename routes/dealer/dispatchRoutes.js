@@ -1,19 +1,57 @@
 import express from 'express';
 import DocketTracking from '../../models/DocketTracking.js';
 import SalesOrder from '../../models/SalesOrder.js';
+import { protectDealer } from '../../middleware/dealerAuthMiddleware.js';
 
 const router = express.Router();
+
+// Helper to get dealer's sales order IDs
+const getDealerSalesOrderIds = async (dealer) => {
+  const dealerCustomer = dealer.businessName || dealer.name;
+  const baseOr = [];
+  if (dealer.erpClientId) baseOr.push({ customerId: dealer.erpClientId });
+  if (dealerCustomer) baseOr.push({ customer: { $regex: dealerCustomer, $options: 'i' } });
+  if (dealer._id) baseOr.push({ dealerId: dealer._id });
+  if (baseOr.length === 0) return [];
+  
+  const orders = await SalesOrder.find({ $or: baseOr }, { _id: 1 });
+  return orders.map(o => o._id);
+};
+
+// Helper to get dealer's material return IDs (for return dispatches)
+const getDealerMrIds = async (dealer) => {
+  const MaterialReturn = (await import('../../models/MaterialReturn.js')).default;
+  const baseOr = [];
+  if (dealer._id) baseOr.push({ dealerId: dealer._id });
+  if (dealer.businessName) baseOr.push({ customerName: { $regex: dealer.businessName, $options: 'i' } });
+  if (dealer.name) baseOr.push({ customerName: { $regex: dealer.name, $options: 'i' } });
+  if (dealer.name) baseOr.push({ requestedBy: dealer.name });
+  
+  const returns = await MaterialReturn.find({ $or: baseOr }, { mrId: 1 });
+  return returns.map(r => r.mrId);
+};
 
 // @route   GET /api/dealer/dispatch
 // @desc    Get all dispatches for dealer
 // @access  Private
-router.get('/', async (req, res) => {
+router.get('/', protectDealer, async (req, res) => {
   try {
     const { status, search, page = 1, limit = 10 } = req.query;
     const skip = (page - 1) * limit;
 
-    // Build query
-    const query = { returnType: { $exists: false } }; // Exclude returns
+    const dealer = req.dealer;
+
+    // Get dealer's sales order IDs and material return IDs
+    const salesOrderIds = await getDealerSalesOrderIds(dealer);
+    const mrIds = await getDealerMrIds(dealer);
+
+    // Build query - filter by dealer's sales orders or returns
+    const query = {
+      $or: [
+        { salesOrderId: { $in: salesOrderIds } },
+        { mrId: { $in: mrIds } }
+      ]
+    };
     
     if (status && status !== 'All Orders') {
       if (status === 'In Transit') {
@@ -26,11 +64,15 @@ router.get('/', async (req, res) => {
     }
 
     if (search) {
-      query.$or = [
-        { docketId: { $regex: search, $options: 'i' } },
-        { invoiceNo: { $regex: search, $options: 'i' } },
-        { courierPartner: { $regex: search, $options: 'i' } }
-      ];
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { docketId: { $regex: search, $options: 'i' } },
+          { invoiceNo: { $regex: search, $options: 'i' } },
+          { courierPartner: { $regex: search, $options: 'i' } },
+          { productName: { $regex: search, $options: 'i' } }
+        ]
+      });
     }
 
     const dispatches = await DocketTracking.find(query)
@@ -46,7 +88,7 @@ router.get('/', async (req, res) => {
       dispatches.map(async (dispatch) => {
         if (dispatch.salesOrderId) {
           const salesOrder = await SalesOrder.findById(dispatch.salesOrderId)
-            .select('orderId value lineItems')
+            .select('orderId value lineItems customer')
             .lean();
           
           return {
@@ -80,9 +122,19 @@ router.get('/', async (req, res) => {
 // @route   GET /api/dealer/dispatch/:id/track
 // @desc    Track dispatch with live updates
 // @access  Private
-router.get('/:id/track', async (req, res) => {
+router.get('/:id/track', protectDealer, async (req, res) => {
   try {
-    const dispatch = await DocketTracking.findById(req.params.id).lean();
+    const dealer = req.dealer;
+    const salesOrderIds = await getDealerSalesOrderIds(dealer);
+    const mrIds = await getDealerMrIds(dealer);
+
+    const dispatch = await DocketTracking.findOne({
+      _id: req.params.id,
+      $or: [
+        { salesOrderId: { $in: salesOrderIds } },
+        { mrId: { $in: mrIds } }
+      ]
+    }).lean();
 
     if (!dispatch) {
       return res.status(404).json({
