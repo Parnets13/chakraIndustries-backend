@@ -185,7 +185,7 @@ app.use(cors({
     // Allow requests with no origin (mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
     const allowed = [
-      'http://localhost:5001/api/api',
+      'http://localhost:5000/api/api',
       'https://erp.majesticmall.net',
       'https://majesticmall.net',
       'http://localhost:3000',
@@ -322,6 +322,10 @@ connectDB();
 const httpServer = http.createServer(app);
 initConnectorServer(httpServer);
 
+// Increase server timeout for long-running SSE export connections (2 hours)
+httpServer.timeout = 2 * 60 * 60 * 1000; // 2 hours
+httpServer.keepAliveTimeout = 65000; // 65 seconds, longer than heartbeat interval
+
 httpServer.listen(PORT, async () => {
   console.log(`✓ Server running on port ${PORT}`);
   console.log(`✓ Connector Socket.IO server ready`);
@@ -369,7 +373,44 @@ httpServer.listen(PORT, async () => {
   }
   // ────────────────────────────────────────────────────────────────────────────
 
-  // ── SMTP startup verification ────────────────────────────────────────────
+  // ── ConnectorRegistration migration — back-fill connectorSecret from TallyConfig ─
+  // Old registrations were created before connectorSecret was stored per-device.
+  // Copy the secret from TallyConfig into any registration that is missing it.
+  try {
+    const ConnectorRegistration = (await import('./models/ConnectorRegistration.js')).default;
+    const cfg = await (await import('./models/TallyConfig.js')).default.findOne({}, null, { sort: { _id: 1 } });
+    const missingSecret = await ConnectorRegistration.find({ $or: [{ connectorSecret: { $exists: false } }, { connectorSecret: '' }] });
+    for (const reg of missingSecret) {
+      // If this registration's connectorId matches what TallyConfig has, use that secret
+      if (cfg?.connectorSecret && cfg?.connectorId === reg.connectorId) {
+        reg.connectorSecret = cfg.connectorSecret;
+      } else if (cfg?.connectorSecret) {
+        reg.connectorSecret = cfg.connectorSecret;
+      }
+      // Mark as default if it matches TallyConfig's connectorId (legacy single-connector setup)
+      if (cfg?.connectorId === reg.connectorId && !reg.isDefault) {
+        reg.isDefault = true;
+      }
+      await reg.save();
+    }
+    if (missingSecret.length > 0) {
+      console.log(`[Startup] Back-filled connectorSecret for ${missingSecret.length} existing connector registration(s)`);
+    }
+    // If no registration is marked as default, promote the oldest one
+    const defaultCount = await ConnectorRegistration.countDocuments({ isDefault: true });
+    if (defaultCount === 0) {
+      const oldest = await ConnectorRegistration.findOne({}).sort({ createdAt: 1 });
+      if (oldest) {
+        oldest.isDefault = true;
+        await oldest.save();
+        console.log(`[Startup] Auto-promoted oldest connector as default: ${oldest.connectorId}`);
+      }
+    }
+  } catch (migErr) {
+    console.warn('[Startup] ConnectorRegistration migration error (non-fatal):', migErr.message);
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   try {
     const { verifyTransporter } = await import('./utils/emailService.js');
     await verifyTransporter();
@@ -379,6 +420,81 @@ httpServer.listen(PORT, async () => {
     console.warn(`⚠ SMTP verification failed at startup: ${err.message}`);
     console.warn('  Email sending will not work until EMAIL_USERNAME / EMAIL_PASSWORD are correct in .env');
   }
+  // ────────────────────────────────────────────────────────────────────────
+
+  // ── Auto-renormalize invoices on every startup ───────────────────────────
+  // Runs silently in the background. Picks up any normalizer bug-fixes
+  // (e.g. the itemSalesBase fix that was causing Tally's "Tax amount does not
+  // match" e-invoice warning) without requiring any manual action.
+  // Only re-normalizes invoices whose tallySync=false (not yet exported) so
+  // already-exported vouchers are not re-queued unnecessarily.
+  setTimeout(async () => {
+    try {
+      const Invoice    = (await import('./models/Invoice.js')).default;
+      const ItemMaster = (await import('./models/ItemMaster.js')).default;
+      const TallyConfig = (await import('./models/TallyConfig.js')).default;
+      const { normalizeToTallyVoucher } = await import('./services/normalizeToTallyVoucher.js');
+
+      const cfg = await TallyConfig.findOne({}, 'tallyPeriodEnd').lean();
+      const periodEnd = cfg?.tallyPeriodEnd || null;
+
+      // Target: ALL ERP invoices — re-normalize even already-exported ones
+      // so that corrected rates get sent to Tally on the next export run (Alter).
+      const pending = await Invoice.find(
+        { source: { $nin: ['Tally', 'tally'] } },
+        null,
+        { lean: true }
+      );
+
+      if (!pending.length) {
+        console.log('[Startup] Auto-renormalize: no pending invoices to update');
+        return;
+      }
+
+      // Pre-fetch all item masters in one query
+      const allNames = [...new Set(
+        pending.flatMap(inv => (inv.items || []).map(i => (i.description || i.name || '').trim()).filter(Boolean))
+      )];
+      const masters = allNames.length
+        ? await ItemMaster.find({ name: { $in: allNames } }, 'name hsn tallySalesLedger').lean()
+        : [];
+      const masterMap = new Map(masters.map(m => [m.name, m]));
+
+      const ops = [];
+      let fixed = 0, skipped = 0;
+
+      for (const inv of pending) {
+        try {
+          const enrichedItems = (inv.items || []).map(item => {
+            const name = (item.description || item.name || '').trim();
+            const im   = masterMap.get(name);
+            return {
+              ...item,
+              hsn:              (item.hsn || '').trim()              || (im?.hsn              || '').trim(),
+              tallySalesLedger: (item.tallySalesLedger || '').trim() || (im?.tallySalesLedger || '').trim(),
+            };
+          });
+          const tv = normalizeToTallyVoucher({ ...inv, items: enrichedItems }, { periodEnd });
+          ops.push({
+            updateOne: {
+              filter: { _id: inv._id },
+              update: { $set: { tallyVoucher: tv, tallySync: false, tallySyncAt: null } },
+            },
+          });
+          fixed++;
+        } catch (_) {
+          skipped++;
+        }
+      }
+
+      if (ops.length) {
+        await Invoice.bulkWrite(ops, { ordered: false });
+        console.log(`[Startup] Auto-renormalize: updated ${fixed} invoice(s) (${skipped} skipped)`);
+      }
+    } catch (e) {
+      console.warn('[Startup] Auto-renormalize error (non-fatal):', e.message);
+    }
+  }, 5000); // 5-second delay to let MongoDB settle after startup
   // ────────────────────────────────────────────────────────────────────────
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {

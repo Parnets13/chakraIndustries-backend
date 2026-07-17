@@ -1,5 +1,94 @@
 import mongoose from 'mongoose';
 
+// ─── TallyVoucher sub-document ────────────────────────────────────────────────
+// Mirrors Tally's Sales Voucher internal structure exactly.
+// Populated at write time by normalizeToTallyVoucher() so export is pure serialization.
+
+const billAllocationSchema = new mongoose.Schema({
+  name:     { type: String, default: '' },
+  billType: { type: String, default: 'New Ref' },
+  amount:   { type: Number, default: 0 },
+}, { _id: false });
+
+const accountingAllocationSchema = new mongoose.Schema({
+  ledgerName:          { type: String, required: true },
+  isDeemedPositive:    { type: Boolean, default: false },
+  isLastDeemedPositive:{ type: Boolean, default: false },
+  amount:              { type: Number, default: 0 },
+}, { _id: false });
+
+const ledgerEntrySchema = new mongoose.Schema({
+  ledgerName:          { type: String, required: true },
+  isDeemedPositive:    { type: Boolean, default: false },
+  isLastDeemedPositive:{ type: Boolean, default: false },
+  amount:              { type: Number, required: true },
+  billAllocations:     { type: [billAllocationSchema], default: [] },
+}, { _id: false });
+
+const inventoryEntrySchema = new mongoose.Schema({
+  stockItemName:        { type: String, required: true },
+  isDeemedPositive:     { type: Boolean, default: false },
+  isLastDeemedPositive: { type: Boolean, default: false },
+  rate:                 { type: String, default: '' },   // "100.00/Nos"
+  amount:               { type: Number, default: 0 },
+  actualQty:            { type: String, default: '' },   // "5 Nos"
+  billedQty:            { type: String, default: '' },   // "5 Nos"
+  accountingAllocations:{ type: [accountingAllocationSchema], default: [] },
+  // GST source fields — required by Tally for GST-enabled inventory vouchers
+  gstSourceType:        { type: String, default: 'Ledger' },   // GSTSOURCETYPE
+  gstLedgerSource:      { type: String, default: '' },          // GSTLEDGERSOURCE
+  hsnSourceType:        { type: String, default: 'Ledger' },   // HSNSOURCETYPE
+  hsnLedgerSource:      { type: String, default: '' },          // HSNLEDGERSOURCE
+  gstOverrideTaxability:{ type: String, default: 'Taxable' },  // GSTOVRDNTAXABILITY
+  gstOverrideSupplyType:{ type: String, default: 'Goods' },    // GSTOVRDNTYPEOFSUPPLY
+  gstHsnName:           { type: String, default: '' },          // GSTHSNNAME (HSN code)
+  // Rate details for GST tax calculation (RATEDETAILS.LIST in Tally)
+  rateDetails: [{
+    gstRateDutyHead:     { type: String, default: '' },
+    gstRateEvaluationType:{ type: String, default: 'Based on Value' },
+    gstRate:             { type: Number, default: 0 }
+  }],
+}, { _id: false });
+
+const tallyVoucherSchema = new mongoose.Schema({
+  voucherType:         { type: String, default: 'Sales' },
+  voucherNumber:       { type: String, required: true },
+  date:                { type: String, required: true },  // YYYYMMDD
+  effectiveDate:       { type: String, required: true },  // YYYYMMDD
+  partyLedgerName:     { type: String, required: true },
+  isinvoice:           { type: Boolean, default: true },
+  buyersOrderNo:       { type: String, default: '' },
+  // PO Date — YYYYMMDD format, written to BASICORDERDATE in Tally XML
+  poDate:              { type: String, default: '' },
+  narration:           { type: String, default: '' },
+  // Ship To fields — written to BASICBASEPARTYDETAILS.LIST in Tally XML
+  shipToName:          { type: String, default: '' },
+  shipToAddress:       { type: String, default: '' },
+  shipToCity:          { type: String, default: '' },
+  shipToState:         { type: String, default: '' },
+  shipToGST:           { type: String, default: '' },
+  // Bill To fields — written to ADDRESS.LIST in Tally XML
+  billToName:          { type: String, default: '' },
+  billToAddress:       { type: String, default: '' },
+  billToCity:          { type: String, default: '' },
+  billToState:         { type: String, default: '' },
+  billToGST:           { type: String, default: '' },
+  billToPincode:       { type: String, default: '' },   // Buyer/Bill To postal code
+  allLedgerEntries:    { type: [ledgerEntrySchema],    default: [] },
+  allInventoryEntries: { type: [inventoryEntrySchema], default: [] },
+  // Cached computed amounts — stored to avoid recomputation on export
+  _grandTotal:  { type: Number, default: 0 },
+  _totalCGST:   { type: Number, default: 0 },
+  _totalSGST:   { type: Number, default: 0 },
+  _totalIGST:   { type: Number, default: 0 },
+  _salesBase:   { type: Number, default: 0 },
+  _useInventory:{ type: Boolean, default: false },
+  // E-Invoice fields — forwarded from GST portal to Tally for e-invoice printing
+  irn:     { type: String, default: '' },   // 64-char hex IRN from GST portal
+  ackNo:   { type: String, default: '' },   // Acknowledgement number
+  ackDate: { type: String, default: '' },   // YYYYMMDD acknowledgement date
+}, { _id: false });
+
 const invoiceItemSchema = new mongoose.Schema({
   description: { type: String, required: true },
   hsn:         { type: String, default: '' },
@@ -16,6 +105,9 @@ const invoiceItemSchema = new mongoose.Schema({
   cgst:        { type: Number, default: 0 },       // CGST amount
   sgst:        { type: Number, default: 0 },       // SGST amount
   igst:        { type: Number, default: 0 },       // IGST amount (inter-state)
+  // Tally-specific: per-item sales ledger name (e.g. "SS Bottle Sales Local 18%")
+  // Set from ItemMaster.tallySalesLedger at write time. Falls back to 'Sales Accounts'.
+  tallySalesLedger: { type: String, default: '' },
 }, { _id: false });
 
 const invoiceSchema = new mongoose.Schema({
@@ -42,6 +134,7 @@ const invoiceSchema = new mongoose.Schema({
   billToCountry:        { type: String, default: '' },
   billToGST:            { type: String, default: '' },
   billToGstRegType:     { type: String, default: '' },
+  billToPincode:        { type: String, default: '' },
 
   // Ship To
   shipToName:           { type: String, default: '' },
@@ -51,6 +144,7 @@ const invoiceSchema = new mongoose.Schema({
   shipToState:          { type: String, default: '' },
   shipToCountry:        { type: String, default: '' },
   shipToGST:            { type: String, default: '' },
+  shipToPincode:        { type: String, default: '' },
 
   // Company (billed from)
   companyName:  { type: String, default: 'Sri Chakra Industries' },
@@ -150,6 +244,10 @@ const invoiceSchema = new mongoose.Schema({
     sparse: true,
     index: true
   },
+  // Tally retry tracking
+  retryCount: { type: Number, default: 0 },
+  lastError: { type: String, default: '' },
+  lastTriedAt: { type: Date },
   tallyAlterId: {
     type: String,
     trim: true
@@ -157,7 +255,25 @@ const invoiceSchema = new mongoose.Schema({
   tallyVoucherNumber: {
     type: String,
     trim: true
-  }
+  },
+  // PO Number from Tally (Buyer's Order No / BuyersOrderNo field)
+  buyersOrderNo: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  // ── Tally-native voucher sub-document ────────────────────────────────────────
+  // Populated by normalizeToTallyVoucher() at write time (upload/create/update).
+  // Export path reads this directly — zero field mapping required.
+  // null = not yet normalized (legacy invoice or normalization failed).
+  tallyVoucher: { type: tallyVoucherSchema, default: null },
+
+  // ── E-Invoice fields (GST portal) ────────────────────────────────────────────
+  // Set when the ERP generates an e-invoice via the government GST portal.
+  // These are forwarded to Tally so the e-invoice details print on the invoice.
+  irn:     { type: String, default: '' },   // 64-char hex IRN from GST portal
+  ackNo:   { type: String, default: '' },   // Acknowledgement number
+  ackDate: { type: Date, default: null },   // Acknowledgement date
 }, { timestamps: true });
 
 invoiceSchema.index({ invoiceNo: 1 });

@@ -18,6 +18,12 @@ const CHUNK_DAYS = 30;  // Fetch 30 days per chunk (Tally honours short date ran
 const MAX_CHUNK_RETRIES = 3;
 const MIN_RESPONSE_BYTES = 200;
 
+// === HISTORICAL DATA START DATE ===
+// All voucher and date-based entity syncs begin from this date.
+// Set to April 1, 2024 (start of FY 2024-25) to capture complete historical data.
+// Change this constant (not scattered year logic) if the baseline ever needs to shift.
+const HISTORY_START_DATE = new Date(2024, 3, 1); // 2024-04-01 (month index 3 = April)
+
 // === ENTITY-SPECIFIC DYNAMIC TIMEOUTS (ms) ===
 // Increased for connector mode — requests go internet → connector → Tally → back
 // Tally can be slow on large datasets; give it enough time.
@@ -31,7 +37,7 @@ const ENTITY_TIMEOUTS = {
   Journal:     600000,  // 10 min
   Contra:      600000,  // 10 min
 };
-const HEALTH_CHECK_TIMEOUT = 30000;  // 30s — allow for slow connector round-trip
+const HEALTH_CHECK_TIMEOUT = 90000;  // 90s — connector roundtrip + Tally processing time
 
 // === GLOBAL STATE ===
 let _tallyRequestLock = false;
@@ -233,9 +239,6 @@ export async function checkTallyReachable(cfg) {
     let online = isConnectorOnline(cfg.connectorId);
     console.log(`[TallyRoute] checkTallyReachable → connector ${cfg.connectorId} online=${online}`);
     if (!online) {
-      // Connector may be mid-reconnect (e.g. just after a backend restart).
-      // Wait up to 15 s before giving up — sendTallyRequest already waits 60 s
-      // but we want a faster feedback loop for the health-check endpoint.
       console.log(`[TallyRoute] Connector not yet online — waiting up to 15s for reconnect…`);
       const { waitForConnector } = await import('./tallyConnectorServer.js');
       const c = await waitForConnector(cfg.connectorId, 15000);
@@ -243,15 +246,22 @@ export async function checkTallyReachable(cfg) {
       console.log(`[TallyRoute] After wait, connector online=${online}`);
     }
     if (!online) {
-      return { reachable: false, error: `Connector ${cfg.connectorId} is not connected. Ensure the SriChakra Connector is running on the client PC.` };
-    }
-    // Send a lightweight ping XML through the connector
-    const pingXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>List of Companies</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></DESC></BODY></ENVELOPE>`;
-    try {
-      const body = await sendTallyRequest(cfg.connectorId, pingXml, HEALTH_CHECK_TIMEOUT);
-      return { reachable: body.length > 0, status: 200, body: body.slice(0, 200) };
-    } catch (err) {
-      return { reachable: false, error: err.message };
+      // ── Connector offline fallback: if tallyLocalUrl is set, try direct ──
+      if (cfg.tallyLocalUrl) {
+        console.log(`[TallyRoute] Connector offline — falling back to direct: ${cfg.tallyLocalUrl}`);
+        // fall through to direct mode below
+      } else {
+        return { reachable: false, error: `Connector ${cfg.connectorId} is offline. Start the SriChakra Connector on the client PC, or set tallyLocalUrl for local testing.` };
+      }
+    } else {
+      // connector is online — ping through it
+      const pingXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>List of Companies</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></DESC></BODY></ENVELOPE>`;
+      try {
+        const body = await sendTallyRequest(cfg.connectorId, pingXml, HEALTH_CHECK_TIMEOUT);
+        return { reachable: body.length > 0, status: 200, body: body.slice(0, 200) };
+      } catch (err) {
+        return { reachable: false, error: err.message };
+      }
     }
   }
 
@@ -338,63 +348,77 @@ export async function testTallyConnection() {
 
 // === HTTP POST WITH RETRIES AND TIMEOUT ===
 async function postXml(cfg, xml, timeoutMs) {
-  // ── Diagnostic: always log the routing decision ─────────────────────────────
-  const diagUrl = (() => {
-    try { return tallyBaseUrl(cfg); } catch (e) { return `(not set — ${e.message})`; }
-  })();
+  const connectorMode = cfg.useConnector && cfg.connectorId;
+  const connectorOnline = connectorMode ? isConnectorOnline(cfg.connectorId) : false;
+  const hasLocalUrl = !!(cfg.tallyLocalUrl || '').trim();
+
+  // ── Routing decision ────────────────────────────────────────────────────────
+  // 1. Connector mode + connector online  → use connector (production path)
+  // 2. Connector mode + connector OFFLINE + tallyLocalUrl set → fallback to direct (local dev)
+  // 3. Connector mode + connector OFFLINE + no local URL → error
+  // 4. Direct mode → use tallyLocalUrl directly
+
+  const useConnectorPath = connectorMode && connectorOnline;
+  const useDirectFallback = connectorMode && !connectorOnline && hasLocalUrl;
+
   console.log('[TallyRoute]', {
     useConnector: cfg.useConnector,
     connectorId:  cfg.connectorId || '(empty)',
-    connectorOnline: cfg.useConnector && cfg.connectorId ? isConnectorOnline(cfg.connectorId) : 'n/a',
+    connectorOnline,
     tallyLocalUrl: cfg.tallyLocalUrl || '(empty)',
-    resolvedDirectUrl: diagUrl,
-    selectedPath: (cfg.useConnector && cfg.connectorId) ? 'CONNECTOR → Socket.IO' : 'DIRECT → HTTP',
+    selectedPath: useConnectorPath
+      ? 'CONNECTOR → Socket.IO'
+      : useDirectFallback
+        ? 'DIRECT → HTTP (connector offline fallback)'
+        : 'DIRECT → HTTP',
   });
 
-  // ── PATH A: Connector mode ───────────────────────────────────────────────────
-  if (cfg.useConnector && cfg.connectorId) {
-    if (!validateXml(xml)) {
-      throw new Error('Invalid XML format');
-    }
+  // ── PATH A: Connector online ─────────────────────────────────────────────────
+  if (useConnectorPath) {
+    if (!validateXml(xml)) throw new Error('Invalid XML format');
     LOG(`POST via connector ${cfg.connectorId} bytes=${xml.length} timeout=${timeoutMs}ms`);
+    console.log('[Tally] Full Request XML:\n', xml);
     const body = await sendTallyRequest(cfg.connectorId, xml, timeoutMs);
     LOG(`  → Received bytes=${body.length}`);
-    if (body.includes('<LINEERROR>')) {
+    console.log('[Tally] Full Response XML:\n', body);
+    const isImportResponse = body.includes('<RESPONSE>') || body.includes('<CREATED>');
+    if (!isImportResponse && body.includes('<LINEERROR>')) {
       throw new Error(`Tally returned LINEERROR: ${body}`);
     }
-    if (body.includes('<STATUS>0</STATUS>')) {
-      return '';
-    }
+    if (body.includes('<STATUS>0</STATUS>')) return '';
     return body;
   }
 
-  // ── PATH B: Direct mode ─────────────────────────────────────────────────────
-  // Safety guard: if connector is registered but useConnector is somehow false,
-  // refuse to fall through to a direct connection — Render cannot reach localhost.
-  if (cfg.connectorId) {
+  // ── PATH B: Connector offline but tallyLocalUrl is set → direct fallback ────
+  if (useDirectFallback) {
+    LOG(`Connector offline — falling back to direct: ${cfg.tallyLocalUrl}`);
+  }
+
+  // ── PATH C: Direct mode — guard against cloud servers without a local URL ───
+  // If connectorId is registered but connector is offline AND no local URL → error.
+  if (connectorMode && !connectorOnline && !hasLocalUrl) {
     throw new Error(
-      `Connector is registered (${cfg.connectorId}) but useConnector=false. ` +
-      `Enable "Use Connector" in Tally Settings to route requests through the SriChakra Connector.`
+      `Connector "${cfg.connectorId}" is offline and no tallyLocalUrl is set. ` +
+      `Either start the SriChakra Connector on the client PC, or set tallyLocalUrl in Tally Settings.`
     );
   }
 
   const url = tallyBaseUrl(cfg); // throws if URL is not configured
-  if (!validateXml(xml)) {
-    throw new Error('Invalid XML format');
-  }
+  if (!validateXml(xml)) throw new Error('Invalid XML format');
   LOG(`POST ${url} bytes=${xml.length} timeout=${timeoutMs}ms`);
+  console.log('[Tally] Full Request XML:\n', xml);
   const resp = await axiosInstance.post(url, xml, {
     timeout: timeoutMs,
     headers: buildHeaders(cfg),
   });
   const body = typeof resp.data === 'string' ? resp.data : String(resp.data || '');
   LOG(`  → HTTP ${resp.status} bytes=${body.length}`);
-  if (body.includes('<LINEERROR>')) {
+  console.log('[Tally] Full Response XML:\n', body);
+  const isImportResponse = body.includes('<RESPONSE>') || body.includes('<CREATED>');
+  if (!isImportResponse && body.includes('<LINEERROR>')) {
     throw new Error(`Tally returned LINEERROR: ${body}`);
   }
-  if (body.includes('<STATUS>0</STATUS>')) {
-    return '';
-  }
+  if (body.includes('<STATUS>0</STATUS>')) return '';
   return body;
 }
 
@@ -410,7 +434,9 @@ export async function postXmlWithRetry(cfg, xml, timeoutMs, attempts = MAX_CHUNK
       ERR(`Attempt ${i+1}/${attempts} failed: ${err.message}`);
     }
     if (i < attempts - 1) {
-      const isDisconnect = lastErr?.message?.includes('disconnected') || lastErr?.message?.includes('not online');
+      const isDisconnect = lastErr?.message?.includes('disconnected') || 
+                           lastErr?.message?.includes('not online') ||
+                           lastErr?.message?.includes('reconnected mid-request');
       const isTallyNotRunning = lastErr?.message?.includes('not running') || lastErr?.message?.includes('TallyPrime');
 
       if (isDisconnect || isTallyNotRunning) {
@@ -490,9 +516,8 @@ function buildAllVouchersCollectionXml(cfg, fromDate = null, toDate = null) {
   let effectiveTo   = toDate;
   if (!effectiveFrom && !effectiveTo) {
     effectiveTo   = new Date();
-    effectiveFrom = new Date();
-    effectiveFrom.setFullYear(effectiveFrom.getFullYear() - 2);
-    LOG(`[AllVouchers] No date range — defaulting to 2-year window: ${td(effectiveFrom)} → ${td(effectiveTo)}`);
+    effectiveFrom = new Date(HISTORY_START_DATE); // April 1, 2024 — full history baseline
+    LOG(`[AllVouchers] No date range — defaulting to full history window: ${td(effectiveFrom)} → ${td(effectiveTo)}`);
   }
 
   const fromTd = effectiveFrom ? td(effectiveFrom) : '';
@@ -522,7 +547,7 @@ function buildAllVouchersCollectionXml(cfg, fromDate = null, toDate = null) {
     <TDL><TDLMESSAGE>
       <COLLECTION NAME="AllVouchers">
         <TYPE>Voucher</TYPE>
-        <FETCH>GUID, VoucherNumber, Date, PartyLedgerName, Amount, VoucherTypeName, Narration, ALLLEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST, BILLTOLEDGERNAME, BILLTOADDRESS, BILLTOSTATE, BILLTOCOUNTRY, BILLTOPINCODE, BILLTOGSTIN, BILLTONAME, BILLTOMAILINGNAME, BILLTOCITY, BILLTOGSTREGISTRATIONTYPE, BASICBUYERNAME, BUYERNAME, BUYERADDRESS, BUYERCITY, BUYERSTATE, BUYERCOUNTRY, BUYERPINCODE, BUYERGSTIN, CONSIGNEENAME, CONSIGNEEADDRESS, CONSIGNEESTATE, CONSIGNEECOUNTRY, CONSIGNEEPINCODE, CONSIGNEEGSTIN, CONSIGNEEMAILINGNAME, CONSIGNEECITY, BASICSHIPTO, SHIPTONAME, SHIPTOADDRESS, SHIPTOSTATE, SHIPTOCOUNTRY, SHIPTOPINCODE, SHIPTOGSTIN, SHIPTOMAILINGNAME, SHIPTOCITY, DELIVERYNAME, DELIVERYADDRESS, DELIVERYADDRESS.LIST, PARTYSHIPPINGNAME, PARTYSHIPPINGADDRESS, $BillToAddress, $BillToAddress.LIST, $ShipToAddress, $ShipToAddress.LIST, $ConsigneeAddress, $ConsigneeAddress.LIST</FETCH>
+        <FETCH>GUID, VoucherNumber, Date, PartyLedgerName, Amount, VoucherTypeName, Narration, ALLLEDGERENTRIES.LIST, ALLINVENTORYENTRIES.LIST, BILLTOLEDGERNAME, BILLTOADDRESS, BILLTOSTATE, BILLTOCOUNTRY, BILLTOPINCODE, BILLTOGSTIN, BILLTONAME, BILLTOMAILINGNAME, BILLTOCITY, BILLTOGSTREGISTRATIONTYPE, BASICBUYERNAME, BASICBUYERADDRESS, BASICBUYERADDRESS.LIST, BUYERNAME, BUYERADDRESS, BUYERCITY, BUYERSTATE, BUYERCOUNTRY, BUYERPINCODE, BUYERGSTIN, CONSIGNEENAME, CONSIGNEEADDRESS, CONSIGNEESTATE, CONSIGNEECOUNTRY, CONSIGNEEPINCODE, CONSIGNEEGSTIN, CONSIGNEEMAILINGNAME, CONSIGNEECITY, BASICSHIPTO, SHIPTONAME, SHIPTOADDRESS, SHIPTOSTATE, SHIPTOCOUNTRY, SHIPTOPINCODE, SHIPTOGSTIN, SHIPTOMAILINGNAME, SHIPTOCITY, DELIVERYNAME, DELIVERYADDRESS, DELIVERYADDRESS.LIST, PARTYSHIPPINGNAME, PARTYSHIPPINGADDRESS, $BillToAddress, $BillToAddress.LIST, $ShipToAddress, $ShipToAddress.LIST, $ConsigneeAddress, $ConsigneeAddress.LIST, PlaceOfSupply, PartyGSTIN, IRN, AckNo, AckDate, ReferenceNo, DeliveryNote, BuyersOrderNo, DispatchDocNo, DispatchedThrough, Destination, BillOfLadingNo, MotorVehicleNo, TermsOfDelivery</FETCH>
       </COLLECTION>
     </TDLMESSAGE></TDL>
   </DESC>
@@ -657,8 +682,10 @@ function getSafeValue(obj, key, defaultValue = '') {
     value = value['#text'] ?? value['_text'] ?? value['$t'] ?? '';
   }
   if (value === '' || value === null || value === undefined) return defaultValue;
-  // Replace any newlines/carriage returns with single spaces to fix split names, preserve all other whitespace
-  return String(value).replace(/[\r\n]+/g, ' ');
+  const str = String(value).replace(/[\r\n]+/g, ' ');
+  // Reject Tally unexpanded TDL placeholders: ".", "..", "...", or any dot-only string
+  if (/^\.+$/.test(str.trim())) return defaultValue;
+  return str;
 }
 
 // Helper to recursively search an object for any of the given keys (case-insensitive)
@@ -697,7 +724,20 @@ function findFirstValue(obj, keys, defaultValue = '') {
 function extractBillToAddressFromParsed(obj) {
   const lines = [];
   
-  // Try $BillToAddress.LIST first
+  // Try BASICBUYERADDRESS.LIST first (most reliable buyer address in Tally)
+  const basicBuyerAddrList = obj['BASICBUYERADDRESS.LIST'];
+  if (basicBuyerAddrList) {
+    const items = Array.isArray(basicBuyerAddrList) ? basicBuyerAddrList : [basicBuyerAddrList];
+    items.forEach(item => {
+      const line = getSafeValue(item, 'ADDRESS');
+      if (line && !line.startsWith('<') && !line.startsWith('$')) {
+        lines.push(decodeXmlEntities(line.replace(/[\r\n]+/g, ' ')));
+      }
+    });
+  }
+  if (lines.length > 0) return lines.join(', ');
+  
+  // Try $BillToAddress.LIST
   const dollarBillToList = obj['$BillToAddress.LIST'];
   if (dollarBillToList) {
     if (Array.isArray(dollarBillToList)) {
@@ -751,9 +791,9 @@ function extractBillToAddressFromParsed(obj) {
   const billToAddr = getSafeValue(obj, 'BILLTOADDRESS');
   if (billToAddr) return decodeXmlEntities(billToAddr);
   
-  // Try single BASICBUYERADDRESS
+  // Try single BASICBUYERADDRESS — only if it's actual text, not a TDL formula
   const basicBuyerAddr = getSafeValue(obj, 'BASICBUYERADDRESS');
-  if (basicBuyerAddr) return decodeXmlEntities(basicBuyerAddr);
+  if (basicBuyerAddr && !basicBuyerAddr.startsWith('<') && !basicBuyerAddr.startsWith('$')) return decodeXmlEntities(basicBuyerAddr);
   
   return '';
 }
@@ -867,17 +907,37 @@ function mapBillToFromParsed(voucher) {
   };
   
   // Name - BILL TO ONLY
+  // IMPORTANT: BASICBUYERNAME / BUYERNAME intentionally skipped — Tally puts the
+  // CONSIGNEE name in those fields for inter-state invoices.
   const billToName = getSafeValue(voucher, 'BILLTONAME');
   if (billToName) billTo.name = billToName;
-  
-  const basicBuyerName = getSafeValue(voucher, 'BASICBUYERNAME');
-  if (!billTo.name && basicBuyerName) billTo.name = basicBuyerName;
-  
-  const buyerName = getSafeValue(voucher, 'BUYERNAME');
-  if (!billTo.name && buyerName) billTo.name = buyerName;
-  
+
   const billToLedgerName = getSafeValue(voucher, 'BILLTOLEDGERNAME');
   if (!billTo.name && billToLedgerName) billTo.name = billToLedgerName;
+
+  // ── KEY FIX: Tally TDL Collection format does NOT populate BILLTONAME / BASICBUYERNAME.
+  // The actual buyer (Bill To) is the first ALLLEDGERENTRIES.LIST entry with ISDEEMEDPOSITIVE=Yes.
+  // Also: BASICBUYERNAME/BUYERNAME sometimes contain the consignee name — skip those if they
+  // match a known ship-to name.
+  if (!billTo.name) {
+    // Pre-read ship-to names to avoid using them as bill-to
+    const knownShipNames = new Set(
+      [getSafeValue(voucher, 'CONSIGNEENAME'), getSafeValue(voucher, 'SHIPTONAME')]
+        .filter(Boolean).map(s => s.trim().toLowerCase())
+    );
+    const ledgerList = voucher['ALLLEDGERENTRIES.LIST'] || voucher['LEDGERENTRIES.LIST'] || [];
+    const ledgerArr = Array.isArray(ledgerList) ? ledgerList : [ledgerList];
+    for (const le of ledgerArr) {
+      const isDeemedPositive = getSafeValue(le, 'ISDEEMEDPOSITIVE');
+      if (isDeemedPositive === 'Yes') {
+        const ledgerName = getSafeValue(le, 'LEDGERNAME');
+        if (ledgerName && !knownShipNames.has(ledgerName.trim().toLowerCase())) {
+          billTo.name = ledgerName;
+          break;
+        }
+      }
+    }
+  }
   
   // Mailing name - BILL TO ONLY
   const billToMailingName = getSafeValue(voucher, 'BILLTOMAILINGNAME');
@@ -899,8 +959,11 @@ function mapBillToFromParsed(voucher) {
   if (billToCountry) billTo.country = billToCountry;
   
   // Pincode - BILL TO ONLY
-  const billToPincode = getSafeValue(voucher, 'BILLTOPINCODE');
-  if (billToPincode) billTo.pincode = billToPincode;
+  // NOTE: BILLTOPINCODE in Tally vouchers can hold sequential internal counters
+  // instead of the actual party pincode (Tally bug/misuse). We skip it entirely
+  // and rely on the pincode extracted from the address text by extractBillToAddressFromParsed.
+  // The address parser in parseTallyAddress already extracts 6-digit pincodes from address lines.
+  // (billTo.pincode left as '' here — populated via backfillBillToFromLedger if needed)
   
   // GSTIN - BILL TO ONLY
   const billToGstin = getSafeValue(voucher, 'BILLTOGSTIN');
@@ -1361,6 +1424,7 @@ function ledgersToOps(ledgers) {
             closingBalance: safeClosingBalance,
             closingBalanceCalculatedAt: new Date(),
             syncedWithTally: true, lastTallySync: new Date(),
+            dataSource: 'Tally',  // mark as imported from Tally — never export back
             ...(email ? { email } : {}),
             ...(cleanPhone ? { phone: cleanPhone } : (rawDigits ? { phone: rawDigits } : {})),
             ...(address ? { 'address.street': address } : {}),
@@ -1383,7 +1447,9 @@ function ledgersToOps(ledgers) {
             $set: {
               tallyGuid: guid,
               tallyAlterId: alterId,
-              tallySynced: true, lastTallySync: new Date(), phone: safePhone, email: safeEmail, contactPerson: contactPerson || name,
+              tallySynced: true, lastTallySync: new Date(),
+              dataSource: 'Tally',  // mark as imported from Tally — never export back
+              phone: safePhone, email: safeEmail, contactPerson: contactPerson || name,
               address: address || 'Imported from Tally',
               ...(city ? { city } : {}),
               ...(state ? { state } : {}),
@@ -1406,7 +1472,9 @@ function ledgersToOps(ledgers) {
             $set: {
               tallyGuid: guid,
               tallyAlterId: alterId,
-              tallySynced: true, lastTallySync: new Date(), phone: safePhone, email: safeEmail, contact: contactPerson || name,
+              tallySynced: true, lastTallySync: new Date(),
+              dataSource: 'Tally',  // mark as imported from Tally — never export back
+              phone: safePhone, email: safeEmail, contact: contactPerson || name,
               address: address || 'Imported from Tally',
               ...(city ? { city } : {}),
               ...(state ? { state } : {}),
@@ -1429,12 +1497,28 @@ function ledgersToOps(ledgers) {
 // ── Regex-based helper to extract a single tag value from a raw XML block ──
 function gTagVal(block, tag) {
   const m = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
-  return m ? decodeXmlEntities(m[1].trim()) : '';
+  if (!m) return '';
+  const val = decodeXmlEntities(m[1].trim());
+  // Reject Tally unexpanded TDL placeholders: ".", "..", "...", or any dot-only string
+  if (/^\.+$/.test(val)) return '';
+  return val;
 }
 
 // Helper to extract address for BILL TO ONLY - no ship to logic here
 function extractBillToAddressOnly(block) {
   const lines = [];
+  
+  // Try BASICBUYERADDRESS.LIST first (most reliable for buyer address)
+  const basicBuyerAddrListPattern = /<BASICBUYERADDRESS\.LIST[^>]*>([\s\S]*?)<\/BASICBUYERADDRESS\.LIST>/gi;
+  for (const match of [...block.matchAll(basicBuyerAddrListPattern)]) {
+    const listContent = match[1];
+    const addressMatches = [...listContent.matchAll(/<ADDRESS[^>]*>([\s\S]*?)<\/ADDRESS>/gi)];
+    for (const addrMatch of addressMatches) {
+      const line = decodeXmlEntities(addrMatch[1].trim());
+      if (line && !line.startsWith('<') && !line.startsWith('$')) lines.push(line);
+    }
+  }
+  if (lines.length > 0) return lines.join(', ');
   
   // Try $BillToAddress.LIST
   const billToListPattern = /<\$BillToAddress\.LIST[^>]*>([\s\S]*?)<\/\$BillToAddress\.LIST>/gi;
@@ -1466,9 +1550,9 @@ function extractBillToAddressOnly(block) {
   const singleBillToAddress = gTagVal(block, 'BILLTOADDRESS');
   if (singleBillToAddress) return singleBillToAddress;
   
-  // Try single BASICBUYERADDRESS
+  // Try single BASICBUYERADDRESS — but only if it's real text, not a TDL formula reference
   const basicBuyerAddress = gTagVal(block, 'BASICBUYERADDRESS');
-  if (basicBuyerAddress) return basicBuyerAddress;
+  if (basicBuyerAddress && !basicBuyerAddress.startsWith('<') && !basicBuyerAddress.startsWith('$')) return basicBuyerAddress;
   
   return '';
 }
@@ -1545,19 +1629,41 @@ function mapBillToFromRaw(block) {
     gstin: '',
     gstRegType: ''
   };
-  
+
+  // Pre-read ship-to names (used to detect when CONSIGNEENAME accidentally appears in bill-to tags)
+  const consigneeName  = gTagVal(block, 'CONSIGNEENAME');
+  const shipToName     = gTagVal(block, 'SHIPTONAME');
+  const knownShipNames = new Set(
+    [consigneeName, shipToName].filter(Boolean).map(s => s.trim().toLowerCase())
+  );
+
   // Name fields - BILL TO ONLY
-  const billToName = gTagVal(block, 'BILLTONAME');
-  if (billToName) billTo.name = billToName;
-  
-  const basicBuyerName = gTagVal(block, 'BASICBUYERNAME');
-  if (!billTo.name && basicBuyerName) billTo.name = basicBuyerName;
-  
-  const buyerName = gTagVal(block, 'BUYERNAME');
-  if (!billTo.name && buyerName) billTo.name = buyerName;
-  
+  // IMPORTANT: BASICBUYERNAME and BUYERNAME are intentionally NOT used here.
+  // Tally puts the CONSIGNEE (ship-to/delivery party) name in those fields for
+  // inter-state invoices — using them would show the wrong party as Bill To.
+  // Only use explicit BILLTONAME and BILLTOLEDGERNAME tags.
+  const billToNameTag = gTagVal(block, 'BILLTONAME');
+  if (billToNameTag) billTo.name = billToNameTag;
+
   const billToLedgerName = gTagVal(block, 'BILLTOLEDGERNAME');
   if (!billTo.name && billToLedgerName) billTo.name = billToLedgerName;
+
+  // ── Fallback: first ALLLEDGERENTRIES.LIST with ISDEEMEDPOSITIVE=Yes is the buyer ledger ──
+  // This is reliable even when explicit BILLTONAME is absent (common in TDL Collection).
+  // Skip the entry if its ledger name is the known ship-to party.
+  if (!billTo.name) {
+    const allLedgerPattern = /<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/gi;
+    for (const m of block.matchAll(allLedgerPattern)) {
+      const lb = m[1];
+      if (gTagVal(lb, 'ISDEEMEDPOSITIVE') === 'Yes') {
+        const ledgerName = gTagVal(lb, 'LEDGERNAME');
+        if (ledgerName && !knownShipNames.has(ledgerName.trim().toLowerCase())) {
+          billTo.name = ledgerName;
+          break;
+        }
+      }
+    }
+  }
   
   // Mailing name - BILL TO ONLY
   const billToMailingName = gTagVal(block, 'BILLTOMAILINGNAME');
@@ -1579,8 +1685,12 @@ function mapBillToFromRaw(block) {
   if (billToCountry) billTo.country = billToCountry;
   
   // Pincode - BILL TO ONLY
-  const billToPincode = gTagVal(block, 'BILLTOPINCODE');
-  if (billToPincode) billTo.pincode = billToPincode;
+  // NOTE: BILLTOPINCODE in Tally vouchers can hold sequential internal counters
+  // instead of the actual party pincode (Tally bug/misuse). We skip it entirely
+  // and extract the pincode from the address text instead (6-digit number in address).
+  const billToAddrForPin = billTo.address || '';
+  const billToPincodeFromAddr = (billToAddrForPin.match(/\b([1-9]\d{5})\b/) || [])[1] || '';
+  if (billToPincodeFromAddr) billTo.pincode = billToPincodeFromAddr;
   
   // GSTIN - BILL TO ONLY
   const billToGstin = gTagVal(block, 'BILLTOGSTIN');
@@ -1929,7 +2039,11 @@ function parseVouchers(xml, voucherTypes) {
       const placeOfSupply = getSafeValue(voucher, 'PLACEOFSUPPLY');
 
       // E-invoice fields
-      const irn = getSafeValue(voucher, 'IRN') || getSafeValue(voucher, 'EINVOICEIRN');
+      // Validate IRN: a genuine GST e-invoice IRN is exactly 64 hex characters.
+      // Tally sometimes returns the voucher GUID (a UUID-like value with hyphens/slashes)
+      // in the IRN field when no real IRN exists — discard those.
+      const rawIrn = getSafeValue(voucher, 'IRN') || getSafeValue(voucher, 'EINVOICEIRN');
+      const irn = (rawIrn && /^[0-9a-fA-F]{64}$/.test(rawIrn.trim())) ? rawIrn.trim() : '';
       const ackNo = getSafeValue(voucher, 'ACKNO') || getSafeValue(voucher, 'EINVOICEACKNO');
       const rawAckDate = getSafeValue(voucher, 'ACKDATE') || getSafeValue(voucher, 'EINVOICEACKDATE');
       let ackDate = null;
@@ -1947,7 +2061,7 @@ function parseVouchers(xml, voucherTypes) {
         referenceDate = new Date(`${rawReferenceDate.slice(0,4)}-${rawReferenceDate.slice(4,6)}-${rawReferenceDate.slice(6,8)}`);
         if (isNaN(referenceDate.getTime())) referenceDate = null;
       }
-      const buyersOrderNo = getSafeValue(voucher, 'ORDERNO') || getSafeValue(voucher, 'BUYERORDERNO') || getSafeValue(voucher, 'PURCHASEORDERNO');
+      const buyersOrderNo = getSafeValue(voucher, 'BUYERSORDERNO') || getSafeValue(voucher, 'ORDERNO') || getSafeValue(voucher, 'BUYERORDERNO') || getSafeValue(voucher, 'PURCHASEORDERNO');
       const rawBuyersOrderDate = getSafeValue(voucher, 'ORDERDATE') || getSafeValue(voucher, 'BUYERORDERDATE') || getSafeValue(voucher, 'PURCHASEORDERDATE');
       let buyersOrderDate = null;
       if (rawBuyersOrderDate && rawBuyersOrderDate.length === 8 && /^\d{8}$/.test(rawBuyersOrderDate)) {
@@ -1967,25 +2081,45 @@ function parseVouchers(xml, voucherTypes) {
       // ── Get regex-extracted entries FIRST (primary — bypasses fast-xml-parser dot-tag issues) ──
       const rawData = rawEntryMap.get(guid) || rawEntryMap.get(voucherNumber) || null;
       
-      // Get Bill To and Ship To from separate map functions - NO CROSS-FALLBACKS
+      // Bill To info:
+      // Priority order for Bill To name:
+      //   1. Explicit BILLTONAME tag (most reliable)
+      //   2. BILLTOLEDGERNAME tag
+      //   3. partyName (PARTYLEDGERNAME) — Tally's debtor ledger = always the buyer
+      //
+      // We deliberately skip BASICBUYERNAME / BUYERNAME — Tally puts the CONSIGNEE
+      // name in those fields for inter-state invoices, which caused wrong bill-to.
       const parsedBillTo = mapBillToFromParsed(voucher);
       const parsedShipTo = mapShipToFromParsed(voucher);
-      
-      // Bill To info: raw-extracted first, else parsed - NO SHIP TO FALLBACK
-      const billToName = rawData?.billTo?.name || parsedBillTo.name;
+
+      const rawBillToName = rawData?.billTo?.name || parsedBillTo.name;
+      const rawShipToName = rawData?.shipTo?.name || parsedShipTo.name;
+      // Use partyName as the bill-to name fallback — PARTYLEDGERNAME is always the buyer.
+      const billToName = rawBillToName || partyName;
       const billToMailingName = rawData?.billTo?.mailingName || parsedBillTo.mailingName;
-      const billToAddress = rawData?.billTo?.address || parsedBillTo.address;
+      // Strip literal TDL formula strings that Tally sometimes emits unexpanded
+      const cleanAddr = (addr) => {
+        if (!addr) return '';
+        // Remove any TDL formula references like <BASICBUYERADDRESS>, <$SomeFormula> etc.
+        const cleaned = addr.replace(/<[^>]+>/g, '').trim();
+        // Also reject dot-only placeholders like ".", "...", "..." from unexpanded TDL
+        if (/^\.+$/.test(cleaned)) return '';
+        return cleaned;
+      };
+      const billToAddress = cleanAddr(rawData?.billTo?.address || parsedBillTo.address);
       const billToCity = rawData?.billTo?.city || parsedBillTo.city;
       const billToState = rawData?.billTo?.state || parsedBillTo.state;
       const billToCountry = rawData?.billTo?.country || parsedBillTo.country;
-      const billToPincode = rawData?.billTo?.pincode || parsedBillTo.pincode;
+      // Pincode: BILLTOPINCODE tag is unreliable (Tally often stores a sequential counter there).
+      // Leave it empty so backfillBillToFromLedger can populate it from the party ledger master.
+      const billToPincode = '';
       const billToGST = rawData?.billTo?.gstin || parsedBillTo.gstin;
       const billToGstRegType = rawData?.billTo?.gstRegType || parsedBillTo.gstRegType;
       
       // Ship To info: raw-extracted first, else parsed - NO BILL TO FALLBACK
       const shipToName = rawData?.shipTo?.name || parsedShipTo.name;
       const shipToMailingName = rawData?.shipTo?.mailingName || parsedShipTo.mailingName;
-      const shipToAddress = rawData?.shipTo?.address || parsedShipTo.address;
+      const shipToAddress = cleanAddr(rawData?.shipTo?.address || parsedShipTo.address);
       const shipToCity = rawData?.shipTo?.city || parsedShipTo.city;
       const shipToState = rawData?.shipTo?.state || parsedShipTo.state;
       const shipToCountry = rawData?.shipTo?.country || parsedShipTo.country;
@@ -2165,6 +2299,7 @@ function parseVouchers(xml, voucherTypes) {
         billToCountry,
         billToGST,
         billToGstRegType,
+        billToPincode,
         shipToName,
         shipToMailingName,
         shipToAddress,
@@ -2323,6 +2458,7 @@ function vouchersToInvoiceOps(vouchers) {
             billToCountry:        v.billToCountry || '',
             billToGST:            v.billToGST || '',
             billToGstRegType:     v.billToGstRegType || '',
+            billToPincode:        v.billToPincode || '',
             shipToName:           v.shipToName || '',
             shipToMailingName:    v.shipToMailingName || '',
             shipToAddress:        v.shipToAddress || '',
@@ -2342,6 +2478,7 @@ function vouchersToInvoiceOps(vouchers) {
             ledgerEntries:   v.ledgerEntries,
             billAllocations: v.billAllocations,
             tallyVoucherNumber: v.voucherNumber,
+            buyersOrderNo:    v.buyersOrderNo || '',
           },
           $setOnInsert: { invoiceNo }
         },
@@ -2404,6 +2541,7 @@ function vouchersToTallyVoucherOps(vouchers) {
       billToCountry:   v.billToCountry || '',
       billToGST:       v.billToGST || '',
       billToGstRegType: v.billToGstRegType || '',
+      billToPincode:   v.billToPincode || '',
       shipToName:      v.shipToName || '',
       shipToMailingName: v.shipToMailingName || '',
       shipToAddress:   v.shipToAddress || '',
@@ -2476,6 +2614,97 @@ async function writeLedgersToDb({ ledgerOps, vendorOps, clientOps }) {
   return results.reduce((s, r) => s + (r ? (r.upsertedCount || 0) + (r.modifiedCount || 0) : 0), 0);
 }
 
+// ── Backfill bill-to address/GSTIN from Ledger master when voucher XML didn't carry them ──
+// Tally's Collection/Day Book XML often omits BILLTONAME / BILLTOADDRESS / BILLTOGSTIN
+// even though the ledger master has full address data. This post-processing step
+// looks up the party ledger by name and fills in any blank bill-to fields.
+// Ship-to fields are only backfilled if they are also blank (ship-to = bill-to is the common case).
+async function backfillBillToFromLedger(vouchers) {
+  // Collect unique party names that have missing bill-to data
+  const missingNames = new Set();
+  for (const v of vouchers) {
+    if (!v.billToAddress || !v.billToGST || !v.billToPincode) {
+      const name = (v.billToName || v.partyName || '').trim();
+      if (name) missingNames.add(name);
+    }
+  }
+  if (missingNames.size === 0) return;
+
+  LOG(`[backfillBillTo] Looking up ledger data for ${missingNames.size} parties with missing bill-to info`);
+
+  // Try AccountsLedger first, then Client
+  const ledgerDocs = await AccountsLedger.find(
+    { ledgerName: { $in: Array.from(missingNames) } },
+    { ledgerName: 1, address: 1, city: 1, state: 1, country: 1, pincode: 1, gstin: 1, gstNumber: 1 }
+  ).lean();
+  const clientDocs = await Client.find(
+    { name: { $in: Array.from(missingNames) } },
+    { name: 1, address: 1, city: 1, state: 1, country: 1, pincode: 1, gstin: 1 }
+  ).lean();
+
+  // Build lookup map: partyName (lower) → { address, city, state, country, pincode, gstin }
+  // AccountsLedger.address is a NESTED OBJECT { street, area, city, state, pincode, country }
+  // — flatten it to a plain string for billToAddress.
+  const flattenAddr = (addrField) => {
+    if (!addrField) return '';
+    if (typeof addrField === 'string') return addrField.trim();
+    // nested object — join meaningful parts
+    const parts = [addrField.street, addrField.area].filter(Boolean);
+    return parts.join(', ').trim();
+  };
+  const ledgerMap = new Map();
+  for (const l of ledgerDocs) {
+    const key = (l.ledgerName || '').trim().toLowerCase();
+    if (!key) continue;
+    const addrObj = (typeof l.address === 'object' && l.address !== null) ? l.address : {};
+    ledgerMap.set(key, {
+      address: flattenAddr(l.address),
+      city:    addrObj.city    || l.city    || '',
+      state:   addrObj.state   || l.state   || '',
+      country: addrObj.country || l.country || '',
+      pincode: addrObj.pincode || l.pincode || '',
+      gstin:   l.gstin || l.gstNumber || '',
+    });
+  }
+  for (const c of clientDocs) {
+    const key = (c.name || '').trim().toLowerCase();
+    if (key && !ledgerMap.has(key)) {
+      ledgerMap.set(key, {
+        address: typeof c.address === 'string' ? c.address.trim() : '',
+        city:    c.city    || '',
+        state:   c.state   || '',
+        country: c.country || '',
+        pincode: c.pincode || '',
+        gstin:   c.gstin   || '',
+      });
+    }
+  }
+
+  let filled = 0;
+  for (const v of vouchers) {
+    if (!v.billToAddress || !v.billToGST || !v.billToPincode) {
+      const key = (v.billToName || v.partyName || '').trim().toLowerCase();
+      const ledger = ledgerMap.get(key);
+      if (ledger) {
+        if (!v.billToAddress && ledger.address) { v.billToAddress = ledger.address; filled++; }
+        if (!v.billToCity    && ledger.city)    v.billToCity    = ledger.city;
+        if (!v.billToState   && ledger.state)   v.billToState   = ledger.state;
+        if (!v.billToCountry && ledger.country) v.billToCountry = ledger.country;
+        if (!v.billToPincode && ledger.pincode) v.billToPincode = ledger.pincode;
+        if (!v.billToGST     && ledger.gstin)   v.billToGST     = ledger.gstin;
+        // Ship-to: only backfill if also blank — do NOT touch if ship-to already has real data
+        if (!v.shipToName    && v.billToName)    v.shipToName    = v.billToName;
+        if (!v.shipToAddress && v.billToAddress) v.shipToAddress = v.billToAddress;
+        if (!v.shipToCity    && v.billToCity)    v.shipToCity    = v.billToCity;
+        if (!v.shipToState   && v.billToState)   v.shipToState   = v.billToState;
+        if (!v.shipToCountry && v.billToCountry) v.shipToCountry = v.billToCountry;
+        if (!v.shipToGST     && v.billToGST)     v.shipToGST     = v.billToGST;
+      }
+    }
+  }
+  LOG(`[backfillBillTo] Backfilled address/GST/pincode data for ${filled} vouchers from ledger master`);
+}
+
 async function autoCreateMissingLedgers(vouchers) {
   // Collect all unique ledger names from vouchers
   const ledgerNames = new Set();
@@ -2545,7 +2774,8 @@ async function autoCreateMissingLedgers(vouchers) {
             $set: {
               ledgerGroup,
               syncedWithTally: true,
-              lastTallySync: new Date()
+              lastTallySync: new Date(),
+              dataSource: 'Tally'  // mark as imported from Tally — never export back
             },
             $setOnInsert: {
               ledgerCode,
@@ -2722,8 +2952,14 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
   const hasMatchingTag = resp && config.tagPattern.test(resp);
   LOG(`[${entityType}] contains expected tag: ${hasMatchingTag}`);
 
-  if (!resp || !config.tagPattern.test(resp)) {
-    LOG(`No ${entityType} data found in response`);
+  if (!resp) {
+    // Empty string response (Tally returned STATUS=0 or blank) — treat as a real error
+    // so the caller can retry rather than silently marking 0 records as "success".
+    throw new Error(`Tally returned an empty response for ${entityType} — Tally may be busy or the company is not open`);
+  }
+
+  if (!config.tagPattern.test(resp)) {
+    LOG(`No ${entityType} data found in response (${resp.length} bytes, no matching tag). Treating as empty dataset.`);
     return { records: 0, complete: true, created: 0, updated: 0, skipped: 0, failed: 0, totalFound: 0 };
   }
 
@@ -2782,7 +3018,8 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
               closingBalance: closingBalance || '0',
               closingValue: closingValue || '0',
               gstApplicable,
-              tallySynced: true, lastTallySync: new Date()
+              tallySynced: true, lastTallySync: new Date(),
+              dataSource: 'Tally'  // mark as imported from Tally — never export back
             },
             $setOnInsert: { name, sellingPrice: cost, isActive: true }
           },
@@ -2851,6 +3088,7 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
     skipped = 0;                 // "mismatched" are handled by other entity passes — not truly skipped
     failed = failedCount;        // only XML-parse failures count as failed initially
     await autoCreateMissingLedgers(parsed);
+    await backfillBillToFromLedger(parsed);
 
     // Save to Invoice model (for ERP invoice management)
     const invoiceOps = vouchersToInvoiceOps(parsed);
@@ -2899,6 +3137,7 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
     skipped = 0;                  // "mismatched" are handled by other entity passes — not truly skipped
     failed = failedCount;
     await autoCreateMissingLedgers(parsed);
+    await backfillBillToFromLedger(parsed);
     const ops = vouchersToTallyVoucherOps(parsed);
     LOG(`[${entityType}] Created ${ops.length} tally voucher ops`);
     
@@ -2925,6 +3164,7 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
     skipped = 0;   // in the catch-all Vouchers pass there are no "other-type" skips
     failed = failedCount;
     await autoCreateMissingLedgers(parsed);
+    await backfillBillToFromLedger(parsed);
     const salesPur = parsed.filter(v => ['Sales', 'Purchase'].some(t => normaliseVoucherType(v.voucherType) === t));
     const payRec   = parsed.filter(v => ['Payment', 'Receipt', 'Journal', 'Contra', 'Debit Note', 'Credit Note'].some(t => normaliseVoucherType(v.voucherType) === t));
 
@@ -2968,11 +3208,23 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
 }
 
 // === FULL FETCH ===
-async function tryFullFetch(cfg, state, entityType, timeoutMs) {
+async function tryFullFetch(cfg, state, entityType, timeoutMs, startDate = null, endDate = null) {
   LOG(`Entity Started: ${entityType}`);
   LOG(`Trying full fetch for ${entityType}`);
+  // Use HISTORY_START_DATE as the baseline if no startDate provided
+  const effectiveFrom = startDate || new Date(HISTORY_START_DATE);
+  const effectiveTo   = endDate   || new Date();
+  LOG(`${entityType} full fetch date range: ${td(effectiveFrom)} → ${td(effectiveTo)}`);
+
+  // Safety net: never send an inverted date range to Tally.
+  // An inverted range (from > to) causes Tally to return ALL vouchers regardless of
+  // the filter, which can produce a 19MB+ response that OOMs the server.
+  if (effectiveFrom > effectiveTo) {
+    LOG(`${entityType} full fetch skipped — date range is inverted (${td(effectiveFrom)} > ${td(effectiveTo)}). Nothing new to sync.`);
+    return { ok: true, records: 0, created: 0, updated: 0, skipped: 0, failed: 0, totalFound: 0 };
+  }
   try {
-    const { records, created, updated, skipped, failed, totalFound } = await fetchAndSave(cfg, entityType, null, null, timeoutMs);
+    const { records, created, updated, skipped, failed, totalFound } = await fetchAndSave(cfg, entityType, effectiveFrom, effectiveTo, timeoutMs);
     state.usedFullFetch = true;
     state.syncStatus = 'completed';
     state.totalRecords = records;
@@ -3194,27 +3446,26 @@ export async function pullEntityFromTally(entityType, options = {}) {
       if (state.lastSyncedDate && !options.forceRefresh) {
         startDate = new Date(state.lastSyncedDate);
         startDate.setDate(startDate.getDate() + 1);
-        LOG(`${entityType} incremental sync from ${td(startDate)}`);
-      } else {
-        // For voucher entities, default to the Tally financial year start
-        // (stored in TallyConfig.financialYearStart, e.g. 1-Apr-2026).
-        // If not configured, auto-detect: April 1 of the current fiscal year
-        // (Indian FY: Apr–Mar). Fall back to 2 years for non-voucher entities.
-        if (isVoucherEntity || cfg.financialYearStart) {
-          if (cfg.financialYearStart) {
-            startDate = new Date(cfg.financialYearStart);
-            LOG(`${entityType} using configured financial year start: ${td(startDate)}`);
-          } else {
-            // Auto-detect Indian fiscal year start (April 1)
-            const now = new Date();
-            const fyYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-            startDate = new Date(fyYear, 3, 1); // April = month index 3
-            LOG(`${entityType} auto-detected FY start: ${td(startDate)}`);
-          }
+        // Guard: if the computed startDate is after endDate (happens when the last sync
+        // completed on the same day as today), clamp it back to endDate so the date
+        // range is never inverted.  An inverted range causes Tally to return ALL
+        // vouchers instead of zero, which OOMs the server on large datasets.
+        if (startDate > endDate) {
+          LOG(`${entityType} incremental startDate ${td(startDate)} > endDate ${td(endDate)} — clamping to endDate (nothing new to sync)`);
+          startDate = new Date(endDate);
         } else {
-          startDate = new Date();
-          startDate.setFullYear(startDate.getFullYear() - 2);
-          LOG(`${entityType} full history sync from ${td(startDate)}`);
+          LOG(`${entityType} incremental sync from ${td(startDate)}`);
+        }
+      } else {
+        // Always start from April 1, 2024 (HISTORY_START_DATE) to ensure
+        // complete historical data is fetched across all FY periods.
+        // cfg.financialYearStart can override this if explicitly set.
+        if (cfg.financialYearStart) {
+          startDate = new Date(cfg.financialYearStart);
+          LOG(`${entityType} using configured financial year start: ${td(startDate)}`);
+        } else {
+          startDate = new Date(HISTORY_START_DATE);
+          LOG(`${entityType} using history baseline start: ${td(startDate)}`);
         }
       }
     }
@@ -3222,7 +3473,7 @@ export async function pullEntityFromTally(entityType, options = {}) {
     
     if (entityType === 'Items') {
       // Special handling for Items: only use tryFullFetch, no chunks!
-      result = await tryFullFetch(cfg, state, entityType, timeout);
+      result = await tryFullFetch(cfg, state, entityType, timeout, startDate, endDate);
       const status = result.ok ? 'Success' : 'Failed';
       const duration = `${((Date.now() - start)/1000).toFixed(1)}s`;
       await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status, duration, error: result.error, records: result.records });
@@ -3237,7 +3488,7 @@ export async function pullEntityFromTally(entityType, options = {}) {
     // The _chunkXmlCache ensures the 14MB response is fetched only once per sync run
     // and shared across all voucher entity types (Sales, Purchase, Payment, etc.)
     if (!options.forceChunk) {
-      result = await tryFullFetch(cfg, state, entityType, timeout);
+      result = await tryFullFetch(cfg, state, entityType, timeout, startDate, endDate);
       if (result.ok) {
         await writeSyncLog({ syncId, type: logType, direction: 'Tally → ERP', status: 'Success', duration: `${((Date.now() - start)/1000).toFixed(1)}s`, records: result.records });
         await TallyConfig.findOneAndUpdate({}, { lastSyncAt: new Date() }, { sort: { _id: 1 }, upsert: true });
@@ -3247,7 +3498,7 @@ export async function pullEntityFromTally(entityType, options = {}) {
       }
       LOG(`${entityType} full fetch not viable (${result.reason}), switching to chunks`);
     }
-    const windowStart = isTimeless ? (() => { let d = new Date(); d.setFullYear(d.getFullYear()-5); return d; })() : startDate;
+    const windowStart = isTimeless ? (() => { let d = new Date(HISTORY_START_DATE); return d; })() : startDate;
     result = await runChunkSync(cfg, state, entityType, windowStart, endDate, timeout);
     const status = result.ok ? (result.failedChunks > 0 ? 'Partial' : 'Success') : 'Failed';
     const duration = `${((Date.now()-start)/1000).toFixed(1)}s`;

@@ -1,0 +1,89 @@
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Import Data</TALLYREQUEST>
+  </HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Vouchers</REPORTNAME>
+        <STATICVARIABLES>
+          <SVCURRENTCOMPANY>SRI CHAKRA INDUSTRIES</SVCURRENTCOMPANY>
+          <SVSHOWERRORLIST>Yes</SVSHOWERRORLIST>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+      <REQUESTDATA>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+          <!-- CLEANTEST02 — Same as CLEANTEST01 but DATE changed to 20260702
+               (Tally period end date — last valid date in company books)
+               Purpose: Confirm whether "voucher date missing" is purely a date-out-of-period issue
+               
+               4 internal fields still REMOVED:
+               - OLDAUDITENTRYIDS.LIST
+               - VCHSTATUSDATE
+               - BASICBASEPARTYDETAILS.LIST
+               - CONSIGNEENAME
+          -->
+
+          <VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">
+            <DATE>20260702</DATE>
+            <EFFECTIVEDATE>20260702</EFFECTIVEDATE>
+            <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
+            <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>CLEANTEST02</VOUCHERNUMBER>
+            <PARTYLEDGERNAME>BI Worldwide India PVT LTD</PARTYLEDGERNAME>
+            <ISINVOICE>Yes</ISINVOICE>
+            <NARRATION>ERP Inv: BIW11 | Original Invoice Date: 16/06/2026 | DateTest: PeriodEnd</NARRATION>
+            <GSTREGISTRATIONTYPE>Unregistered</GSTREGISTRATIONTYPE>
+            <STATENAME>Telangana</STATENAME>
+            <COUNTRYOFRESIDENCE>India</COUNTRYOFRESIDENCE>
+            <PLACEOFSUPPLY>Telangana</PLACEOFSUPPLY>
+            <CMPGSTREGISTRATIONTYPE>Regular</CMPGSTREGISTRATIONTYPE>
+
+            <BASICBUYERNAME>BI Worldwide India PVT LTD</BASICBUYERNAME>
+            <PARTYMAILINGNAME>BI Worldwide India PVT LTD</PARTYMAILINGNAME>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>BI Worldwide India PVT LTD</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
+              <AMOUNT>-230.00</AMOUNT>
+              <BILLALLOCATIONS.LIST>
+                <NAME>CLEANTEST02</NAME>
+                <BILLTYPE>New Ref</BILLTYPE>
+                <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
+                <AMOUNT>-230.00</AMOUNT>
+              </BILLALLOCATIONS.LIST>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Output CGST @ 2.5%</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>5.48</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Output SGST @ 2.5%</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>5.48</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Sales Accounts</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>219.04</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+          </VOUCHER>
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>

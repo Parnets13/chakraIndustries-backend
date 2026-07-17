@@ -1,0 +1,128 @@
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Import Data</TALLYREQUEST>
+  </HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Vouchers</REPORTNAME>
+        <STATICVARIABLES>
+          <SVCURRENTCOMPANY>SRI CHAKRA INDUSTRIES</SVCURRENTCOMPANY>
+          <SVSHOWERRORLIST>Yes</SVSHOWERRORLIST>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+      <REQUESTDATA>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+          <!-- CLEANTEST03 — BIW11 data
+               Tag ORDER matches working REVTEST01/SCI0937 pattern exactly:
+               1. OLDAUDITENTRYIDS.LIST first (before DATE)
+               2. DATE after OLDAUDITENTRYIDS.LIST
+               3. EFFECTIVEDATE after all boolean flags (near ISINVOICE)
+               This directly tests if tag order is causing the blank date issue -->
+
+          <VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">
+
+            <!-- Step 1: OLDAUDITENTRYIDS FIRST — before DATE -->
+            <OLDAUDITENTRYIDS.LIST TYPE="Number">
+              <OLDAUDITENTRYIDS>-1</OLDAUDITENTRYIDS>
+            </OLDAUDITENTRYIDS.LIST>
+
+            <!-- Step 2: DATE comes after OLDAUDITENTRYIDS -->
+            <DATE>20260616</DATE>
+            <VCHSTATUSDATE>20260616</VCHSTATUSDATE>
+
+            <!-- Step 3: Core voucher fields -->
+            <GSTREGISTRATIONTYPE>Unregistered</GSTREGISTRATIONTYPE>
+            <STATENAME>Telangana</STATENAME>
+            <COUNTRYOFRESIDENCE>India</COUNTRYOFRESIDENCE>
+            <PLACEOFSUPPLY>Telangana</PLACEOFSUPPLY>
+            <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+            <PARTYLEDGERNAME>BI Worldwide India PVT LTD</PARTYLEDGERNAME>
+            <VOUCHERNUMBER>CLEANTEST03</VOUCHERNUMBER>
+            <BASICBUYERNAME>BI Worldwide India PVT LTD</BASICBUYERNAME>
+            <CMPGSTREGISTRATIONTYPE>Regular</CMPGSTREGISTRATIONTYPE>
+            <PARTYMAILINGNAME>BI Worldwide India PVT LTD</PARTYMAILINGNAME>
+            <NUMBERINGSTYLE>Manual</NUMBERINGSTYLE>
+            <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
+            <VCHSTATUSTAXUNIT>Telangana Registration</VCHSTATUSTAXUNIT>
+            <NARRATION>ERP Inv: BIW11 | Original Invoice Date: 16/06/2026</NARRATION>
+
+            <!-- Step 4: Boolean flags block (matches REVTEST01 pattern) -->
+            <DIFFACTUALQTY>No</DIFFACTUALQTY>
+            <ISMSTFROMSYNC>No</ISMSTFROMSYNC>
+            <ISDELETED>No</ISDELETED>
+            <ISSECURITYONWHENENTERED>No</ISSECURITYONWHENENTERED>
+            <ASORIGINAL>No</ASORIGINAL>
+            <AUDITED>No</AUDITED>
+            <ISCOMMONPARTY>No</ISCOMMONPARTY>
+            <FORJOBCOSTING>No</FORJOBCOSTING>
+            <ISOPTIONAL>No</ISOPTIONAL>
+
+            <!-- Step 5: EFFECTIVEDATE after boolean flags — matches REVTEST01 -->
+            <EFFECTIVEDATE>20260616</EFFECTIVEDATE>
+
+            <ISINVOICE>Yes</ISINVOICE>
+            <HASDISCOUNTS>No</HASDISCOUNTS>
+            <ISPOSTDATED>No</ISPOSTDATED>
+            <USETRACKINGNUMBER>No</USETRACKINGNUMBER>
+            <ISCANCELLED>No</ISCANCELLED>
+            <ISONHOLD>No</ISONHOLD>
+
+            <!-- Ledger entries -->
+            <ALLLEDGERENTRIES.LIST>
+              <OLDAUDITENTRYIDS.LIST TYPE="Number">
+                <OLDAUDITENTRYIDS>-1</OLDAUDITENTRYIDS>
+              </OLDAUDITENTRYIDS.LIST>
+              <LEDGERNAME>BI Worldwide India PVT LTD</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
+              <AMOUNT>-230.00</AMOUNT>
+              <BILLALLOCATIONS.LIST>
+                <NAME>CLEANTEST03</NAME>
+                <BILLTYPE>New Ref</BILLTYPE>
+                <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
+                <AMOUNT>-230.00</AMOUNT>
+              </BILLALLOCATIONS.LIST>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <OLDAUDITENTRYIDS.LIST TYPE="Number">
+                <OLDAUDITENTRYIDS>-1</OLDAUDITENTRYIDS>
+              </OLDAUDITENTRYIDS.LIST>
+              <LEDGERNAME>Output CGST @ 2.5%</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>5.48</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <OLDAUDITENTRYIDS.LIST TYPE="Number">
+                <OLDAUDITENTRYIDS>-1</OLDAUDITENTRYIDS>
+              </OLDAUDITENTRYIDS.LIST>
+              <LEDGERNAME>Output SGST @ 2.5%</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>5.48</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <OLDAUDITENTRYIDS.LIST TYPE="Number">
+                <OLDAUDITENTRYIDS>-1</OLDAUDITENTRYIDS>
+              </OLDAUDITENTRYIDS.LIST>
+              <LEDGERNAME>Sales Accounts</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+              <ISPARTYLEDGER>No</ISPARTYLEDGER>
+              <AMOUNT>219.04</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+          </VOUCHER>
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>

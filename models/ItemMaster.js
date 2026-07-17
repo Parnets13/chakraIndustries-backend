@@ -112,6 +112,15 @@ const itemMasterSchema = new mongoose.Schema({
     ref: 'User'
   },
   
+  // Data source — 'ERP' for records created in this system, 'Tally' for records imported from Tally.
+  // Only 'ERP' records are eligible for export back to Tally.
+  dataSource: {
+    type: String,
+    enum: ['ERP', 'Tally'],
+    default: 'ERP',
+    index: true
+  },
+
   // Tally Integration Fields
   tallyGuid: {
     type: String,
@@ -131,6 +140,14 @@ const itemMasterSchema = new mongoose.Schema({
     type: Date
   },
   tallyStockName: {
+    type: String,
+    trim: true
+  },
+  // ── Tally sales ledger override (GST-enabled vouchers) ────────────────────
+  // For GST-enabled inventory vouchers, each stock item must reference the
+  // EXACT sales ledger name defined in Tally (e.g., "SS Bottle Sales Local 5%").
+  // Store the ledger name here to override the computed default.
+  tallySalesLedger: {
     type: String,
     trim: true
   },

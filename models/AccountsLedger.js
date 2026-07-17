@@ -151,6 +151,15 @@ const accountsLedgerSchema = new mongoose.Schema({
     tdsPercentage: { type: Number, default: 0 }
   },
   
+  // Data source — 'ERP' for records created in this system, 'Tally' for records imported from Tally.
+  // Only 'ERP' records are eligible for export back to Tally.
+  dataSource: {
+    type: String,
+    enum: ['ERP', 'Tally'],
+    default: 'ERP',
+    index: true
+  },
+
   // Tally integration
   tallyLedgerId: {
     type: String,

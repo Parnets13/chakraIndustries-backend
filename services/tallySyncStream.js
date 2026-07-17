@@ -483,14 +483,31 @@ async function syncVouchers(url, cfg, onProgress) {
         // ── Bill To / Ship To extraction ────────────────────────────────────
         // Bill To fields
         const billToName = gVal(block, 'BASICBUYERNAME') || gVal(block, 'BUYERNAME') || gVal(block, 'BILLTOLEDGERNAME') || gVal(block, 'BILLTONAME') || party;
-        const billToMailingName = gVal(block, 'BILLTOMAILINGNAME') || gVal(block, 'BUYERMAILINGNAME') || gVal(block, 'PARTYMAILINGNAME');
-        const billToAddressLines = [...block.matchAll(/<BASICBUYERADDRESS>([\s\S]*?)<\/BASICBUYERADDRESS>/gi), ...block.matchAll(/<BUYERADDRESS>([\s\S]*?)<\/BUYERADDRESS>/gi), ...block.matchAll(/<BILLTOADDRESS>([\s\S]*?)<\/BILLTOADDRESS>/gi)].map(a => decodeXml(a[1].trim())).filter(Boolean);
-        const billToAddress = billToAddressLines.join(', ');
+        // FIX: Do NOT fall back to PARTYMAILINGNAME — when ship-to exists, Tally's root
+        // PARTYMAILINGNAME holds the ship-to/consignee name, not the bill-to mailing name.
+        // Only read dedicated bill-to mailing name tags to avoid cross-contamination.
+        const billToMailingName = gVal(block, 'BILLTOMAILINGNAME') || gVal(block, 'BUYERMAILINGNAME');
+        // FIX: Prefer dedicated BILLTOADDRESS tags for bill-to address. BASICBUYERADDRESS at
+        // root level can contain ship-to address when a consignee exists; bill-to address
+        // in that case lives inside BASICBASEPARTYDETAILS.LIST. Using BILLTOADDRESS tags
+        // avoids accidentally reading the ship-to address as the bill-to address.
+        const billToAddressLines = [
+          ...block.matchAll(/<BILLTOADDRESS>([\s\S]*?)<\/BILLTOADDRESS>/gi),
+          ...block.matchAll(/<BUYERADDRESS>([\s\S]*?)<\/BUYERADDRESS>/gi),
+        ].map(a => decodeXml(a[1].trim())).filter(Boolean);
+        // Only fall back to BASICBUYERADDRESS when no dedicated bill-to address tags exist
+        const billToAddressLinesFinal = billToAddressLines.length > 0 ? billToAddressLines :
+          [...block.matchAll(/<BASICBASEPARTYDETAILS\.LIST>([\s\S]*?)<\/BASICBASEPARTYDETAILS\.LIST>/gi)]
+            .flatMap(m => [...m[1].matchAll(/<BASICBUYERADDRESS>([\s\S]*?)<\/BASICBUYERADDRESS>/gi)])
+            .map(a => decodeXml(a[1].trim())).filter(Boolean);
+        const billToAddress = billToAddressLinesFinal.join(', ');
         const billToCity = gVal(block, 'BILLTOCITY') || gVal(block, 'BUYERCITY');
         const billToState = gVal(block, 'BILLTOSTATE') || gVal(block, 'BUYERSTATE');
         const billToCountry = gVal(block, 'BILLTOCOUNTRY') || gVal(block, 'BUYERCOUNTRY');
         const billToGST = gVal(block, 'BILLTOGSTIN') || gVal(block, 'BUYERGSTIN') || gVal(block, 'PARTYGSTIN');
         const billToGstRegType = gVal(block, 'BILLTOGSTREGISTRATIONTYPE') || gVal(block, 'BUYERGSTREGISTRATIONTYPE') || gVal(block, 'GSTREGISTRATIONTYPE');
+        // PARTYPINCODE is Tally's root-level buyer pincode tag — matches what we write on export
+        const billToPincode = gVal(block, 'BILLTOPINCODE') || gVal(block, 'BUYERPINCODE') || gVal(block, 'PARTYPINCODE') || '';
 
         // Ship To / Consignee fields
         const shipToName = gVal(block, 'PARTYSHIPPINGNAME') || gVal(block, 'BASICSHIPTO') || gVal(block, 'CONSIGNEENAME') || gVal(block, 'SHIPTONAME') || gVal(block, 'DELIVERYNAME');
@@ -501,6 +518,7 @@ async function syncVouchers(url, cfg, onProgress) {
         const shipToState = gVal(block, 'CONSIGNEESTATENAME') || gVal(block, 'CONSIGNEESTATE') || gVal(block, 'SHIPTOSTATE');
         const shipToCountry = gVal(block, 'CONSIGNEECOUNTRYNAME') || gVal(block, 'CONSIGNEECOUNTRY') || gVal(block, 'SHIPTOCOUNTRY');
         const shipToGST = gVal(block, 'CONSIGNEEGSTIN') || gVal(block, 'SHIPTOGSTIN');
+        const shipToPincode = gVal(block, 'CONSIGNEEPINCODE') || gVal(block, 'SHIPTOPINCODE') || '';
 
         // Fallback: if no Ship To data, use Bill To
         const hasAnyShipTo = shipToName || shipToAddress || shipToCity || shipToState || shipToCountry || shipToGST;
@@ -511,6 +529,7 @@ async function syncVouchers(url, cfg, onProgress) {
         const finalShipToState = hasAnyShipTo ? shipToState : billToState;
         const finalShipToCountry = hasAnyShipTo ? shipToCountry : billToCountry;
         const finalShipToGST = hasAnyShipTo ? shipToGST : billToGST;
+        const finalShipToPincode = hasAnyShipTo ? shipToPincode : billToPincode;
 
         const filter = guid ? { tallyGuid: guid } : (vNo ? { voucherNumber: vNo, voucherType: vtype } : null);
         if (!filter) continue;
@@ -538,6 +557,7 @@ async function syncVouchers(url, cfg, onProgress) {
               billToCountry,
               billToGST,
               billToGstRegType,
+              billToPincode,
               shipToName: finalShipToName,
               shipToMailingName: finalShipToMailingName,
               shipToAddress: finalShipToAddress,
@@ -545,6 +565,7 @@ async function syncVouchers(url, cfg, onProgress) {
               shipToState: finalShipToState,
               shipToCountry: finalShipToCountry,
               shipToGST: finalShipToGST,
+              shipToPincode: finalShipToPincode,
               ...(guid    ? { tallyGuid: guid }      : {}),
               ...(alterId ? { tallyAlterId: alterId } : {}),
             },
@@ -568,6 +589,7 @@ async function syncVouchers(url, cfg, onProgress) {
                 billToCountry,
                 billToGST,
                 billToGstRegType,
+                billToPincode,
                 shipToName: finalShipToName,
                 shipToMailingName: finalShipToMailingName,
                 shipToAddress: finalShipToAddress,
@@ -575,6 +597,7 @@ async function syncVouchers(url, cfg, onProgress) {
                 shipToState: finalShipToState,
                 shipToCountry: finalShipToCountry,
                 shipToGST: finalShipToGST,
+                shipToPincode: finalShipToPincode,
                 ...(guid    ? { tallyGuid: guid }      : {}),
                 ...(alterId ? { tallyAlterId: alterId } : {}),
               },
