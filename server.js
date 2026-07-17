@@ -413,6 +413,80 @@ httpServer.listen(PORT, async () => {
     console.warn('  Email sending will not work until EMAIL_USERNAME / EMAIL_PASSWORD are correct in .env');
   }
   // ────────────────────────────────────────────────────────────────────────
+
+  // ── Auto-renormalize invoices on every startup ───────────────────────────
+  // Runs silently in the background. Picks up any normalizer bug-fixes
+  // (e.g. the itemSalesBase fix that was causing Tally's "Tax amount does not
+  // match" e-invoice warning) without requiring any manual action.
+  // Only re-normalizes invoices whose tallySync=false (not yet exported) so
+  // already-exported vouchers are not re-queued unnecessarily.
+  setTimeout(async () => {
+    try {
+      const Invoice    = (await import('./models/Invoice.js')).default;
+      const ItemMaster = (await import('./models/ItemMaster.js')).default;
+      const TallyConfig = (await import('./models/TallyConfig.js')).default;
+      const { normalizeToTallyVoucher } = await import('./services/normalizeToTallyVoucher.js');
+
+      const cfg = await TallyConfig.findOne({}, 'tallyPeriodEnd').lean();
+      const periodEnd = cfg?.tallyPeriodEnd || null;
+
+      // Target: ERP invoices not yet pushed to Tally (most likely to have stale vouchers)
+      const pending = await Invoice.find(
+        { source: { $nin: ['Tally', 'tally'] }, tallySync: { $ne: true } },
+        null,
+        { lean: true }
+      );
+
+      if (!pending.length) {
+        console.log('[Startup] Auto-renormalize: no pending invoices to update');
+        return;
+      }
+
+      // Pre-fetch all item masters in one query
+      const allNames = [...new Set(
+        pending.flatMap(inv => (inv.items || []).map(i => (i.description || i.name || '').trim()).filter(Boolean))
+      )];
+      const masters = allNames.length
+        ? await ItemMaster.find({ name: { $in: allNames } }, 'name hsn tallySalesLedger').lean()
+        : [];
+      const masterMap = new Map(masters.map(m => [m.name, m]));
+
+      const ops = [];
+      let fixed = 0, skipped = 0;
+
+      for (const inv of pending) {
+        try {
+          const enrichedItems = (inv.items || []).map(item => {
+            const name = (item.description || item.name || '').trim();
+            const im   = masterMap.get(name);
+            return {
+              ...item,
+              hsn:              (item.hsn || '').trim()              || (im?.hsn              || '').trim(),
+              tallySalesLedger: (item.tallySalesLedger || '').trim() || (im?.tallySalesLedger || '').trim(),
+            };
+          });
+          const tv = normalizeToTallyVoucher({ ...inv, items: enrichedItems }, { periodEnd });
+          ops.push({
+            updateOne: {
+              filter: { _id: inv._id },
+              update: { $set: { tallyVoucher: tv } },
+            },
+          });
+          fixed++;
+        } catch (_) {
+          skipped++;
+        }
+      }
+
+      if (ops.length) {
+        await Invoice.bulkWrite(ops, { ordered: false });
+        console.log(`[Startup] Auto-renormalize: updated ${fixed} invoice(s) (${skipped} skipped)`);
+      }
+    } catch (e) {
+      console.warn('[Startup] Auto-renormalize error (non-fatal):', e.message);
+    }
+  }, 5000); // 5-second delay to let MongoDB settle after startup
+  // ────────────────────────────────────────────────────────────────────────
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`✗ Port ${PORT} is already in use. Stop the other process and restart.`);

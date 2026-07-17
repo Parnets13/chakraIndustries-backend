@@ -25,6 +25,7 @@ import {
   postXmlWithRetry,
 } from './tallyFetchEngine.js';
 import { normalizeToTallyVoucher } from './normalizeToTallyVoucher.js';
+import { serializeTallyVoucher } from './tallyExportService.js';
 import fs from 'fs';
 import path from 'path';
 // Determine repository root robustly (works when process.cwd() differs,
@@ -1292,148 +1293,59 @@ export async function pushSingleInvoiceToTally(invoiceId) {
     parseTallyResponse(mastersResp, `Invoice ${inv.invoiceNo} Auto-Masters`);
 
     // ── Build voucher XML ────────────────────────────────────────────────
-    // PRIMARY PATH: serialize stored tallyVoucher sub-document
-    // FALLBACK: legacy field-mapping if tallyVoucher is null
+    // ALWAYS re-normalize fresh so any code fix (e.g. itemSalesBase bug fix)
+    // is reflected immediately — never use a potentially-stale stored tallyVoucher.
     let voucherXml;
 
-    if (inv.tallyVoucher && inv.tallyVoucher.voucherNumber) {
-      LOG(`Invoice ${inv.invoiceNo}: PRIMARY path — using stored tallyVoucher`);
-      // Ensure tallyVoucher is current (re-normalize if needed)
-      let tv = inv.tallyVoucher;
-      if (!tv.date) {
-        // Date might be missing on very old stored vouchers — re-normalize
-        try {
-          // Enrich items with ItemMaster tallySalesLedger + hsn before re-normalizing
-          const itemNames = (inv.items || []).map(i => (i.description || i.name || '').trim()).filter(Boolean);
-          const itemMasters = itemNames.length
-            ? await ItemMaster.find({ name: { $in: itemNames } }, 'name hsn tallySalesLedger').lean()
-            : [];
-          const masterMap = new Map(itemMasters.map(m => [m.name, m]));
-          const enrichedItems = (inv.items || []).map(item => {
-            const name = (item.description || item.name || '').trim();
-            const im   = masterMap.get(name);
-            return { ...item, hsn: item.hsn || im?.hsn || '', tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || '' };
-          });
-          const fresh = normalizeToTallyVoucher({ ...inv, items: enrichedItems }, { periodEnd: cfg.tallyPeriodEnd || null });
-          tv = fresh;
-          await Invoice.findByIdAndUpdate(invoiceId, { tallyVoucher: fresh });
-        } catch (normErr) {
-          LOG(`Re-normalize failed (non-fatal): ${normErr.message}`);
-        }
-      }
-      voucherXml = buildSingleVoucherXml({ ...inv, tallyVoucher: tv }, cfg);
-
-    } else {
-      // ── FALLBACK: legacy field-mapping ───────────────────────────────
-      LOG(`Invoice ${inv.invoiceNo}: FALLBACK path — tallyVoucher=null, using legacy mapper`);
-      const cgst      = +((inv.cgstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.cgst||0),0))).toFixed(2);
-      const sgst      = +((inv.sgstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.sgst||0),0))).toFixed(2);
-      const igst      = +((inv.igstTotal ?? (inv.items||[]).reduce((s,i)=>s+(i.igst||0),0))).toFixed(2);
-      const totalTax  = +(cgst + sgst + igst).toFixed(2);
-      const salesBase = +(grandTotal - totalTax).toFixed(2);
-      const taxableBase = salesBase > 0 ? salesBase : grandTotal;
-      const cgstHRate = (taxableBase > 0 && cgst > 0) ? +((cgst/taxableBase)*100).toFixed(2) : 0;
-      const igstFRate = (taxableBase > 0 && igst > 0) ? +((igst/taxableBase)*100).toFixed(2) : 0;
-      const cgstLed   = cgstHRate<=2.5&&cgst>0 ? 'Output CGST @ 2.5%' : cgstHRate<=6 ? 'Output CGST @ 6%' : cgst>0 ? 'Output CGST @ 9%' : '';
-      const sgstLed   = cgstLed.replace('CGST','SGST');
-      const igstLed   = igstFRate<=5&&igst>0 ? 'Output IGST @ 5%' : igstFRate<=12 ? 'Output IGST @ 12%' : igst>0 ? 'Output IGST @ 18%' : '';
-
-      const voucherTallyDate = tallyDate(new Date());
-      const existingGuid = inv.tallyGuid || null;
-      const action  = existingGuid ? 'Alter' : 'Create';
-      const guidTag = existingGuid ? `<GUID>${esc(existingGuid)}</GUID>` : '';
-      const origFmt = inv.invoiceDate
-        ? new Date(inv.invoiceDate).toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'numeric' })
-        : '';
-      const narration = [
-        `ERP Inv: ${inv.invoiceNo}`,
-        origFmt ? `Original Invoice Date: ${origFmt}` : null,
-        inv.notes || null,
-      ].filter(Boolean).join(' | ');
-
-      // Build ALLINVENTORYENTRIES.LIST — only when items have a real sales ledger.
-      // "Sales Accounts" is a Tally group, not a ledger: using it in ACCOUNTINGALLOCATIONS
-      // causes silent EXCEPTIONS=1. Skip inventory when no specific ledger is set.
-      const invItems = (inv.items || []).filter(i => (i.description || i.name || '').trim());
-      const invItemAmounts = invItems.map(i => {
-        const qty  = +(i.qty || 1);
-        const rate = +(i.rate || 0);
-        return +(i.amount || i.basic || (qty * rate)).toFixed(2);
+    {
+      // Enrich items with latest ItemMaster tallySalesLedger + hsn
+      const itemNames = [...new Set(
+        (inv.items || []).map(i => (i.description || i.name || '').trim()).filter(Boolean)
+      )];
+      const itemMasters = itemNames.length
+        ? await ItemMaster.find({ name: { $in: itemNames } }, 'name hsn tallySalesLedger').lean()
+        : [];
+      const masterMap = new Map(itemMasters.map(m => [m.name, m]));
+      const enrichedItems = (inv.items || []).map(item => {
+        const name = (item.description || item.name || '').trim();
+        const im   = masterMap.get(name);
+        return {
+          ...item,
+          hsn:              (item.hsn || '').trim()              || (im?.hsn              || '').trim(),
+          tallySalesLedger: (item.tallySalesLedger || '').trim() || (im?.tallySalesLedger || '').trim(),
+        };
       });
-      const invItemsTotal = +invItemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-      const useLegacyInventory = invItems.length > 0
-        && Math.abs(invItemsTotal - salesBase) <= 0.10
-        && invItems.some(i => {
-          const l = (i.tallySalesLedger || '').trim().toLowerCase();
-          return l && l !== 'sales accounts';
-        });
-      let legacyInvAllocated = 0;
-      const legacyInventoryXml = useLegacyInventory ? invItems.map((item, i) => {
-        const itemName    = (item.description || item.name || '').trim();
-        const itemQty     = +(item.qty || 1);
-        const itemRate    = +(item.rate || 0);
-        const isLast      = i === invItems.length - 1;
-        const itemAmt     = isLast
-          ? +(salesBase - legacyInvAllocated).toFixed(2)
-          : invItemAmounts[i];
-        legacyInvAllocated = +(legacyInvAllocated + (isLast ? itemAmt : invItemAmounts[i])).toFixed(2);
-        // Sales inventory: ISDEEMEDPOSITIVE=No → amounts must be NEGATIVE
-        const negItemAmt  = -Math.abs(itemAmt);
-        const itemUnit    = 'Nos';
-        const salesLedger = (item.tallySalesLedger || 'Sales').trim();
-        return `
-  <ALLINVENTORYENTRIES.LIST>
-    <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-    <RATE>${itemRate.toFixed(2)}/${itemUnit}</RATE>
-    <AMOUNT>${negItemAmt.toFixed(2)}</AMOUNT>
-    <ACTUALQTY>${itemQty} ${itemUnit}</ACTUALQTY>
-    <BILLEDQTY>${itemQty} ${itemUnit}</BILLEDQTY>
-    <ACCOUNTINGALLOCATIONS.LIST>
-      <LEDGERNAME>${esc(salesLedger)}</LEDGERNAME>
-      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-      <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-      <AMOUNT>${negItemAmt.toFixed(2)}</AMOUNT>
-    </ACCOUNTINGALLOCATIONS.LIST>
-  </ALLINVENTORYENTRIES.LIST>`;
-      }).join('') : '';
 
-      voucherXml = `
-<VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
-  <DATE>${voucherTallyDate}</DATE>
-  <EFFECTIVEDATE>${voucherTallyDate}</EFFECTIVEDATE>
-  ${guidTag}
-  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
-  <VOUCHERNUMBER>${esc(inv.invoiceNo)}</VOUCHERNUMBER>
-  <PARTYLEDGERNAME>${esc(inv.partyName)}</PARTYLEDGERNAME>
-  <ISINVOICE>Yes</ISINVOICE>
-  <BUYERSORDERNO>${esc(inv.purchaseOrderRef || inv.buyersOrderNo || '')}</BUYERSORDERNO>
-  <NARRATION>${esc(narration)}</NARRATION>
-  ${/* bill-to / ship-to stripped pending confirmed-working test */ ''}
-  <LEDGERENTRIES.LIST>
-    <LEDGERNAME>${esc(inv.partyName)}</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
-    <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
-    <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
-    <BILLALLOCATIONS.LIST>
-      <NAME>${esc(inv.invoiceNo)}</NAME>
-      <BILLTYPE>New Ref</BILLTYPE>
-      <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
-      <AMOUNT>-${grandTotal.toFixed(2)}</AMOUNT>
-    </BILLALLOCATIONS.LIST>
-  </LEDGERENTRIES.LIST>
-  ${cgst>0&&cgstLed ? `<LEDGERENTRIES.LIST><LEDGERNAME>${esc(cgstLed)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER><AMOUNT>${cgst.toFixed(2)}</AMOUNT></LEDGERENTRIES.LIST>` : ''}
-  ${sgst>0&&sgstLed ? `<LEDGERENTRIES.LIST><LEDGERNAME>${esc(sgstLed)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER><AMOUNT>${sgst.toFixed(2)}</AMOUNT></LEDGERENTRIES.LIST>` : ''}
-  ${igst>0&&igstLed ? `<LEDGERENTRIES.LIST><LEDGERNAME>${esc(igstLed)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER><AMOUNT>${igst.toFixed(2)}</AMOUNT></LEDGERENTRIES.LIST>` : ''}
-  ${!useLegacyInventory ? `<LEDGERENTRIES.LIST>
-    <LEDGERNAME>Sales Accounts</LEDGERNAME>
-    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE><ISPARTYLEDGER>No</ISPARTYLEDGER>
-    <AMOUNT>${(totalTax>0 ? salesBase : grandTotal).toFixed(2)}</AMOUNT>
-  </LEDGERENTRIES.LIST>` : ''}
-  ${legacyInventoryXml}
-</VOUCHER>`;
+      // Probe voucher type name from Tally
+      let salesVoucherTypeName = 'Sales';
+      try {
+        const co = (cfg.companyName || '').trim().toUpperCase();
+        const coTag = co ? `<SVCURRENTCOMPANY>${esc(co)}</SVCURRENTCOMPANY>` : '';
+        const vtXml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>VTProbe</ID></HEADER><BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="VTProbe"><TYPE>VoucherType</TYPE><FETCH>Name</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+        const vtResp = await postXmlWithRetry(cfg, vtXml, connectorTimeout(cfg, 20000));
+        const salesType = [...(vtResp || '').matchAll(/<NAME>(.*?)<\/NAME>/gi)]
+          .map(m => m[1].trim()).find(n => n.toLowerCase().startsWith('sale'));
+        if (salesType) salesVoucherTypeName = salesType;
+      } catch (_) { /* use default */ }
+
+      // Re-normalize with current fix applied
+      let tv;
+      try {
+        tv = normalizeToTallyVoucher(
+          { ...inv, items: enrichedItems },
+          { periodEnd: cfg.tallyPeriodEnd || null, salesVoucherTypeName }
+        );
+        // Persist the corrected tallyVoucher back to DB
+        await Invoice.findByIdAndUpdate(invoiceId, { tallyVoucher: tv });
+      } catch (normErr) {
+        return { ok: false, error: `Normalization failed: ${normErr.message}` };
+      }
+
+      const action  = inv.tallyGuid ? 'Alter' : 'Create';
+      const guidTag = inv.tallyGuid ? `<GUID>${esc(inv.tallyGuid)}</GUID>` : '';
+
+      // Use the full serializer (includes RATEDETAILS.LIST needed for e-invoice)
+      voucherXml = serializeTallyVoucher(tv, cfg, action, guidTag);
     }
 
     const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
