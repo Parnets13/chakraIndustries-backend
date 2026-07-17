@@ -290,12 +290,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
         actualQty: `${itemQty} ${itemUnit}`,
         billedQty: `${itemQty} ${itemUnit}`,
       }],
-      // Rate details (CGST, SGST/UTGST, or IGST)
-      rateDetails: [
-        ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: cgstRate }] : []),
-        ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate }] : []),
-        ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: igstRate }] : []),
-      ],
+      // No rate details - let Tally use our ledger tax amounts without auto-calculating
+    rateDetails: [],
       // Accounting allocations
       accountingAllocations: [{
         ledgerName: salesLedger,
