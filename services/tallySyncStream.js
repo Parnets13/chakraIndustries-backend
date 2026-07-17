@@ -506,6 +506,8 @@ async function syncVouchers(url, cfg, onProgress) {
         const billToCountry = gVal(block, 'BILLTOCOUNTRY') || gVal(block, 'BUYERCOUNTRY');
         const billToGST = gVal(block, 'BILLTOGSTIN') || gVal(block, 'BUYERGSTIN') || gVal(block, 'PARTYGSTIN');
         const billToGstRegType = gVal(block, 'BILLTOGSTREGISTRATIONTYPE') || gVal(block, 'BUYERGSTREGISTRATIONTYPE') || gVal(block, 'GSTREGISTRATIONTYPE');
+        // PARTYPINCODE is Tally's root-level buyer pincode tag — matches what we write on export
+        const billToPincode = gVal(block, 'BILLTOPINCODE') || gVal(block, 'BUYERPINCODE') || gVal(block, 'PARTYPINCODE') || '';
 
         // Ship To / Consignee fields
         const shipToName = gVal(block, 'PARTYSHIPPINGNAME') || gVal(block, 'BASICSHIPTO') || gVal(block, 'CONSIGNEENAME') || gVal(block, 'SHIPTONAME') || gVal(block, 'DELIVERYNAME');
@@ -516,6 +518,7 @@ async function syncVouchers(url, cfg, onProgress) {
         const shipToState = gVal(block, 'CONSIGNEESTATENAME') || gVal(block, 'CONSIGNEESTATE') || gVal(block, 'SHIPTOSTATE');
         const shipToCountry = gVal(block, 'CONSIGNEECOUNTRYNAME') || gVal(block, 'CONSIGNEECOUNTRY') || gVal(block, 'SHIPTOCOUNTRY');
         const shipToGST = gVal(block, 'CONSIGNEEGSTIN') || gVal(block, 'SHIPTOGSTIN');
+        const shipToPincode = gVal(block, 'CONSIGNEEPINCODE') || gVal(block, 'SHIPTOPINCODE') || '';
 
         // Fallback: if no Ship To data, use Bill To
         const hasAnyShipTo = shipToName || shipToAddress || shipToCity || shipToState || shipToCountry || shipToGST;
@@ -526,6 +529,7 @@ async function syncVouchers(url, cfg, onProgress) {
         const finalShipToState = hasAnyShipTo ? shipToState : billToState;
         const finalShipToCountry = hasAnyShipTo ? shipToCountry : billToCountry;
         const finalShipToGST = hasAnyShipTo ? shipToGST : billToGST;
+        const finalShipToPincode = hasAnyShipTo ? shipToPincode : billToPincode;
 
         const filter = guid ? { tallyGuid: guid } : (vNo ? { voucherNumber: vNo, voucherType: vtype } : null);
         if (!filter) continue;
@@ -553,6 +557,7 @@ async function syncVouchers(url, cfg, onProgress) {
               billToCountry,
               billToGST,
               billToGstRegType,
+              billToPincode,
               shipToName: finalShipToName,
               shipToMailingName: finalShipToMailingName,
               shipToAddress: finalShipToAddress,
@@ -560,6 +565,7 @@ async function syncVouchers(url, cfg, onProgress) {
               shipToState: finalShipToState,
               shipToCountry: finalShipToCountry,
               shipToGST: finalShipToGST,
+              shipToPincode: finalShipToPincode,
               ...(guid    ? { tallyGuid: guid }      : {}),
               ...(alterId ? { tallyAlterId: alterId } : {}),
             },
@@ -583,6 +589,7 @@ async function syncVouchers(url, cfg, onProgress) {
                 billToCountry,
                 billToGST,
                 billToGstRegType,
+                billToPincode,
                 shipToName: finalShipToName,
                 shipToMailingName: finalShipToMailingName,
                 shipToAddress: finalShipToAddress,
@@ -590,6 +597,7 @@ async function syncVouchers(url, cfg, onProgress) {
                 shipToState: finalShipToState,
                 shipToCountry: finalShipToCountry,
                 shipToGST: finalShipToGST,
+                shipToPincode: finalShipToPincode,
                 ...(guid    ? { tallyGuid: guid }      : {}),
                 ...(alterId ? { tallyAlterId: alterId } : {}),
               },
