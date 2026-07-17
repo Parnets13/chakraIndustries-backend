@@ -129,15 +129,24 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const voucherDate = capDate(rawDate, periodEnd);
 
   // ── Amounts ──────────────────────────────────────────────────────────────
-  const grandTotal = +((invoiceData.grandTotal || invoiceData.totalAmount || 0)).toFixed(2);
-  if (grandTotal <= 0) throw new Error(`normalizeToTallyVoucher: grandTotal must be > 0 (got ${grandTotal})`);
+  // When items have authoritative per-item totals (from Excel 'Total Value' column),
+  // use their sum as the grandTotal. This avoids recomputing from rate×qty and losing
+  // the exact values from the source document.
+  const itemsWithTotal = (invoiceData.items || []).filter(i => +(i.total || 0) > 0);
+  const grandTotal = itemsWithTotal.length > 0
+    ? +itemsWithTotal.reduce((s, i) => s + +(i.total || 0), 0).toFixed(2)
+    : +((invoiceData.grandTotal || invoiceData.totalAmount || 0)).toFixed(2);
+  const storedGrandTotal = +((invoiceData.grandTotal || invoiceData.totalAmount || 0)).toFixed(2);
+  // Use whichever is nonzero; prefer the items-based sum when available
+  const resolvedGrandTotal = grandTotal > 0 ? grandTotal : storedGrandTotal;
+  if (resolvedGrandTotal <= 0) throw new Error(`normalizeToTallyVoucher: grandTotal must be > 0 (got ${resolvedGrandTotal})`);
 
   const items = invoiceData.items || [];
   const totalCGST = +((invoiceData.cgstTotal ?? items.reduce((s, i) => s + (i.cgst || 0), 0))).toFixed(2);
   const totalSGST = +((invoiceData.sgstTotal ?? items.reduce((s, i) => s + (i.sgst || 0), 0))).toFixed(2);
   const totalIGST = +((invoiceData.igstTotal ?? items.reduce((s, i) => s + (i.igst || 0), 0))).toFixed(2);
   const totalTax  = +(totalCGST + totalSGST + totalIGST).toFixed(2);
-  const salesBase = +(grandTotal - totalTax).toFixed(2);
+  const salesBase = +(resolvedGrandTotal - totalTax).toFixed(2);
 
   // ── GST ledger names ──────────────────────────────────────────────────────
   const cgstLedger = totalCGST > 0 ? resolveGstLedgerName('cgst', salesBase, totalCGST, tallyGstLedgers?.cgstNames) : '';
@@ -156,7 +165,12 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const itemAmounts = validItems.map(item => {
     const qty  = +(item.qty || 1);
     const rate = +(item.rate || 0);
-    return +(item.amount || item.basic || (qty * rate)).toFixed(2);
+    // Priority: item.basic (direct from Excel, unrounded taxable value)
+    // → item.amount (may be rounded by computeTotals — avoid if basic available)
+    // → qty × rate (fallback computation)
+    // Using item.basic avoids the 219.0476→219.05 rounding that causes Tally's
+    // e-invoice engine to flag "Tax amount does not match".
+    return +(item.basic > 0 ? item.basic : (item.amount || (qty * rate))).toFixed(2);
   });
   // Fix rounding: force the last item amount to absorb any 1-paisa discrepancy
   // so sum of items always exactly equals salesBase. This prevents Tally EXCEPTIONS
@@ -179,12 +193,21 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // while LEDGERENTRIES carries a nonzero CGST amount → e-invoice mismatch.
   // Fallback: derive the effective rate from invoice-level totals so rateDetails
   // always reflects a nonzero rate when CGST/SGST is present on the voucher.
+  //
+  // IMPORTANT: snap to the nearest standard GST slab (2.5, 5, 6, 9, 12, 14, 18, 28).
+  // Tally's e-invoice engine always computes tax using slabs, not raw percentages.
+  // A computed rate like 8.999% ≠ 9% causes the "Tax amount does not match" warning.
+  const GST_SLABS = [0, 2.5, 5, 6, 9, 12, 14, 18, 28];
+  const snapToSlab = (rate) => {
+    if (rate <= 0) return 0;
+    return GST_SLABS.reduce((best, slab) => Math.abs(slab - rate) < Math.abs(best - rate) ? slab : best, GST_SLABS[0]);
+  };
   const invoiceCgstRate = salesBase > 0 && totalCGST > 0
-    ? +((totalCGST / salesBase) * 100).toFixed(2) : 0;
+    ? snapToSlab(+((totalCGST / salesBase) * 100).toFixed(4)) : 0;
   const invoiceSgstRate = salesBase > 0 && totalSGST > 0
-    ? +((totalSGST / salesBase) * 100).toFixed(2) : 0;
+    ? snapToSlab(+((totalSGST / salesBase) * 100).toFixed(4)) : 0;
   const invoiceIgstRate = salesBase > 0 && totalIGST > 0
-    ? +((totalIGST / salesBase) * 100).toFixed(2) : 0;
+    ? snapToSlab(+((totalIGST / salesBase) * 100).toFixed(4)) : 0;
 
   // useInventory: send items as ALLINVENTORYENTRIES.LIST to show item columns in Tally
   const useInventory = true;
@@ -226,13 +249,28 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     // fall back to the invoice-level effective rate so rateDetails is never sent as 0%
     // while LEDGERENTRIES carries a nonzero tax amount (which triggers the e-invoice
     // "Tax amount does not match" warning).
+    // Snap rates to standard GST slabs to avoid Tally's e-invoice engine mismatch.
     const calculateRate = (taxAmount, base) => {
       if (base <= 0 || taxAmount <= 0) return 0;
-      return +((taxAmount / base) * 100).toFixed(2);
+      return snapToSlab(+((taxAmount / base) * 100).toFixed(4));
     };
-    const cgstRate = itemCGST > 0 ? calculateRate(itemCGST, itemSalesBase) : invoiceCgstRate;
-    const sgstRate = itemSGST > 0 ? calculateRate(itemSGST, itemSalesBase) : invoiceSgstRate;
-    const igstRate = itemIGST > 0 ? calculateRate(itemIGST, itemSalesBase) : invoiceIgstRate;
+    // item.taxRate is the full GST % stored on the item (e.g. 18 for 18% GST).
+    // CGST/SGST are each half of it. Prefer stored taxRate for accuracy over back-calculation.
+    const itemTaxRate = +(item.taxRate || 0);
+    const isInterstateTx = itemIGST > 0 || (itemCGST === 0 && itemSGST === 0 && itemIGST === 0 && invoiceIgstRate > 0);
+    // Use stored taxRate when per-item amounts are zero (Excel-upload scenario):
+    // taxRate=18 → CGST=9%, SGST=9%
+    const storedHalfRate = itemTaxRate > 0 ? snapToSlab(itemTaxRate / 2) : 0;
+    const storedIgstRate = itemTaxRate > 0 ? snapToSlab(itemTaxRate) : 0;
+    const cgstRate = itemCGST > 0 ? calculateRate(itemCGST, itemSalesBase)
+                   : storedHalfRate > 0 && !isInterstateTx ? storedHalfRate
+                   : invoiceCgstRate;
+    const sgstRate = itemSGST > 0 ? calculateRate(itemSGST, itemSalesBase)
+                   : storedHalfRate > 0 && !isInterstateTx ? storedHalfRate
+                   : invoiceSgstRate;
+    const igstRate = itemIGST > 0 ? calculateRate(itemIGST, itemSalesBase)
+                   : storedIgstRate > 0 && isInterstateTx ? storedIgstRate
+                   : invoiceIgstRate;
     
     // Sales ledger: use item.tallySalesLedger if set and valid, else 'Sales'
     const INVALID_LEDGER_NAMES = new Set(['sales accounts', 'sales accounts (group)', '']);
@@ -274,7 +312,6 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       gstOverrideTaxability: 'Taxable',
       gstOverrideSupplyType: 'Goods',
       gstOverrideStoredNature: isInterstateItem ? 'Interstate Sales - Taxable' : 'Intrastate Sales - Taxable',
-      gstRateInferApplicability: 'Not Applicable',
       gstHsnName:            itemHSN,
       gstHsnInferApplicability: 'As per Masters/Company',
       gstOvrdnIsRevchargeApplic: 'Not Applicable',
@@ -290,8 +327,12 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
         actualQty: `${itemQty} ${itemUnit}`,
         billedQty: `${itemQty} ${itemUnit}`,
       }],
-      // No rate details - let Tally use our ledger tax amounts without auto-calculating
-    rateDetails: [],
+      // Rate details (CGST, SGST/UTGST, or IGST)
+    rateDetails: [
+      ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: cgstRate }] : []),
+      ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate }] : []),
+      ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: igstRate }] : []),
+    ],
       // Accounting allocations
       accountingAllocations: [{
         ledgerName: salesLedger,
@@ -314,11 +355,11 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     ledgerName: partyLedgerName,
     isDeemedPositive: true,
     isLastDeemedPositive: true,
-    amount: -grandTotal,    // negative in Tally XML = debit from voucher's perspective
+    amount: -resolvedGrandTotal,    // negative in Tally XML = debit from voucher's perspective
     billAllocations: [{
       name:     invoiceNo,
       billType: 'New Ref',
-      amount:   -grandTotal,
+      amount:   -resolvedGrandTotal,
     }],
   });
 
@@ -377,7 +418,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
         ledgerName: salesCreditLedger,
         isDeemedPositive: false,
         isLastDeemedPositive: false,
-        amount: totalTax > 0 ? +salesBase : +grandTotal,
+        amount: totalTax > 0 ? +salesBase : +resolvedGrandTotal,
         billAllocations: [],
       });
     }
@@ -392,7 +433,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   if (Math.abs(+totalSum) > 0.01) {
     throw new Error(
       `normalizeToTallyVoucher: voucher imbalanced by ${totalSum} ` +
-      `(invoice ${invoiceNo}, grandTotal=${grandTotal}, cgst=${totalCGST}, sgst=${totalSGST}, igst=${totalIGST}, salesBase=${salesBase})`
+      `(invoice ${invoiceNo}, grandTotal=${resolvedGrandTotal}, cgst=${totalCGST}, sgst=${totalSGST}, igst=${totalIGST}, salesBase=${salesBase})`
     );
   }
 
@@ -487,6 +528,22 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // (falling back to warehouseNames[] then "Main Location").
   const godownName = (invoiceData.godownName || invoiceData.warehouse || '').toString().trim();
 
+  // ── E-Invoice fields (IRN, AckNo, AckDate) ───────────────────────────────
+  // These are set when the ERP generates an e-invoice via the GST portal.
+  // Must be forwarded to Tally so the e-invoice details print on the invoice.
+  // IRN must be a valid 64-char hex string; discard anything else (Tally GUIDs etc.)
+  const rawIrn = (invoiceData.irn || '').toString().trim();
+  const irn = /^[0-9a-fA-F]{64}$/.test(rawIrn) ? rawIrn : '';
+  const ackNo = (invoiceData.ackNo || invoiceData.ackno || '').toString().trim();
+  // ackDate: store as YYYYMMDD string for Tally XML
+  let ackDate = '';
+  if (invoiceData.ackDate) {
+    const d = new Date(invoiceData.ackDate);
+    if (!isNaN(d.getTime())) {
+      ackDate = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+    }
+  }
+
   return {
     voucherType:      salesVoucherTypeName,   // exact name from Tally's VoucherType list
     voucherNumber:    invoiceNo,
@@ -497,6 +554,10 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     buyersOrderNo:    (invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '').toString().trim(),
     poDate:           poDateTally,
     narration,
+    // E-Invoice fields — forwarded to Tally XML so e-invoice prints correctly
+    irn,
+    ackNo,
+    ackDate,
     // Ship To — written as flat top-level tags on the <VOUCHER> element
     shipToName,
     shipToAddress,
@@ -522,7 +583,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     allLedgerEntries,
     allInventoryEntries,
     // Snapshot amounts — stored so export doesn't recompute
-    _grandTotal:  grandTotal,
+    _grandTotal:  resolvedGrandTotal,
     _totalCGST:   totalCGST,
     _totalSGST:   totalSGST,
     _totalIGST:   totalIGST,

@@ -83,6 +83,10 @@ const tallyVoucherSchema = new mongoose.Schema({
   _totalIGST:   { type: Number, default: 0 },
   _salesBase:   { type: Number, default: 0 },
   _useInventory:{ type: Boolean, default: false },
+  // E-Invoice fields — forwarded from GST portal to Tally for e-invoice printing
+  irn:     { type: String, default: '' },   // 64-char hex IRN from GST portal
+  ackNo:   { type: String, default: '' },   // Acknowledgement number
+  ackDate: { type: String, default: '' },   // YYYYMMDD acknowledgement date
 }, { _id: false });
 
 const invoiceItemSchema = new mongoose.Schema({
@@ -263,6 +267,13 @@ const invoiceSchema = new mongoose.Schema({
   // Export path reads this directly — zero field mapping required.
   // null = not yet normalized (legacy invoice or normalization failed).
   tallyVoucher: { type: tallyVoucherSchema, default: null },
+
+  // ── E-Invoice fields (GST portal) ────────────────────────────────────────────
+  // Set when the ERP generates an e-invoice via the government GST portal.
+  // These are forwarded to Tally so the e-invoice details print on the invoice.
+  irn:     { type: String, default: '' },   // 64-char hex IRN from GST portal
+  ackNo:   { type: String, default: '' },   // Acknowledgement number
+  ackDate: { type: Date, default: null },   // Acknowledgement date
 }, { timestamps: true });
 
 invoiceSchema.index({ invoiceNo: 1 });

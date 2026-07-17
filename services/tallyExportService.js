@@ -1,4 +1,4 @@
-/**
+﻿/**
  * tallyExportService.js
  * ─────────────────────────────────────────────────────────────────────────────
  * Dedicated ERP → Tally export engine for Sri Chakra Industries.
@@ -1577,6 +1577,13 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const companyState = (cfg.state || '').trim();
   const companyRegLabel = `${companyState} Registration`;
 
+  // E-Invoice fields — written to Tally XML so the e-invoice prints with IRN/AckNo
+  // Tally uses: IRN, ACKNO, ACKDATE (YYYYMMDD) at the voucher root level
+  const irnXml    = v.irn    ? `\n  <IRN>${esc(v.irn)}</IRN>`                                         : '';
+  const ackNoXml  = v.ackNo  ? `\n  <ACKNO>${esc(v.ackNo)}</ACKNO>`                                   : '';
+  const ackDateXml= v.ackDate? `\n  <ACKDATE>${esc(v.ackDate)}</ACKDATE>`                             : '';
+  const eInvoiceXml = irnXml + ackNoXml + ackDateXml;
+
   // ADDRESS.LIST is required right after opening <VOUCHER> tag!
   const addressListXml = billToAddressLines.length > 0 
     ? `  <ADDRESS.LIST TYPE="String">
@@ -1612,7 +1619,7 @@ ${addressListXml}
   <CMPGSTIN>${esc(companyGstIn)}</CMPGSTIN>
   <CMPGSTSTATE>${esc(companyState)}</CMPGSTSTATE>
   <CMPGSTREGISTRATIONTYPE>Regular</CMPGSTREGISTRATIONTYPE>
-  <VCHSTATUSTAXUNIT>${esc(companyRegLabel)}</VCHSTATUSTAXUNIT>${billToXml}${shipToXml}${invoiceOrderListXml}${ledgerEntriesXml}${inventoryEntriesXml}
+  <VCHSTATUSTAXUNIT>${esc(companyRegLabel)}</VCHSTATUSTAXUNIT>${billToXml}${shipToXml}${invoiceOrderListXml}${ledgerEntriesXml}${inventoryEntriesXml}${eInvoiceXml}
 </VOUCHER>`;
 }
 

@@ -65,7 +65,11 @@ const computeTotals = (items = []) => {
   const computed = items.map(item => {
     const base     = (item.qty || 0) * (item.rate || 0);
     const discAmt  = base * ((item.discount || 0) / 100);
-    const amount   = base - discAmt;
+    // Use item.basic from Excel directly when present — it is the authoritative
+    // taxable amount from the source document. Computing from rate*qty and rounding
+    // causes a 1-paisa drift (e.g. 219.0476×1 → 219.05) that breaks Tally's
+    // e-invoice tax validation ("Tax amount does not match").
+    const amount   = item.basic > 0 ? item.basic : (base - discAmt);
 
     // Use stored tax amounts if provided (from Excel), otherwise compute from taxRate
     const storedCGST = item.cgst || 0;
@@ -74,7 +78,9 @@ const computeTotals = (items = []) => {
     const storedTax  = storedCGST + storedSGST + storedIGST;
 
     const taxAmt   = storedTax > 0 ? storedTax : amount * ((item.taxRate || 0) / 100);
-    const total    = amount + taxAmt;
+    // Use item.total from Excel as the authoritative line total when available.
+    // Recomputing amount + taxAmt accumulates rounding errors across items.
+    const total    = (item.total > 0) ? item.total : (amount + taxAmt);
 
     subtotal      += base;
     totalDiscount += discAmt;
@@ -91,7 +97,12 @@ const computeTotals = (items = []) => {
       igst:      storedIGST,
     };
   });
-  const grandTotal = subtotal - totalDiscount + totalTax;
+  // Use the sum of item.total values as grandTotal when items have stored totals —
+  // this avoids the rounding drift from summing base+tax separately.
+  const hasStoredTotals = items.some(i => i.total > 0);
+  const grandTotal = hasStoredTotals
+    ? computed.reduce((s, i) => s + i.total, 0)
+    : (subtotal - totalDiscount + totalTax);
   return {
     items: computed,
     subtotal:      +subtotal.toFixed(2),
