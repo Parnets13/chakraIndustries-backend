@@ -13,7 +13,9 @@
     "seed:inventory": "node seedInventory.js",
     "seed:ageing": "node scripts/seedAgeingData.js",
     "seed:bom": "node scripts/seedBOM.js",
-    "fix-bulk": "node scripts/fixBulkQuotations.js"
+    "fix-bulk": "node scripts/fixBulkQuotations.js",
+    "fix-docketid-index": "node scripts/fixDocketIdIndex.js",
+    "fix-idempotency-index": "node scripts/fixIdempotencyIndex.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
@@ -31,9 +33,10 @@
     "nodemailer": "^6.9.14",
     "semver": "^7.7.1",
     "socket.io": "^4.8.3",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "xtend": "^4.0.2"
   },
   "devDependencies": {
-    "nodemon": "^2.0.20"
+    "nodemon": "^2.0.22"
   }
 }

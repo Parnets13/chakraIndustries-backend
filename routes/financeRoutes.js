@@ -29,7 +29,7 @@ router.post('/dealer-receipts', protect, financeController.createDealerReceipt);
 // Supplier Ledger
 router.get('/supplier-ledger', protect, financeController.getSupplierLedger);
 
-// Dealer Ledger
+//Finance Payment
 router.get('/dealer-ledger', protect, financeController.getDealerLedger);
 
 // Outstanding Invoices

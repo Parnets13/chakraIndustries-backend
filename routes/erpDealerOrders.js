@@ -22,7 +22,15 @@ const router = express.Router();
 // Dashboard stats
 router.get('/dashboard', protect, getDashboardStats);
 
-// Dealer orders
+// ── Dealer App orders feed (for ERP Order Management panel) ──────────────────
+// GET /api/erp/dealer-orders/dealer?status=&search=&page=&limit=
+// Returns only source=DealerApp orders with dealer info + invoice status
+router.get('/dealer', protect, (req, res) => {
+  req.query.source = 'DealerApp';
+  return getDealerOrders(req, res);
+});
+
+// All dealer orders (ERP full view)
 router.get('/', protect, getDealerOrders);
 router.get('/:id', protect, getDealerOrderById);
 router.post('/:id/approve', protect, approveOrder);

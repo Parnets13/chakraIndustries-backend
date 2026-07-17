@@ -48,9 +48,27 @@ router.get('/', verifyDealer, async (req, res) => {
       });
     }
 
+    // Return all profile fields including new registration fields
     res.status(200).json({
       success: true,
-      data: dealer
+      data: {
+        _id:        dealer._id,
+        name:       dealer.name,
+        mobile:     dealer.mobile,
+        email:      dealer.email       || '',
+        address:    dealer.address     || '',
+        city:       dealer.city        || '',
+        state:      dealer.state       || '',
+        pincode:    dealer.pincode     || '',
+        dealerCode: dealer.dealerCode  || '',
+        zone:       dealer.zone        || '',
+        status:     dealer.status      || 'pending',
+        photo:      dealer.photo       || null,
+        isActive:   dealer.isActive,
+        isVerified: dealer.isVerified,
+        creditLimit: dealer.creditLimit || 500000,
+        createdAt:  dealer.createdAt,
+      }
     });
   } catch (error) {
     console.error('Get profile error:', error);
@@ -66,11 +84,20 @@ router.get('/', verifyDealer, async (req, res) => {
 // @access  Private
 router.put('/update', verifyDealer, async (req, res) => {
   try {
-    const { name, email, address } = req.body;
+    const { name, email, address, city, state, pincode, photo } = req.body;
+
+    const updateData = {};
+    if (name    !== undefined) updateData.name    = name;
+    if (email   !== undefined) updateData.email   = email;
+    if (address !== undefined) updateData.address = address;
+    if (city    !== undefined) updateData.city    = city;
+    if (state   !== undefined) updateData.state   = state;
+    if (pincode !== undefined) updateData.pincode = pincode;
+    if (photo   !== undefined) updateData.photo   = photo;
 
     const dealer = await User.findByIdAndUpdate(
       req.dealerId,
-      { name, email, address },
+      updateData,
       { new: true, runValidators: true }
     ).select('-password');
 
@@ -84,7 +111,20 @@ router.put('/update', verifyDealer, async (req, res) => {
     res.status(200).json({
       success: true,
       message: 'Profile updated successfully',
-      data: dealer
+      data: {
+        _id:        dealer._id,
+        name:       dealer.name,
+        mobile:     dealer.mobile,
+        email:      dealer.email       || '',
+        address:    dealer.address     || '',
+        city:       dealer.city        || '',
+        state:      dealer.state       || '',
+        pincode:    dealer.pincode     || '',
+        dealerCode: dealer.dealerCode  || '',
+        status:     dealer.status      || 'pending',
+        photo:      dealer.photo       || null,
+        createdAt:  dealer.createdAt,
+      }
     });
   } catch (error) {
     console.error('Update profile error:', error);
