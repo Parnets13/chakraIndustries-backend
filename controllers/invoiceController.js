@@ -664,6 +664,61 @@ export const createFromSalesOrder = async (req, res) => {
   }
 };
 
+// ── POST /api/invoices/renormalize-all ────────────────────────────────────────
+// Re-runs normalizeToTallyVoucher on every ERP invoice so that any fix to the
+// normalizer (e.g. the itemSalesBase bug fix) is applied to already-stored docs.
+// Safe to run multiple times — updates tallyVoucher in-place, preserves all other fields.
+export const renormalizeAll = async (req, res) => {
+  try {
+    const cfg = await TallyConfig.findOne({}, 'tallyPeriodEnd').lean();
+    const periodEnd = cfg?.tallyPeriodEnd || null;
+
+    // Process in batches to avoid memory pressure on large collections
+    const BATCH = 100;
+    let skip = 0, updated = 0, failed = 0, skipped = 0;
+    const failedInvoices = [];
+
+    while (true) {
+      const batch = await Invoice.find(
+        { source: { $ne: 'Tally' } },
+        null,
+        { skip, limit: BATCH, lean: true }
+      );
+      if (!batch.length) break;
+
+      const ops = [];
+      for (const inv of batch) {
+        try {
+          const enrichedItems = await enrichItemsFromItemMaster(inv.items || []);
+          const tallyVoucher = normalizeToTallyVoucher(
+            { ...inv, items: enrichedItems },
+            { periodEnd }
+          );
+          // Also reset tallySync so the invoice will be re-exported with the corrected voucher
+          ops.push({
+            updateOne: {
+              filter: { _id: inv._id },
+              update: { $set: { tallyVoucher, tallySync: false, tallySyncAt: null } },
+            },
+          });
+          updated++;
+        } catch (err) {
+          failed++;
+          failedInvoices.push({ id: inv._id, invoiceNo: inv.invoiceNo, error: err.message });
+        }
+      }
+
+      if (ops.length) await Invoice.bulkWrite(ops, { ordered: false });
+      skip += BATCH;
+    }
+
+    res.json({ success: true, updated, failed, skipped, failedInvoices: failedInvoices.slice(0, 20) });
+  } catch (err) {
+    console.error('[renormalizeAll]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // ── POST /api/invoices/:id/send-to-tally ──────────────────────────────────────
 // One-click push of a single ERP invoice into Tally as a Sales Voucher.
 // After a successful push the invoice's tallySync flag is set to true.

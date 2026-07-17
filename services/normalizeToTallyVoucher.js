@@ -241,8 +241,13 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const itemCGST   = +(item.cgst || 0);
     const itemSGST   = +(item.sgst || 0);
     const itemIGST   = +(item.igst || 0);
-    // itemSalesBase derived from the ALREADY-ADJUSTED itemAmount (rounding done above).
-    const itemSalesBase = +(itemAmount - itemCGST - itemSGST - itemIGST).toFixed(2);
+    // itemSalesBase = itemAmount (the taxable/basic value sent as the inventory entry amount).
+    // CGST/SGST/IGST are SEPARATE ledger entries — they are NOT included in itemAmount.
+    // Do NOT subtract them from itemAmount: doing so produces an incorrect base for the
+    // rate calculation (e.g. 219.05 - 5.48 - 5.48 = 208.09 instead of 219.05), which
+    // causes Tally's e-invoice engine to compute a different tax amount and show the
+    // "Tax amount does not match" warning.
+    const itemSalesBase = itemAmount;
     
     // Calculate tax rates from the adjusted item amounts.
     // When per-item cgst/sgst are zero (invoice-level-only tax data from Excel upload),
