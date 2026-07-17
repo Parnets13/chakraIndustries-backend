@@ -959,8 +959,11 @@ function mapBillToFromParsed(voucher) {
   if (billToCountry) billTo.country = billToCountry;
   
   // Pincode - BILL TO ONLY
-  const billToPincode = getSafeValue(voucher, 'BILLTOPINCODE');
-  if (billToPincode) billTo.pincode = billToPincode;
+  // NOTE: BILLTOPINCODE in Tally vouchers can hold sequential internal counters
+  // instead of the actual party pincode (Tally bug/misuse). We skip it entirely
+  // and rely on the pincode extracted from the address text by extractBillToAddressFromParsed.
+  // The address parser in parseTallyAddress already extracts 6-digit pincodes from address lines.
+  // (billTo.pincode left as '' here — populated via backfillBillToFromLedger if needed)
   
   // GSTIN - BILL TO ONLY
   const billToGstin = getSafeValue(voucher, 'BILLTOGSTIN');
@@ -1682,8 +1685,12 @@ function mapBillToFromRaw(block) {
   if (billToCountry) billTo.country = billToCountry;
   
   // Pincode - BILL TO ONLY
-  const billToPincode = gTagVal(block, 'BILLTOPINCODE');
-  if (billToPincode) billTo.pincode = billToPincode;
+  // NOTE: BILLTOPINCODE in Tally vouchers can hold sequential internal counters
+  // instead of the actual party pincode (Tally bug/misuse). We skip it entirely
+  // and extract the pincode from the address text instead (6-digit number in address).
+  const billToAddrForPin = billTo.address || '';
+  const billToPincodeFromAddr = (billToAddrForPin.match(/\b([1-9]\d{5})\b/) || [])[1] || '';
+  if (billToPincodeFromAddr) billTo.pincode = billToPincodeFromAddr;
   
   // GSTIN - BILL TO ONLY
   const billToGstin = gTagVal(block, 'BILLTOGSTIN');
@@ -2103,7 +2110,9 @@ function parseVouchers(xml, voucherTypes) {
       const billToCity = rawData?.billTo?.city || parsedBillTo.city;
       const billToState = rawData?.billTo?.state || parsedBillTo.state;
       const billToCountry = rawData?.billTo?.country || parsedBillTo.country;
-      const billToPincode = rawData?.billTo?.pincode || parsedBillTo.pincode;
+      // Pincode: BILLTOPINCODE tag is unreliable (Tally often stores a sequential counter there).
+      // Leave it empty so backfillBillToFromLedger can populate it from the party ledger master.
+      const billToPincode = '';
       const billToGST = rawData?.billTo?.gstin || parsedBillTo.gstin;
       const billToGstRegType = rawData?.billTo?.gstRegType || parsedBillTo.gstRegType;
       
