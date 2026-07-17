@@ -274,7 +274,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       gstOverrideTaxability: 'Taxable',
       gstOverrideSupplyType: 'Goods',
       gstOverrideStoredNature: isInterstateItem ? 'Interstate Sales - Taxable' : 'Intrastate Sales - Taxable',
-      gstRateInferApplicability: 'As per Masters/Company',
+      gstRateInferApplicability: 'Not Applicable',
       gstHsnName:            itemHSN,
       gstHsnInferApplicability: 'As per Masters/Company',
       gstOvrdnIsRevchargeApplic: 'Not Applicable',
@@ -417,13 +417,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     return `${i + 1}. ${itemName}: ${itemQty} ${itemUnit} @ ₹${itemRate.toFixed(2)} = ₹${itemAmount.toFixed(2)}`;
   });
   
-  const narration = [
-    `Invoice: ${invoiceNo}`,
-    origDateFmt ? `Date: ${origDateFmt}` : null,
-    poRef ? `PO: ${poRef}` : null,
-    ...(itemLines.length ? ['', ...itemLines] : []),
-    invoiceData.notes ? (itemLines.length ? ['', invoiceData.notes] : [invoiceData.notes]) : [],
-  ].flat().filter(x => x !== null).join('\n');
+  // Send empty narration to ensure e-invoice prints correctly
+  const narration = '';
 
   // ── Assemble sub-document ─────────────────────────────────────────────────
   // ── PO Date → YYYYMMDD ────────────────────────────────────────────────────
