@@ -1550,6 +1550,13 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
     : '';
 
+  // INVOICEORDERLIST.LIST contains Order No(s) and Order Date in Tally's Dispatch Details section!
+  const invoiceOrderListXml = (v.buyersOrderNo || v.poDate) 
+    ? `  <INVOICEORDERLIST.LIST>
+    ${v.buyersOrderNo ? `<BASICPURCHASEORDERNO>${esc(v.buyersOrderNo)}</BASICPURCHASEORDERNO>` : ''}
+    ${v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : ''}
+  </INVOICEORDERLIST.LIST>`
+    : '';
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
   // BASICORDERREF = "Order No(s)" in Tally's Dispatch/Order Details section (visible on e-invoice print)
   const poOrderRefXml = v.buyersOrderNo ? `<BASICORDERREF>${esc(v.buyersOrderNo)}</BASICORDERREF>` : '';
@@ -1597,7 +1604,7 @@ ${addressListXml}
   <CMPGSTIN>${esc(companyGstIn)}</CMPGSTIN>
   <CMPGSTSTATE>${esc(companyState)}</CMPGSTSTATE>
   <CMPGSTREGISTRATIONTYPE>Regular</CMPGSTREGISTRATIONTYPE>
-  <VCHSTATUSTAXUNIT>${esc(companyRegLabel)}</VCHSTATUSTAXUNIT>${billToXml}${shipToXml}${ledgerEntriesXml}${inventoryEntriesXml}
+  <VCHSTATUSTAXUNIT>${esc(companyRegLabel)}</VCHSTATUSTAXUNIT>${billToXml}${shipToXml}${invoiceOrderListXml}${ledgerEntriesXml}${inventoryEntriesXml}
 </VOUCHER>`;
 }
 
