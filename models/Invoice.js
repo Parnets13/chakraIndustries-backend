@@ -42,6 +42,12 @@ const inventoryEntrySchema = new mongoose.Schema({
   gstOverrideTaxability:{ type: String, default: 'Taxable' },  // GSTOVRDNTAXABILITY
   gstOverrideSupplyType:{ type: String, default: 'Goods' },    // GSTOVRDNTYPEOFSUPPLY
   gstHsnName:           { type: String, default: '' },          // GSTHSNNAME (HSN code)
+  // Rate details for GST tax calculation (RATEDETAILS.LIST in Tally)
+  rateDetails: [{
+    gstRateDutyHead:     { type: String, default: '' },
+    gstRateEvaluationType:{ type: String, default: 'Based on Value' },
+    gstRate:             { type: Number, default: 0 }
+  }],
 }, { _id: false });
 
 const tallyVoucherSchema = new mongoose.Schema({

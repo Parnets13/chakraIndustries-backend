@@ -1426,6 +1426,14 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`
       : '';
 
+    // Rate details for GST tax calculation
+    const rateDetailsXml = (item.rateDetails || []).map(rd => `
+      <RATEDETAILS.LIST>
+        <GSTRATEDUTYHEAD>${esc(rd.gstRateDutyHead || '')}</GSTRATEDUTYHEAD>
+        <GSTRATEEVALUATIONTYPE>${esc(rd.gstRateEvaluationType || 'Based on Value')}</GSTRATEEVALUATIONTYPE>
+        <GSTRATE>${rd.gstRate || 0}</GSTRATE>
+      </RATEDETAILS.LIST>`).join('');
+
     // Godown: use item-level batchAllocations if present, else build from item/voucher fields
     const batch = item.batchAllocations?.[0];
     const godownName = esc((batch?.godownName || item.godownName || v._godownName || 'Main Location').trim());
@@ -1457,7 +1465,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     ${gstSourceXml}
     ${hsnSourceXml}
     ${gstOverrideXml}
-    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${batchAllocXml}${acctAllocsXml}
+    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${rateDetailsXml}${batchAllocXml}${acctAllocsXml}
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
 
