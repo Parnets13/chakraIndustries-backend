@@ -124,6 +124,7 @@ const invoiceSchema = new mongoose.Schema({
   billToCountry:        { type: String, default: '' },
   billToGST:            { type: String, default: '' },
   billToGstRegType:     { type: String, default: '' },
+  billToPincode:        { type: String, default: '' },
 
   // Ship To
   shipToName:           { type: String, default: '' },

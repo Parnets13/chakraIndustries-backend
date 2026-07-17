@@ -1,4 +1,4 @@
-﻿/**
+/**
  * tallyExportService.js
  * ─────────────────────────────────────────────────────────────────────────────
  * Dedicated ERP → Tally export engine for Sri Chakra Industries.
@@ -1562,8 +1562,16 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const companyState = (cfg.state || '').trim();
   const companyRegLabel = `${companyState} Registration`;
 
+  // ADDRESS.LIST is required right after opening <VOUCHER> tag!
+  const addressListXml = billToAddressLines.length > 0 
+    ? `  <ADDRESS.LIST TYPE="String">
+    ${billToAddressLines.map(line => `<ADDRESS>${esc(line)}</ADDRESS>`).join('\n    ')}
+  </ADDRESS.LIST>`
+    : '';
+
   return `
 <VOUCHER VCHTYPE="${esc(voucherTypeName)}" ACTION="${action}" OBJVIEW="Invoice Voucher View">
+${addressListXml}
   <DATE>${esc(v.date || '')}</DATE>
   <EFFECTIVEDATE>${esc(v.effectiveDate || v.date || '')}</EFFECTIVEDATE>
   <OLDAUDITENTRYIDS.LIST TYPE="Number">
