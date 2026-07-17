@@ -1155,7 +1155,14 @@ function buildSingleVoucherXml(inv, cfg) {
         .flatMap(section => section.split(/\s*[,;]\s*/))
         .map(line => line.trim())
         .filter(Boolean);
-      for (const line of chunks) {
+      for (let line of chunks) {
+        // Strip any embedded pincode from this line — pincodes are 6-digit Indian postal codes.
+        // They appear in three forms:
+        //   "Bangalore-560995"  → strip "-560995"
+        //   "Bangalore 560995"  → strip " 560995"
+        //   "560995"            → skip the line entirely (standalone pincode)
+        line = line.replace(/[-\s]\d{6}$/, '').trim();  // remove trailing -NNNNNN or space NNNNNN
+        if (!line || /^\d{6}$/.test(line)) continue;    // skip standalone 6-digit pincode lines
         if (!lines.some(existing => existing.toLowerCase() === line.toLowerCase())) {
           lines.push(line);
         }
@@ -1167,9 +1174,9 @@ function buildSingleVoucherXml(inv, cfg) {
     if (state && !lines.some(line => line.toLowerCase().includes(state.toLowerCase()))) {
       lines.push(state);
     }
-    if (pincode && !lines.some(line => line.includes(pincode))) {
-      lines.push(pincode);
-    }
+    // Pincode is NOT added to address lines — it is emitted separately via
+    // <PARTYPINCODE> / <CONSIGNEEPINCODE> tags. Adding it here causes Tally
+    // to render it appended to the city line (e.g. "Bangalore-560995").
     return lines;
   };
 

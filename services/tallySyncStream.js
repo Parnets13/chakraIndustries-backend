@@ -506,8 +506,16 @@ async function syncVouchers(url, cfg, onProgress) {
         const billToCountry = gVal(block, 'BILLTOCOUNTRY') || gVal(block, 'BUYERCOUNTRY');
         const billToGST = gVal(block, 'BILLTOGSTIN') || gVal(block, 'BUYERGSTIN') || gVal(block, 'PARTYGSTIN');
         const billToGstRegType = gVal(block, 'BILLTOGSTREGISTRATIONTYPE') || gVal(block, 'BUYERGSTREGISTRATIONTYPE') || gVal(block, 'GSTREGISTRATIONTYPE');
-        // PARTYPINCODE is Tally's root-level buyer pincode tag — matches what we write on export
-        const billToPincode = gVal(block, 'BILLTOPINCODE') || gVal(block, 'BUYERPINCODE') || gVal(block, 'PARTYPINCODE') || '';
+        // PARTYPINCODE / BILLTOPINCODE in Tally vouchers is a sequential internal counter per voucher
+        // (e.g. 560094, 560095, 560096... — increments with each voucher). It is NOT the postal code.
+        // Only trust it if it looks like a real 6-digit Indian pincode (starts with 1-9).
+        // Otherwise extract from the address text, or leave blank for backfillBillToFromLedger to fill.
+        const rawBillToPincode = gVal(block, 'BILLTOPINCODE') || gVal(block, 'BUYERPINCODE') || gVal(block, 'PARTYPINCODE') || '';
+        const rawBillToPincodeClean = rawBillToPincode.replace(/\D/g, '').slice(0, 6);
+        const billToPincodeFromTag = /^[1-9]\d{5}$/.test(rawBillToPincodeClean) ? rawBillToPincodeClean : '';
+        // Fall back: extract 6-digit pincode from address lines
+        const billToPincodeFromAddr = (billToAddress.match(/\b([1-9]\d{5})\b/) || [])[1] || '';
+        const billToPincode = billToPincodeFromTag || billToPincodeFromAddr;
 
         // Ship To / Consignee fields
         const shipToName = gVal(block, 'PARTYSHIPPINGNAME') || gVal(block, 'BASICSHIPTO') || gVal(block, 'CONSIGNEENAME') || gVal(block, 'SHIPTONAME') || gVal(block, 'DELIVERYNAME');

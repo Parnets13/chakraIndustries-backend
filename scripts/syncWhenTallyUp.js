@@ -84,12 +84,14 @@ async function importLedgers(resp) {
       let city    = decode(gVal(block,'LEDGERCITY'));
       let state   = decode(gVal(block,'STATENAME')||gVal(block,'LEDGERSTATE'));
       let pincode = decode(gVal(block,'PINCODE')||gVal(block,'LEDGERPINCODE')).replace(/\D/g,'').slice(0,6);
+      // Tally PINCODE field is often a sequential counter — reject it unless it looks like a real pincode
+      if (!/^[1-9]\d{5}$/.test(pincode)) pincode = '';
       const country = decode(gVal(block,'COUNTRYNAME')) || 'India';
       const addrStr = addrLines.slice(0,2).join(', ');
 
-      if (!city||!state) {
+      if (!city||!state||!pincode) {
         for (const ln of addrLines) {
-          const pm=ln.match(/\b(\d{6})\b/);
+          const pm=ln.match(/\b([1-9]\d{5})\b/);
           if (pm) {
             if (!pincode) pincode=pm[1];
             const pts=ln.replace(pm[0],'').replace(/[-,\s]+$/,'').split(/[,\-]/).map(p=>p.trim()).filter(Boolean);

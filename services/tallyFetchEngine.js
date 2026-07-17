@@ -1183,34 +1183,41 @@ function parseTallyAddress(ledger) {
     getSafeValue(ledger, 'STATE') ||
     ''
   );
-  const pincode = decodeXmlEntities(getSafeValue(ledger, 'PINCODE') || getSafeValue(ledger, 'LEDGERPINCODE'));
+  // NOTE: Tally's PINCODE field on a ledger is an internal sequential counter (1, 2, 3...).
+  // It is NOT the postal code. Only trust it if it looks like a real 6-digit Indian pincode.
+  const rawTallyPincode = decodeXmlEntities(getSafeValue(ledger, 'PINCODE') || getSafeValue(ledger, 'LEDGERPINCODE'));
+  const tallyPincodeClean = rawTallyPincode.replace(/\D/g, '').slice(0, 6);
+  // A real pincode has exactly 6 digits and starts with 1-9
+  const tallyPincodeValid = /^[1-9]\d{5}$/.test(tallyPincodeClean) ? tallyPincodeClean : '';
   const country = decodeXmlEntities(getSafeValue(ledger, 'COUNTRYNAME'));
 
   const streetLines = lines.slice(0, 2);
   const street = streetLines.join(', ');
   let derivedCity = city;
   let derivedState = state;
-  let derivedPincode = pincode;
-
-  if (!derivedCity || !derivedState) {
-    for (const line of lines) {
-      const pinMatch = line.match(/\b(\d{6})\b/);
-      if (pinMatch) {
-        if (!derivedPincode) derivedPincode = pinMatch[1];
+  // Always try to extract pincode from address lines first — more reliable than Tally's PINCODE field
+  let derivedPincode = '';
+  for (const line of lines) {
+    const pinMatch = line.match(/\b([1-9]\d{5})\b/);
+    if (pinMatch) {
+      derivedPincode = pinMatch[1];
+      if (!derivedCity || !derivedState) {
         const withoutPin = line.replace(pinMatch[0], '').replace(/[-,\s]+$/, '').trim();
         const parts = withoutPin.split(/[-,]/).map(p => p.trim()).filter(Boolean);
         if (!derivedCity && parts[0]) derivedCity = parts[0];
         if (!derivedState && parts[1]) derivedState = parts[1];
-        break;
       }
+      break;
     }
   }
+  // Fall back to PINCODE field only if address lines had no extractable pincode and it looks valid
+  if (!derivedPincode) derivedPincode = tallyPincodeValid;
 
   return { 
     address: street || lines.join(', '), 
     city: derivedCity, 
     state: derivedState, 
-    pincode: derivedPincode.replace(/\D/g, '').slice(0, 6) || '', 
+    pincode: derivedPincode, 
     country: country || 'India' 
   };
 }
@@ -2620,10 +2627,13 @@ async function writeLedgersToDb({ ledgerOps, vendorOps, clientOps }) {
 // looks up the party ledger by name and fills in any blank bill-to fields.
 // Ship-to fields are only backfilled if they are also blank (ship-to = bill-to is the common case).
 async function backfillBillToFromLedger(vouchers) {
-  // Collect unique party names that have missing bill-to data
+  // Returns true if the pincode is blank or a sequential counter (not a real 6-digit Indian pincode)
+  const isBadPincode = (pin) => !pin || !/^[1-9]\d{5}$/.test(String(pin).replace(/\D/g, '').slice(0, 6));
+
+  // Collect unique party names that have missing/bad bill-to data
   const missingNames = new Set();
   for (const v of vouchers) {
-    if (!v.billToAddress || !v.billToGST || !v.billToPincode) {
+    if (!v.billToAddress || !v.billToGST || isBadPincode(v.billToPincode)) {
       const name = (v.billToName || v.partyName || '').trim();
       if (name) missingNames.add(name);
     }
@@ -2682,7 +2692,7 @@ async function backfillBillToFromLedger(vouchers) {
 
   let filled = 0;
   for (const v of vouchers) {
-    if (!v.billToAddress || !v.billToGST || !v.billToPincode) {
+    if (!v.billToAddress || !v.billToGST || isBadPincode(v.billToPincode)) {
       const key = (v.billToName || v.partyName || '').trim().toLowerCase();
       const ledger = ledgerMap.get(key);
       if (ledger) {
@@ -2690,7 +2700,8 @@ async function backfillBillToFromLedger(vouchers) {
         if (!v.billToCity    && ledger.city)    v.billToCity    = ledger.city;
         if (!v.billToState   && ledger.state)   v.billToState   = ledger.state;
         if (!v.billToCountry && ledger.country) v.billToCountry = ledger.country;
-        if (!v.billToPincode && ledger.pincode) v.billToPincode = ledger.pincode;
+        // Always overwrite pincode if current value is bad (sequential counter)
+        if (isBadPincode(v.billToPincode) && ledger.pincode) v.billToPincode = ledger.pincode;
         if (!v.billToGST     && ledger.gstin)   v.billToGST     = ledger.gstin;
         // Ship-to: only backfill if also blank — do NOT touch if ship-to already has real data
         if (!v.shipToName    && v.billToName)    v.shipToName    = v.billToName;

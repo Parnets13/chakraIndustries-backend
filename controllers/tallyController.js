@@ -420,14 +420,24 @@ export const fixBillToData = async (req, res) => {
   try {
     const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
 
-    // ── Step 1: Collect vouchers with blank billToAddress or billToPincode ──
+    // Helper: returns true if the value is NOT a valid 6-digit Indian pincode.
+    // Tally stores a sequential internal counter in PARTYPINCODE/BILLTOPINCODE
+    // (e.g. 1, 2, 3... or 560094, 560095, 560096 incrementing per voucher).
+    // A real pincode has exactly 6 digits and starts with 1-9.
+    const isBadPincode = (pin) => {
+      const s = String(pin || '').replace(/\D/g, '');
+      return !s || !/^[1-9]\d{5}$/.test(s);
+    };
+
+    // ── Step 1: Collect vouchers with blank/invalid billToAddress or billToPincode ──
     const vouchers = await TallyVoucher.find({ voucherType: 'Sales' },
       { partyName: 1, billToName: 1, billToAddress: 1, billToPincode: 1,
         billToCity: 1, billToState: 1, billToGST: 1, partyGstin: 1 }).lean();
 
     const needsFix = vouchers.filter(v =>
       !v.billToAddress || !String(v.billToAddress).trim() ||
-      !v.billToPincode || !String(v.billToPincode).trim()
+      !v.billToPincode || !String(v.billToPincode).trim() ||
+      isBadPincode(v.billToPincode)   // also fix sequential counter pincodes
     );
 
     if (!needsFix.length) {
@@ -506,12 +516,14 @@ export const fixBillToData = async (req, res) => {
       const state     = getTag(block, 'LEDGERSTATE', 'STATENAME', 'STATE');
       const gstin     = getTag(block, 'GSTIN', 'PARTYGSTIN', 'GSTREGISTRATIONNUMBER');
 
-      // Pincode: explicit tag first, then extract 6 digits from address lines
-      let pincode = getTag(block, 'PINCODE', 'LEDGERPINCODE');
-      pincode = pincode.replace(/\D/g, '').slice(0, 6);
+      // Pincode: explicit tag first, then extract 6 digits from address lines.
+      // NOTE: Tally's PINCODE field is an internal sequential counter — only trust it
+      // if it looks like a real 6-digit Indian pincode (starts with 1-9).
+      let pincode = getTag(block, 'PINCODE', 'LEDGERPINCODE').replace(/\D/g, '').slice(0, 6);
+      if (!/^[1-9]\d{5}$/.test(pincode)) pincode = ''; // reject sequential counters
       if (!pincode) {
         const allText = addrLines.join(' ') + ' ' + city;
-        const pinMatch = allText.match(/\b(\d{6})\b/);
+        const pinMatch = allText.match(/\b([1-9]\d{5})\b/);
         if (pinMatch) pincode = pinMatch[1];
       }
 
@@ -535,8 +547,9 @@ export const fixBillToData = async (req, res) => {
       if (ld.address) updates.billToAddress = ld.address;
       if (ld.city)    updates.billToCity    = ld.city;
       if (ld.state)   updates.billToState   = ld.state;
-      if (ld.pincode) updates.billToPincode = ld.pincode;
       if (ld.gstin)   updates.billToGST     = ld.gstin;
+      // Always overwrite pincode from ledger — existing values may be sequential counters
+      if (ld.pincode) updates.billToPincode = ld.pincode;
 
       if (Object.keys(updates).length > 0) {
         const result = await TallyVoucher.updateMany(

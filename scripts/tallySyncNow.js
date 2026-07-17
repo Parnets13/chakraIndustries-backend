@@ -288,10 +288,12 @@ async function step3_ledgers() {
     const tallyCity    = block ? decodeXml(gVal(block, 'LEDGERCITY'))  : '';
     const tallyState   = block ? decodeXml(gVal(block, 'STATENAME') || gVal(block, 'LEDGERSTATE')) : '';
     const tallyPincode = block ? (decodeXml(gVal(block, 'PINCODE') || gVal(block, 'LEDGERPINCODE'))).replace(/\D/g,'').slice(0,6) : '';
-    let derivedCity = tallyCity, derivedState = tallyState, derivedPincode = tallyPincode;
-    if (!derivedCity || !derivedState) {
+    let derivedCity = tallyCity, derivedState = tallyState;
+    // Tally PINCODE field is often a sequential counter — only use if it looks like a real pincode
+    let derivedPincode = /^[1-9]\d{5}$/.test(tallyPincode) ? tallyPincode : '';
+    if (!derivedCity || !derivedState || !derivedPincode) {
       for (const line of addrLines) {
-        const pm = line.match(/\b(\d{6})\b/);
+        const pm = line.match(/\b([1-9]\d{5})\b/);
         if (pm) {
           if (!derivedPincode) derivedPincode = pm[1];
           const parts = line.replace(pm[0],'').replace(/[-,\s]+$/,'').split(/[,\-]/).map(p=>p.trim()).filter(Boolean);
