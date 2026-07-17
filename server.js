@@ -430,9 +430,10 @@ httpServer.listen(PORT, async () => {
       const cfg = await TallyConfig.findOne({}, 'tallyPeriodEnd').lean();
       const periodEnd = cfg?.tallyPeriodEnd || null;
 
-      // Target: ERP invoices not yet pushed to Tally (most likely to have stale vouchers)
+      // Target: ALL ERP invoices — re-normalize even already-exported ones
+      // so that corrected rates get sent to Tally on the next export run (Alter).
       const pending = await Invoice.find(
-        { source: { $nin: ['Tally', 'tally'] }, tallySync: { $ne: true } },
+        { source: { $nin: ['Tally', 'tally'] } },
         null,
         { lean: true }
       );
@@ -469,7 +470,7 @@ httpServer.listen(PORT, async () => {
           ops.push({
             updateOne: {
               filter: { _id: inv._id },
-              update: { $set: { tallyVoucher: tv } },
+              update: { $set: { tallyVoucher: tv, tallySync: false, tallySyncAt: null } },
             },
           });
           fixed++;
