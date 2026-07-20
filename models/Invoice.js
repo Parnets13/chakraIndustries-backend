@@ -23,6 +23,8 @@ const ledgerEntrySchema = new mongoose.Schema({
   isLastDeemedPositive:{ type: Boolean, default: false },
   amount:              { type: Number, required: true },
   billAllocations:     { type: [billAllocationSchema], default: [] },
+  rateOfInvoiceTax:    { type: String, default: '' },
+  vatExpAmount:        { type: Number, default: 0 },
 }, { _id: false });
 
 const inventoryEntrySchema = new mongoose.Schema({
