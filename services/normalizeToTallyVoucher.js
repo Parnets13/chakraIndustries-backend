@@ -66,10 +66,34 @@ function capDate(voucherDate, periodEnd) {
  */
 export function resolveGstLedgerName(taxType, salesBase, taxAmount, availableLedgerNames) {
   const plain = { cgst: 'CGST', sgst: 'SGST', igst: 'IGST' }[taxType] || 'CGST';
+  const outPrefix = taxType === 'igst' ? 'Output IGST' : `Output ${taxType.toUpperCase()}`;
 
   if (!availableLedgerNames || !availableLedgerNames.length) return plain;
 
-  // Try bare "CGST"/"SGST"/"IGST" first
+  // Compute effective rate % (half-rate for CGST/SGST, full rate for IGST)
+  let rateStr = '';
+  if (salesBase > 0 && taxAmount > 0) {
+    const rate = +((taxAmount / salesBase) * 100).toFixed(2);
+    // Common rate brackets: 2.5, 5, 6, 9, 12, 14, 18, 28
+    const brackets = [2.5, 5, 6, 9, 12, 14, 18, 28];
+    // Find closest bracket
+    const closest = brackets.reduce((best, b) => Math.abs(b - rate) < Math.abs(best - rate) ? b : best, brackets[0]);
+    if (Math.abs(closest - rate) < 0.5) rateStr = String(closest);
+  }
+
+  // Try rate-specific name first (e.g. "Output CGST @ 9%")
+  if (rateStr) {
+    const rateSpecific = `${outPrefix} @ ${rateStr}%`;
+    if (availableLedgerNames.some(n => n.trim().toLowerCase() === rateSpecific.toLowerCase())) {
+      return rateSpecific;
+    }
+  }
+
+  // Try plain "Output CGST" style (without rate)
+  const plainOut = availableLedgerNames.find(n => n.trim().toLowerCase() === outPrefix.toLowerCase());
+  if (plainOut) return plainOut;
+
+  // Try bare "CGST"/"SGST"/"IGST"
   const bareMatch = availableLedgerNames.find(n => n.trim().toLowerCase() === plain.toLowerCase());
   if (bareMatch) return bareMatch;
 
@@ -349,7 +373,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     ? new Date(invoiceData.invoiceDate).toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'numeric' })
     : '';
   const poRef = (invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '').toString().trim();
-  
+  const narrationParts = [];
+  if (origDateFmt) narrationParts.push(`Invoice Date: ${origDateFmt}`);
+  if (poRef) narrationParts.push(`PO: ${poRef}`);
   // Only add item lines to narration when NOT using inventory entries
   const itemLines = useInventory ? [] : validItems.map((item, i) => {
     const itemName   = (item.description || item.name || '').toString().trim();
@@ -360,9 +386,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     // Format: "1. HYDRA STEEL WATER BOTTLE 1000ML: 50 Nos @ ₹150.00 = ₹7,500.00"
     return `${i + 1}. ${itemName}: ${itemQty} ${itemUnit} @ ₹${itemRate.toFixed(2)} = ₹${itemAmount.toFixed(2)}`;
   });
-  
-  // Send empty narration to ensure e-invoice prints correctly
-  const narration = '';
+  if (itemLines.length) narrationParts.push(...itemLines);
+  const narration = narrationParts.join('\n');
 
   // ── Assemble sub-document ─────────────────────────────────────────────────
   // ── PO Date → YYYYMMDD ────────────────────────────────────────────────────
