@@ -352,67 +352,82 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     };
   }) : [];
 
+  // ── Recalculate tax totals from inventory entry amounts × rates ──────────
+  // CRITICAL: Tally's e-invoice engine recomputes each item's tax as:
+  //   round(itemAmount × rateDetails%) for every inventory entry
+  // then sums them. If that sum ≠ the CGST/SGST amounts in LEDGERENTRIES,
+  // Tally shows "Tax amount does not match" and blocks e-invoice printing.
+  //
+  // Solution: compute ledger-level tax totals by summing the EXACT same
+  // per-item calculation that Tally will run — NOT from stored cgstTotal.
+  // This guarantees both sides agree to the paisa.
+  let reconCGST = 0;
+  let reconSGST = 0;
+  let reconIGST = 0;
+  if (useInventory && allInventoryEntries.length > 0) {
+    for (const entry of allInventoryEntries) {
+      const base = entry.amount || 0;
+      for (const rd of (entry.rateDetails || [])) {
+        const taxAmt = +((base * rd.gstRate) / 100).toFixed(2);
+        if (rd.gstRateDutyHead === 'CGST')      reconCGST = +(reconCGST + taxAmt).toFixed(2);
+        else if (rd.gstRateDutyHead === 'SGST/UTGST') reconSGST = +(reconSGST + taxAmt).toFixed(2);
+        else if (rd.gstRateDutyHead === 'IGST')  reconIGST = +(reconIGST + taxAmt).toFixed(2);
+      }
+    }
+  }
+  // If the recon totals are both zero (no inventory entries or no rateDetails),
+  // fall back to the stored invoice-level totals so ledger entries still balance.
+  const ledgerCGST = reconCGST > 0 ? reconCGST : totalCGST;
+  const ledgerSGST = reconSGST > 0 ? reconSGST : totalSGST;
+  const ledgerIGST = reconIGST > 0 ? reconIGST : totalIGST;
+  // Recalculate salesBase and grandTotal from reconciled tax amounts so ledger entries balance.
+  const reconTotalTax   = +(ledgerCGST + ledgerSGST + ledgerIGST).toFixed(2);
+  const reconSalesBase  = +(itemsTotal).toFixed(2);  // itemsTotal already adjusted above
+  const reconGrandTotal = +(reconSalesBase + reconTotalTax).toFixed(2);
+
   // ── Ledger entries ────────────────────────────────────────────────────────
   const allLedgerEntries = [];
 
-  // 1. Party ledger (debit)
+  // 1. Party ledger (debit) — use reconGrandTotal so party matches inventory+tax
   allLedgerEntries.push({
     ledgerName: partyLedgerName,
     isDeemedPositive: true,
     isLastDeemedPositive: true,
-    amount: -resolvedGrandTotal,    // negative in Tally XML = debit from voucher's perspective
+    amount: -reconGrandTotal,    // negative in Tally XML = debit from voucher's perspective
     billAllocations: [{
       name:     invoiceNo,
       billType: 'New Ref',
-      amount:   -resolvedGrandTotal,
+      amount:   -reconGrandTotal,
     }],
   });
 
-  // 2. CGST
-  // Tally sign convention: ISDEEMEDPOSITIVE=No (credit) → AMOUNT is POSITIVE.
-  // ISDEEMEDPOSITIVE=Yes (debit) → AMOUNT is NEGATIVE.
-  // Party (debtor) is isDeemedPositive=true → amount=-grandTotal (negative).
-  // Tax and Sales ledgers are isDeemedPositive=false → amount POSITIVE.
-  const calculateRate = (taxAmount, base) => {
-    if (base <= 0 || taxAmount <= 0) return 0;
-    return +((taxAmount / base) * 100).toFixed(2);
-  };
-  const overallCgstRate = calculateRate(totalCGST, salesBase);
-  const overallSgstRate = calculateRate(totalSGST, salesBase);
-  const overallIgstRate = calculateRate(totalIGST, salesBase);
-  // Get the sales ledger name to use as the source for tax calculations
-  const taxSourceLedger = uniqueItemLedgers.length === 1
-    ? uniqueItemLedgers[0]
-    : uniqueItemLedgers.length > 1
-      ? uniqueItemLedgers[0]
-      : 'Sales';
-
-  if (totalCGST > 0 && cgstLedger) {
+  // 2. CGST — use reconCGST (matches exactly what Tally will recalculate from rateDetails)
+  if (ledgerCGST > 0 && cgstLedger) {
     allLedgerEntries.push({
       ledgerName: cgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +totalCGST
+      amount: +ledgerCGST
     });
   }
 
   // 3. SGST
-  if (totalSGST > 0 && sgstLedger) {
+  if (ledgerSGST > 0 && sgstLedger) {
     allLedgerEntries.push({
       ledgerName: sgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +totalSGST
+      amount: +ledgerSGST
     });
   }
 
   // 4. IGST
-  if (totalIGST > 0 && igstLedger) {
+  if (ledgerIGST > 0 && igstLedger) {
     allLedgerEntries.push({
       ledgerName: igstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +totalIGST
+      amount: +ledgerIGST
     });
   }
 
@@ -438,7 +453,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   if (Math.abs(+totalSum) > 0.01) {
     throw new Error(
       `normalizeToTallyVoucher: voucher imbalanced by ${totalSum} ` +
-      `(invoice ${invoiceNo}, grandTotal=${resolvedGrandTotal}, cgst=${totalCGST}, sgst=${totalSGST}, igst=${totalIGST}, salesBase=${salesBase})`
+      `(invoice ${invoiceNo}, grandTotal=${reconGrandTotal}, cgst=${ledgerCGST}, sgst=${ledgerSGST}, igst=${ledgerIGST}, salesBase=${reconSalesBase})`
     );
   }
 
@@ -588,11 +603,11 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     allLedgerEntries,
     allInventoryEntries,
     // Snapshot amounts — stored so export doesn't recompute
-    _grandTotal:  resolvedGrandTotal,
-    _totalCGST:   totalCGST,
-    _totalSGST:   totalSGST,
-    _totalIGST:   totalIGST,
-    _salesBase:   salesBase,
+    _grandTotal:  reconGrandTotal,
+    _totalCGST:   ledgerCGST,
+    _totalSGST:   ledgerSGST,
+    _totalIGST:   ledgerIGST,
+    _salesBase:   reconSalesBase,
     _useInventory: useInventory,
   };
 }
