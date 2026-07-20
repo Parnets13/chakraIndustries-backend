@@ -170,36 +170,37 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const sgstHalfRate = isInterstate ? 0 : snapToSlab(gstRateFull / 2);
   const igstFullRate = isInterstate ? gstRateFull : 0;
 
-  // ── Get stored tax totals from invoice to use exact values ─────────────────
-  const storedCGST = invoiceData.cgstTotal ?? items.reduce((s, i) => s + (+(i.cgst || 0)), 0);
-  const storedSGST = invoiceData.sgstTotal ?? items.reduce((s, i) => s + (+(i.sgst || 0)), 0);
-  const storedIGST = invoiceData.igstTotal ?? items.reduce((s, i) => s + (+(i.igst || 0)), 0);
-  // Round each individual tax to 2 decimals first, then add!
-  const storedCGSTRounded = +storedCGST.toFixed(2);
-  const storedSGSTRounded = +storedSGST.toFixed(2);
-  const storedIGSTRounded = +storedIGST.toFixed(2);
-  const storedTotalTax = +(storedCGSTRounded + storedSGSTRounded + storedIGSTRounded).toFixed(2);
-  const storedSalesBase = +(resolvedGrandTotal - storedTotalTax).toFixed(2);
-
   // ── Valid items & taxable amounts ─────────────────────────────────────────
+  // Use qty × rate as the authoritative taxable base per item.
+  // CRITICAL: The <RATE> tag in Tally XML is built from itemRate.toFixed(2).
+  // The <AMOUNT> tag must equal qty × itemRate rounded the same way.
+  // If RATE and AMOUNT differ Tally recomputes tax from RATE and gets a mismatch.
   const validItems = items.filter(item => (item.description || item.name || '').toString().trim());
-  const itemAmountsBeforeAdjust = validItems.map(item => {
+  const itemAmounts = validItems.map(item => {
     const qty  = +(item.qty  || 1);
     const rate = +(item.rate || 0);
     return +(qty * rate).toFixed(2);
   });
-  const totalBeforeAdjust = +itemAmountsBeforeAdjust.reduce((s, a) => s + a, 0).toFixed(2);
-  // Adjust the first item's amount to make total sales base exactly storedSalesBase
-  const adjustment = +(storedSalesBase - totalBeforeAdjust).toFixed(2);
-  const itemAmounts = itemAmountsBeforeAdjust.map((amt, idx) => idx === 0 ? +(amt + adjustment).toFixed(2) : amt);
 
-  // ── Use stored tax totals to ensure exact match ────────────────────────────
-  let totalCGST = storedCGSTRounded;
-  let totalSGST = storedSGSTRounded;
-  let totalIGST = storedIGSTRounded;
-  const salesBase = storedSalesBase;
-  const totalTax  = storedTotalTax;
-  const computedGrandTotal = resolvedGrandTotal;
+  // ── Compute CGST/SGST/IGST from itemAmounts × rate ────────────────────────
+  // Tally's e-invoice engine rounds EACH duty head independently:
+  //   CGST = round(itemAmount × cgstRate%) = round(219.05 × 2.5%) = round(5.47625) = 5.48
+  //   SGST = round(itemAmount × sgstRate%) = round(219.05 × 2.5%) = round(5.47625) = 5.48
+  // Total = 10.96. The taxable base must be set so this is consistent.
+  // We derive itemAmounts from qty×rate, and tax from itemAmount × half-rate each.
+  let totalCGST = 0, totalSGST = 0, totalIGST = 0;
+  for (const amt of itemAmounts) {
+    if (igstFullRate > 0) {
+      totalIGST = +(totalIGST + +((amt * igstFullRate) / 100).toFixed(2)).toFixed(2);
+    } else if (cgstHalfRate > 0) {
+      // Round each duty head independently — this is what Tally's e-invoice engine does
+      totalCGST = +(totalCGST + +((amt * cgstHalfRate) / 100).toFixed(2)).toFixed(2);
+      totalSGST = +(totalSGST + +((amt * sgstHalfRate) / 100).toFixed(2)).toFixed(2);
+    }
+  }
+  const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
+  const totalTax  = +(totalCGST + totalSGST + totalIGST).toFixed(2);
+  const computedGrandTotal = +(salesBase + totalTax).toFixed(2);
 
   // ── GST ledger names ──────────────────────────────────────────────────────
   const cgstLedger = totalCGST > 0 ? resolveGstLedgerName('cgst', salesBase, totalCGST, tallyGstLedgers?.cgstNames) : '';
@@ -259,10 +260,10 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       }],
       // RATEDETAILS: always send explicit rates — Tally uses these for Tax Analysis
       rateDetails: [
-                ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: ` ${cgstRate.toFixed(2)}` }] : []),
-                ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: ` ${sgstRate.toFixed(2)}` }] : []),
-                ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: ` ${igstRate.toFixed(2)}` }] : []),
-              ],
+        ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST',       gstRateEvaluationType: 'Based on Value', gstRate: cgstRate }] : []),
+        ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate }] : []),
+        ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST',       gstRateEvaluationType: 'Based on Value', gstRate: igstRate }] : []),
+      ],
       accountingAllocations: [{
         ledgerName: salesLedger,
         isDeemedPositive: false,
@@ -297,48 +298,33 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     }],
   });
 
-  // Helper to get tax rate string (with leading space, 2 decimal places)
-  const formatRateString = (rate) => ` ${rate.toFixed(2)}`;
-  
   // 2. CGST — use reconCGST (matches exactly what Tally will recalculate from rateDetails)
-  if (ledgerCGST > 0) {
-    const cgstRateStr = cgstHalfRate.toFixed(2);
-    const cgstLedgerName = `Output CGST @ ${cgstRateStr}%`;
+  if (ledgerCGST > 0 && cgstLedger) {
     allLedgerEntries.push({
-      ledgerName: cgstLedgerName,
+      ledgerName: cgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +ledgerCGST,
-      rateOfInvoiceTax: formatRateString(cgstHalfRate),
-      vatExpAmount: +ledgerCGST
+      amount: +ledgerCGST
     });
   }
 
   // 3. SGST
-  if (ledgerSGST > 0) {
-    const sgstRateStr = sgstHalfRate.toFixed(2);
-    const sgstLedgerName = `Output SGST @ ${sgstRateStr}%`;
+  if (ledgerSGST > 0 && sgstLedger) {
     allLedgerEntries.push({
-      ledgerName: sgstLedgerName,
+      ledgerName: sgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +ledgerSGST,
-      rateOfInvoiceTax: formatRateString(sgstHalfRate),
-      vatExpAmount: +ledgerSGST
+      amount: +ledgerSGST
     });
   }
 
   // 4. IGST
-  if (ledgerIGST > 0) {
-    const igstRateStr = igstFullRate.toFixed(2);
-    const igstLedgerName = `Output IGST @ ${igstRateStr}%`;
+  if (ledgerIGST > 0 && igstLedger) {
     allLedgerEntries.push({
-      ledgerName: igstLedgerName,
+      ledgerName: igstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +ledgerIGST,
-      rateOfInvoiceTax: formatRateString(igstFullRate),
-      vatExpAmount: +ledgerIGST
+      amount: +ledgerIGST
     });
   }
 
@@ -373,9 +359,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     ? new Date(invoiceData.invoiceDate).toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'numeric' })
     : '';
   const poRef = (invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '').toString().trim();
-  const narrationParts = [];
-  if (origDateFmt) narrationParts.push(`Invoice Date: ${origDateFmt}`);
-  if (poRef) narrationParts.push(`PO: ${poRef}`);
+  
   // Only add item lines to narration when NOT using inventory entries
   const itemLines = useInventory ? [] : validItems.map((item, i) => {
     const itemName   = (item.description || item.name || '').toString().trim();
@@ -386,8 +370,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     // Format: "1. HYDRA STEEL WATER BOTTLE 1000ML: 50 Nos @ ₹150.00 = ₹7,500.00"
     return `${i + 1}. ${itemName}: ${itemQty} ${itemUnit} @ ₹${itemRate.toFixed(2)} = ₹${itemAmount.toFixed(2)}`;
   });
-  if (itemLines.length) narrationParts.push(...itemLines);
-  const narration = narrationParts.join('\n');
+  
+  // Send empty narration to ensure e-invoice prints correctly
+  const narration = '';
 
   // ── Assemble sub-document ─────────────────────────────────────────────────
   // ── PO Date → YYYYMMDD ────────────────────────────────────────────────────
@@ -448,25 +433,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const billToGST         = (invoiceData.billToGST     || invoiceData.partyGST     || '').toString().trim();
   const billToPincode     = (invoiceData.billToPincode || invoiceData.partyPostal || '').toString().trim();
 
-  // ── Party GST / State ────────────────────────────────────────────────────
-  const partyGST   = (invoiceData.partyGST || '').toString().trim();
-  const rawPartyState = (invoiceData.partyState || billToState || '').toString().trim();
-
-  // Derive party state from GSTIN when not stored — first 2 digits of GSTIN are state code
-  const GSTIN_STATE_MAP = {
-    '01':'Jammu and Kashmir','02':'Himachal Pradesh','03':'Punjab','04':'Chandigarh',
-    '05':'Uttarakhand','06':'Haryana','07':'Delhi','08':'Rajasthan','09':'Uttar Pradesh',
-    '10':'Bihar','11':'Sikkim','12':'Arunachal Pradesh','13':'Nagaland','14':'Manipur',
-    '15':'Mizoram','16':'Tripura','17':'Meghalaya','18':'Assam','19':'West Bengal',
-    '20':'Jharkhand','21':'Odisha','22':'Chhattisgarh','23':'Madhya Pradesh',
-    '24':'Gujarat','26':'Dadra and Nagar Haveli and Daman and Diu','27':'Maharashtra',
-    '28':'Andhra Pradesh','29':'Karnataka','30':'Goa','31':'Lakshadweep',
-    '32':'Kerala','33':'Tamil Nadu','34':'Puducherry','35':'Andaman and Nicobar Islands',
-    '36':'Telangana','37':'Andhra Pradesh','38':'Ladakh',
-  };
-  const gstinForState = partyGST || billToGST || '';
-  const derivedState = gstinForState.length >= 2 ? (GSTIN_STATE_MAP[gstinForState.substring(0,2)] || '') : '';
-  const partyState = rawPartyState || derivedState;
+  // ── Party GST / State (Step 6 fields) ────────────────────────────────────
+  const partyGST      = (invoiceData.partyGST   || '').toString().trim();
+  const partyState    = (invoiceData.partyState  || billToState || '').toString().trim();
 
   // ── Company address ───────────────────────────────────────────────────────
   const companyAddress = (invoiceData.companyAddress || '').toString().trim();
