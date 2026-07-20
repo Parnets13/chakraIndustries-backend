@@ -46,7 +46,7 @@ const inventoryEntrySchema = new mongoose.Schema({
   rateDetails: [{
     gstRateDutyHead:     { type: String, default: '' },
     gstRateEvaluationType:{ type: String, default: 'Based on Value' },
-    gstRate:             { type: Number, default: 0 }
+    gstRate:             { type: String, default: '0' }
   }],
 }, { _id: false });
 

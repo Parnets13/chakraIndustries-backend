@@ -6,7 +6,7 @@ import { normalizeToTallyVoucher } from '../services/normalizeToTallyVoucher.js'
 
 dotenv.config();
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chakra-industries';
+const MONGODB_URI = process.env.MONGO_URI || process.env.MONGODB_URI || 'mongodb://localhost:27017/chakra-industries';
 
 async function main() {
   console.log('Connecting to MongoDB...');

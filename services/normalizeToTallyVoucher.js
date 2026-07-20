@@ -260,10 +260,10 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       }],
       // RATEDETAILS: always send explicit rates — Tally uses these for Tax Analysis
       rateDetails: [
-        ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST',       gstRateEvaluationType: 'Based on Value', gstRate: cgstRate }] : []),
-        ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate }] : []),
-        ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST',       gstRateEvaluationType: 'Based on Value', gstRate: igstRate }] : []),
-      ],
+                ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: cgstRate.toFixed(2) }] : []),
+                ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate.toFixed(2) }] : []),
+                ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: igstRate.toFixed(2) }] : []),
+              ],
       accountingAllocations: [{
         ledgerName: salesLedger,
         isDeemedPositive: false,
