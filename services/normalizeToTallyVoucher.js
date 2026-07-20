@@ -299,13 +299,11 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
 
   // Helper to get tax rate string (with leading space, 2 decimal places)
   const formatRateString = (rate) => ` ${rate.toFixed(2)}`;
-  
+
   // 2. CGST — use reconCGST (matches exactly what Tally will recalculate from rateDetails)
-  if (ledgerCGST > 0) {
-    const cgstRateStr = cgstHalfRate.toFixed(2);
-    const cgstLedgerName = `Output CGST @ ${cgstRateStr}%`;
+  if (ledgerCGST > 0 && cgstLedger) {
     allLedgerEntries.push({
-      ledgerName: cgstLedgerName,
+      ledgerName: cgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
       amount: +ledgerCGST,
@@ -315,11 +313,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   }
 
   // 3. SGST
-  if (ledgerSGST > 0) {
-    const sgstRateStr = sgstHalfRate.toFixed(2);
-    const sgstLedgerName = `Output SGST @ ${sgstRateStr}%`;
+  if (ledgerSGST > 0 && sgstLedger) {
     allLedgerEntries.push({
-      ledgerName: sgstLedgerName,
+      ledgerName: sgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
       amount: +ledgerSGST,
@@ -329,11 +325,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   }
 
   // 4. IGST
-  if (ledgerIGST > 0) {
-    const igstRateStr = igstFullRate.toFixed(2);
-    const igstLedgerName = `Output IGST @ ${igstRateStr}%`;
+  if (ledgerIGST > 0 && igstLedger) {
     allLedgerEntries.push({
-      ledgerName: igstLedgerName,
+      ledgerName: igstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
       amount: +ledgerIGST,

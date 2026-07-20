@@ -14,8 +14,8 @@ async function main() {
   await mongoose.connect(MONGODB_URI);
   console.log('Connected!');
 
-  const invoice = await Invoice.findOne({ invoiceNo: 'BIW958' }).lean();
-  console.log('Found invoice BIW958, normalizing to tally voucher...');
+  const invoice = await Invoice.findOne({ invoiceNo: 'BIW959' }).lean();
+  console.log('Found invoice BIW959, normalizing to tally voucher...');
   const tallyVoucher = normalizeToTallyVoucher(invoice);
   console.log('Normalized, serializing to XML...');
   const xml = serializeTallyVoucher(tallyVoucher, { companyName: 'SRI CHAKRA INDUSTRIES', state: 'Karnataka' }, 'Create', '');
