@@ -66,34 +66,10 @@ function capDate(voucherDate, periodEnd) {
  */
 export function resolveGstLedgerName(taxType, salesBase, taxAmount, availableLedgerNames) {
   const plain = { cgst: 'CGST', sgst: 'SGST', igst: 'IGST' }[taxType] || 'CGST';
-  const outPrefix = taxType === 'igst' ? 'Output IGST' : `Output ${taxType.toUpperCase()}`;
 
   if (!availableLedgerNames || !availableLedgerNames.length) return plain;
 
-  // Compute effective rate % (half-rate for CGST/SGST, full rate for IGST)
-  let rateStr = '';
-  if (salesBase > 0 && taxAmount > 0) {
-    const rate = +((taxAmount / salesBase) * 100).toFixed(2);
-    // Common rate brackets: 2.5, 5, 6, 9, 12, 14, 18, 28
-    const brackets = [2.5, 5, 6, 9, 12, 14, 18, 28];
-    // Find closest bracket
-    const closest = brackets.reduce((best, b) => Math.abs(b - rate) < Math.abs(best - rate) ? b : best, brackets[0]);
-    if (Math.abs(closest - rate) < 0.5) rateStr = String(closest);
-  }
-
-  // Try rate-specific name first (e.g. "Output CGST @ 9%")
-  if (rateStr) {
-    const rateSpecific = `${outPrefix} @ ${rateStr}%`;
-    if (availableLedgerNames.some(n => n.trim().toLowerCase() === rateSpecific.toLowerCase())) {
-      return rateSpecific;
-    }
-  }
-
-  // Try plain "Output CGST" style (without rate)
-  const plainOut = availableLedgerNames.find(n => n.trim().toLowerCase() === outPrefix.toLowerCase());
-  if (plainOut) return plainOut;
-
-  // Try bare "CGST"/"SGST"/"IGST"
+  // Try bare "CGST"/"SGST"/"IGST" first
   const bareMatch = availableLedgerNames.find(n => n.trim().toLowerCase() === plain.toLowerCase());
   if (bareMatch) return bareMatch;
 
