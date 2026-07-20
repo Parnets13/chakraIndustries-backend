@@ -1,4 +1,4 @@
-﻿/**
+/**
  * tallyExportService.js
  * ─────────────────────────────────────────────────────────────────────────────
  * Dedicated ERP → Tally export engine for Sri Chakra Industries.
@@ -1379,12 +1379,24 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
       <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
       <AMOUNT>${(ba.amount || 0).toFixed(2)}</AMOUNT>
     </BILLALLOCATIONS.LIST>`).join('') : '';
+    const rateOfInvoiceTaxXml = entry.rateOfInvoiceTax ? `
+    <RATEOFINVOICETAX.LIST TYPE="Number">
+      <RATEOFINVOICETAX>${esc(entry.rateOfInvoiceTax)}</RATEOFINVOICETAX>
+    </RATEOFINVOICETAX.LIST>
+    <ROUNDTYPE>&#4; Not Applicable</ROUNDTYPE>` : '';
+    const vatExpAmountXml = entry.vatExpAmount ? `
+    <VATEXPAMOUNT>${entry.vatExpAmount.toFixed(2)}</VATEXPAMOUNT>` : '';
     return `
   <LEDGERENTRIES.LIST>
+    <OLDAUDITENTRYIDS.LIST TYPE="Number">
+      <OLDAUDITENTRYIDS>-1</OLDAUDITENTRYIDS>
+    </OLDAUDITENTRYIDS.LIST>${rateOfInvoiceTaxXml}${vatExpAmountXml}
     <LEDGERNAME>${esc(entry.ledgerName || '')}</LEDGERNAME>
+    <GSTCLASS>&#4; Not Applicable</GSTCLASS>
     <ISDEEMEDPOSITIVE>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${entry.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-    <ISPARTYLEDGER>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISPARTYLEDGER>
+    <ISCAPVATTAXALTERED>No</ISCAPVATTAXALTERED>
+    <ISCAPVATNOTCLAIMED>No</ISCAPVATNOTCLAIMED>
     <AMOUNT>${(entry.amount || 0).toFixed(2)}</AMOUNT>${billAllocsXml}
   </LEDGERENTRIES.LIST>`;
   }).join('');
@@ -1421,12 +1433,9 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : '';
     const hsnSourceXml = !isGenericLedger && hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
     <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : '';
-    // Only emit GST override tags alongside a real GSTLEDGERSOURCE.
-    // Emitting them without a source causes silent EXCEPTIONS=1.
-    const gstOverrideXml = !isGenericLedger
-      ? `<GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`
-      : '';
+    // Always emit GST override tags, even without GSTLEDGERSOURCE — they're needed for e-invoice.
+    const gstOverrideXml = `<GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
+    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`;
 
     // Rate details for GST tax calculation
     const rateDetailsXml = (item.rateDetails || []).map(rd => `
@@ -1439,6 +1448,8 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     // Godown: use item-level batchAllocations if present, else build from item/voucher fields
     const batch = item.batchAllocations?.[0];
     const godownName = esc((batch?.godownName || item.godownName || v._godownName || 'Main Location').trim());
+    // Add leading space to QTY fields to match known-good XML
+    const formatQty = (qty) => qty ? ` ${qty.trim()}` : '';
     const batchAllocXml = `
     <BATCHALLOCATIONS.LIST>
       <GODOWNNAME>${godownName}</GODOWNNAME>
@@ -1449,8 +1460,8 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
       <TRACKINGNUMBER>&#4; Not Applicable</TRACKINGNUMBER>
       <DYNAMICCSTISCLEARED>No</DYNAMICCSTISCLEARED>
       <AMOUNT>${itemAmountTag.toFixed(2)}</AMOUNT>
-      <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
-      <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
+      <ACTUALQTY>${esc(formatQty(item.actualQty || ''))}</ACTUALQTY>
+      <BILLEDQTY>${esc(formatQty(item.billedQty || ''))}</BILLEDQTY>
       <ADDITIONALDETAILS.LIST></ADDITIONALDETAILS.LIST>
       <VOUCHERCOMPONENTLIST.LIST></VOUCHERCOMPONENTLIST.LIST>
     </BATCHALLOCATIONS.LIST>`;
@@ -1462,8 +1473,8 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <RATE>${esc(item.rate || '')}</RATE>
     <AMOUNT>${itemAmountTag.toFixed(2)}</AMOUNT>
-    <ACTUALQTY>${esc(item.actualQty || '')}</ACTUALQTY>
-    <BILLEDQTY>${esc(item.billedQty || '')}</BILLEDQTY>
+    <ACTUALQTY>${esc(formatQty(item.actualQty || ''))}</ACTUALQTY>
+    <BILLEDQTY>${esc(formatQty(item.billedQty || ''))}</BILLEDQTY>
     ${gstSourceXml}
     ${hsnSourceXml}
     ${gstOverrideXml}

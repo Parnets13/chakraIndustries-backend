@@ -18,7 +18,7 @@ async function main() {
   console.log('Found invoice BIW958, normalizing to tally voucher...');
   const tallyVoucher = normalizeToTallyVoucher(invoice);
   console.log('Normalized, serializing to XML...');
-  const xml = serializeTallyVoucher(tallyVoucher, '1', '1', 'Srichakra Industries');
+  const xml = serializeTallyVoucher(tallyVoucher, { companyName: 'SRI CHAKRA INDUSTRIES', state: 'Karnataka' }, 'Create', '');
   console.log('Generated XML:\n');
   console.log(xml);
 
