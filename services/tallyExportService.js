@@ -1412,8 +1412,13 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     const gstLedgerSrc = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
     const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
     const gstHsnName   = (item.gstHsnName || '').trim();
+    // 'Sales' and 'Sales Accounts' are generic/fallback ledgers with no GST rate in their Tally master.
+    // Emitting GSTLEDGERSOURCE pointing to them causes Tally to read rate=0% from the ledger master,
+    // conflicting with the RATEDETAILS entries → "Tax amount does not match" on e-invoice print.
+    // Only emit GSTLEDGERSOURCE for item-specific ledgers (e.g. "SS Bottle Sales Local 5%").
+    const GENERIC_LEDGER_NAMES_LOWER = new Set(['', 'sales', 'sales accounts', 'sales accounts (group)']);
     const isGenericLedger = !gstLedgerSrc
-      || gstLedgerSrc.toLowerCase() === 'sales accounts'
+      || GENERIC_LEDGER_NAMES_LOWER.has(gstLedgerSrc.toLowerCase())
       || gstLedgerSrc === (item.stockItemName || '').trim();
     const gstSourceXml = !isGenericLedger ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
     <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : '';

@@ -288,8 +288,14 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       || rawLedgerLower === itemNameLower;
     const salesLedger = (rawLedger && !isInvalidLedger) ? rawLedger : 'Sales';
     
-    // Only emit GSTLEDGERSOURCE when salesLedger is NOT 'Sales Accounts'
-    const hasSpecificLedger = salesLedger.toLowerCase() !== 'sales accounts' && salesLedger.toLowerCase() !== '';
+    // Only emit GSTLEDGERSOURCE when salesLedger is a real item-specific ledger
+    // that has GST rates configured in its Tally master.
+    // 'Sales' is a plain generic fallback ledger with NO GST rate in its master —
+    // emitting GSTLEDGERSOURCE='Sales' causes Tally to read rate=0% from that ledger
+    // while RATEDETAILS says 9%, triggering "Tax amount does not match" on e-invoice print.
+    // Only emit GSTLEDGERSOURCE when the ledger is item-specific (e.g. "SS Bottle Sales Local 5%").
+    const GENERIC_LEDGER_NAMES = new Set(['sales', 'sales accounts', 'sales accounts (group)', '']);
+    const hasSpecificLedger = !GENERIC_LEDGER_NAMES.has(salesLedger.toLowerCase());
     const isInterstateItem = itemIGST > 0;
 
     return {
