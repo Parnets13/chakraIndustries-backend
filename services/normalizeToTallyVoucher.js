@@ -367,7 +367,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     ? new Date(invoiceData.invoiceDate).toLocaleDateString('en-IN', { day:'2-digit', month:'2-digit', year:'numeric' })
     : '';
   const poRef = (invoiceData.buyersOrderNo || invoiceData.purchaseOrderRef || '').toString().trim();
-  
+  const narrationParts = [];
+  if (origDateFmt) narrationParts.push(`Invoice Date: ${origDateFmt}`);
+  if (poRef) narrationParts.push(`PO: ${poRef}`);
   // Only add item lines to narration when NOT using inventory entries
   const itemLines = useInventory ? [] : validItems.map((item, i) => {
     const itemName   = (item.description || item.name || '').toString().trim();
@@ -378,9 +380,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     // Format: "1. HYDRA STEEL WATER BOTTLE 1000ML: 50 Nos @ ₹150.00 = ₹7,500.00"
     return `${i + 1}. ${itemName}: ${itemQty} ${itemUnit} @ ₹${itemRate.toFixed(2)} = ₹${itemAmount.toFixed(2)}`;
   });
-  
-  // Send empty narration to ensure e-invoice prints correctly
-  const narration = '';
+  if (itemLines.length) narrationParts.push(...itemLines);
+  const narration = narrationParts.join('\n');
 
   // ── Assemble sub-document ─────────────────────────────────────────────────
   // ── PO Date → YYYYMMDD ────────────────────────────────────────────────────
