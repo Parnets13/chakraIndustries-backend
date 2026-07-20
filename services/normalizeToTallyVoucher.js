@@ -142,9 +142,29 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   if (resolvedGrandTotal <= 0) throw new Error(`normalizeToTallyVoucher: grandTotal must be > 0 (got ${resolvedGrandTotal})`);
 
   const items = invoiceData.items || [];
-  const totalCGST = +((invoiceData.cgstTotal ?? items.reduce((s, i) => s + (i.cgst || 0), 0))).toFixed(2);
-  const totalSGST = +((invoiceData.sgstTotal ?? items.reduce((s, i) => s + (i.sgst || 0), 0))).toFixed(2);
-  const totalIGST = +((invoiceData.igstTotal ?? items.reduce((s, i) => s + (i.igst || 0), 0))).toFixed(2);
+
+  // ── Tax amount computation ────────────────────────────────────────────────
+  // CRITICAL: raw per-item tax values from Excel are unrounded (e.g. 5.476190...).
+  // Rounding each independently causes CGST+SGST to differ by ±0.01 from what
+  // Tally computes as (grandTotal × rate / (1+rate)).
+  // Strategy:
+  //   1. Use stored cgstTotal/sgstTotal if present (already validated).
+  //   2. Otherwise sum raw per-item values, then balance-round:
+  //      compute total tax = CGST+SGST first, round that, then split evenly
+  //      so the pair always sums correctly.
+  const rawCGST = invoiceData.cgstTotal ?? items.reduce((s, i) => s + (+(i.cgst || 0)), 0);
+  const rawSGST = invoiceData.sgstTotal ?? items.reduce((s, i) => s + (+(i.sgst || 0)), 0);
+  const rawIGST = invoiceData.igstTotal ?? items.reduce((s, i) => s + (+(i.igst || 0)), 0);
+
+  // Round CGST+SGST as a pair so they always sum to a consistent total
+  const rawCgstSgst = rawCGST + rawSGST;
+  const totalCgstSgst = +rawCgstSgst.toFixed(2);
+  // Split evenly: CGST = half rounded up if odd paisa, SGST = remainder
+  const halfCgstSgst  = +(totalCgstSgst / 2).toFixed(2);
+  const otherHalf     = +(totalCgstSgst - halfCgstSgst).toFixed(2);
+  const totalCGST = rawIGST > 0 ? 0 : halfCgstSgst;   // if IGST exists, no CGST/SGST
+  const totalSGST = rawIGST > 0 ? 0 : otherHalf;
+  const totalIGST = +rawIGST.toFixed(2);
   const totalTax  = +(totalCGST + totalSGST + totalIGST).toFixed(2);
   const salesBase = +(resolvedGrandTotal - totalTax).toFixed(2);
 
@@ -339,7 +359,14 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
         billedQty: `${itemQty} ${itemUnit}`,
       }],
       // Rate details (CGST, SGST/UTGST, or IGST)
-    rateDetails: [
+      // CRITICAL: When GSTLEDGERSOURCE is set to a specific item sales ledger
+      // (e.g. "SS Bottle Sales Local 5%"), Tally derives the GST rates from that
+      // ledger's master configuration. Sending RATEDETAILS alongside causes a conflict:
+      // Tally checks ledger-master-rate vs RATEDETAILS and shows "Tax amount does not
+      // match" because it sees two different rate sources. Solution: only send
+      // RATEDETAILS when there is NO specific ledger source (i.e. generic 'Sales' fallback).
+      // When hasSpecificLedger=true, omit RATEDETAILS entirely — Tally will use the ledger.
+    rateDetails: hasSpecificLedger ? [] : [
       ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: cgstRate }] : []),
       ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate }] : []),
       ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: igstRate }] : []),
@@ -364,32 +391,90 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // then sums them. If that sum ≠ the CGST/SGST amounts in LEDGERENTRIES,
   // Tally shows "Tax amount does not match" and blocks e-invoice printing.
   //
-  // Solution: compute ledger-level tax totals by summing the EXACT same
-  // per-item calculation that Tally will run — NOT from stored cgstTotal.
-  // This guarantees both sides agree to the paisa.
+  // When GSTLEDGERSOURCE is set (hasSpecificLedger=true on any item), rateDetails
+  // are omitted — Tally derives rates from the ledger master. In that case we must
+  // recompute CGST/SGST from (itemAmount × ledger_rate) so LEDGERENTRIES matches
+  // exactly what Tally will calculate.
+  //
+  // Determine the effective GST rate from invoice-level totals or item.taxRate.
+  // Use the SNAPPED slab rate to match Tally's internal calculation.
+  const anySpecificLedger = useInventory && allInventoryEntries.some(e => e.gstLedgerSource);
+
   let reconCGST = 0;
   let reconSGST = 0;
   let reconIGST = 0;
+
   if (useInventory && allInventoryEntries.length > 0) {
-    for (const entry of allInventoryEntries) {
-      const base = entry.amount || 0;
-      for (const rd of (entry.rateDetails || [])) {
-        const taxAmt = +((base * rd.gstRate) / 100).toFixed(2);
-        if (rd.gstRateDutyHead === 'CGST')      reconCGST = +(reconCGST + taxAmt).toFixed(2);
-        else if (rd.gstRateDutyHead === 'SGST/UTGST') reconSGST = +(reconSGST + taxAmt).toFixed(2);
-        else if (rd.gstRateDutyHead === 'IGST')  reconIGST = +(reconIGST + taxAmt).toFixed(2);
+    if (anySpecificLedger) {
+      // Recompute from item amounts × snapped rates so LEDGERENTRIES matches Tally's ledger calculation.
+      // Use the same snapped rates we computed per item (stored in closures — recompute here).
+      for (let i = 0; i < validItems.length; i++) {
+        const item = validItems[i];
+        const base = allInventoryEntries[i].amount || 0;
+        const itemCGST  = +(item.cgst  || 0);
+        const itemSGST  = +(item.sgst  || 0);
+        const itemIGST  = +(item.igst  || 0);
+        const itemTaxRate = +(item.taxRate || 0);
+        const isInterstateTx = itemIGST > 0 || (totalIGST > 0 && itemCGST === 0);
+        const storedHalfRate = itemTaxRate > 0 ? snapToSlab(itemTaxRate / 2) : 0;
+        const storedIgstRate = itemTaxRate > 0 ? snapToSlab(itemTaxRate)     : 0;
+
+        const cgstR = itemCGST > 0 ? snapToSlab(+((itemCGST / base) * 100).toFixed(4))
+                    : storedHalfRate > 0 && !isInterstateTx ? storedHalfRate
+                    : invoiceCgstRate;
+        const sgstR = itemSGST > 0 ? snapToSlab(+((itemSGST / base) * 100).toFixed(4))
+                    : storedHalfRate > 0 && !isInterstateTx ? storedHalfRate
+                    : invoiceSgstRate;
+        const igstR = itemIGST > 0 ? snapToSlab(+((itemIGST / base) * 100).toFixed(4))
+                    : storedIgstRate > 0 && isInterstateTx ? storedIgstRate
+                    : invoiceIgstRate;
+
+        if (cgstR > 0) reconCGST = +(reconCGST + +((base * cgstR) / 100).toFixed(2)).toFixed(2);
+        if (sgstR > 0) reconSGST = +(reconSGST + +((base * sgstR) / 100).toFixed(2)).toFixed(2);
+        if (igstR > 0) reconIGST = +(reconIGST + +((base * igstR) / 100).toFixed(2)).toFixed(2);
+      }
+    } else {
+      // No specific ledger — rateDetails IS sent, recompute from those rates
+      for (const entry of allInventoryEntries) {
+        const base = entry.amount || 0;
+        for (const rd of (entry.rateDetails || [])) {
+          const taxAmt = +((base * rd.gstRate) / 100).toFixed(2);
+          if (rd.gstRateDutyHead === 'CGST')           reconCGST = +(reconCGST + taxAmt).toFixed(2);
+          else if (rd.gstRateDutyHead === 'SGST/UTGST') reconSGST = +(reconSGST + taxAmt).toFixed(2);
+          else if (rd.gstRateDutyHead === 'IGST')       reconIGST = +(reconIGST + taxAmt).toFixed(2);
+        }
       }
     }
   }
-  // If the recon totals are both zero (no inventory entries or no rateDetails),
-  // fall back to the stored invoice-level totals so ledger entries still balance.
-  const ledgerCGST = reconCGST > 0 ? reconCGST : totalCGST;
-  const ledgerSGST = reconSGST > 0 ? reconSGST : totalSGST;
-  const ledgerIGST = reconIGST > 0 ? reconIGST : totalIGST;
-  // Recalculate salesBase and grandTotal from reconciled tax amounts so ledger entries balance.
+  // Fallback to stored totals if recon is zero (no inventory entries)
+  const ledgerCGSTraw = reconCGST > 0 ? reconCGST : totalCGST;
+  const ledgerSGSTraw = reconSGST > 0 ? reconSGST : totalSGST;
+  const ledgerIGST    = reconIGST > 0 ? reconIGST : totalIGST;
+  // Re-apply pair-rounding to CGST+SGST so they always sum to a consistent total.
+  // e.g. raw 5.476190 × 2 = 10.952380 → total 10.95 → CGST=5.48, SGST=5.47 (not 5.48+5.48=10.96)
+  const reconCgstSgstTotal = +(ledgerCGSTraw + ledgerSGSTraw).toFixed(2);
+  const reconHalf      = +(reconCgstSgstTotal / 2).toFixed(2);
+  const ledgerCGST     = ledgerIGST > 0 ? 0 : reconHalf;
+  const ledgerSGST     = ledgerIGST > 0 ? 0 : +(reconCgstSgstTotal - reconHalf).toFixed(2);
+  // Use the ORIGINAL grandTotal as the party-ledger debit (invoice receivable must be exact).
+  // Recompute salesBase from grandTotal − reconTotalTax so inventory+tax = grandTotal exactly.
   const reconTotalTax   = +(ledgerCGST + ledgerSGST + ledgerIGST).toFixed(2);
-  const reconSalesBase  = +(itemsTotal).toFixed(2);  // itemsTotal already adjusted above
-  const reconGrandTotal = +(reconSalesBase + reconTotalTax).toFixed(2);
+  const reconSalesBase  = +(resolvedGrandTotal - reconTotalTax).toFixed(2);
+  const reconGrandTotal = resolvedGrandTotal;
+
+  // Re-adjust last inventory entry amount so items sum exactly equals reconSalesBase.
+  // This is needed when the pair-rounding changed the tax total vs what itemAmounts assumed.
+  if (allInventoryEntries.length > 0) {
+    const currentItemsSum = +allInventoryEntries.reduce((s, e) => s + (e.amount || 0), 0).toFixed(2);
+    if (currentItemsSum !== reconSalesBase && Math.abs(currentItemsSum - reconSalesBase) <= 0.10) {
+      const diff = +(reconSalesBase - currentItemsSum).toFixed(2);
+      const last = allInventoryEntries[allInventoryEntries.length - 1];
+      last.amount = +(last.amount + diff).toFixed(2);
+      // Also update accountingAllocations and batchAllocations amounts
+      if (last.accountingAllocations?.[0]) last.accountingAllocations[0].amount = last.amount;
+      if (last.batchAllocations?.[0])      last.batchAllocations[0].amount      = last.amount;
+    }
+  }
 
   // ── Ledger entries ────────────────────────────────────────────────────────
   const allLedgerEntries = [];
