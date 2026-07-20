@@ -170,37 +170,36 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const sgstHalfRate = isInterstate ? 0 : snapToSlab(gstRateFull / 2);
   const igstFullRate = isInterstate ? gstRateFull : 0;
 
+  // ── Get stored tax totals from invoice to use exact values ─────────────────
+  const storedCGST = invoiceData.cgstTotal ?? items.reduce((s, i) => s + (+(i.cgst || 0)), 0);
+  const storedSGST = invoiceData.sgstTotal ?? items.reduce((s, i) => s + (+(i.sgst || 0)), 0);
+  const storedIGST = invoiceData.igstTotal ?? items.reduce((s, i) => s + (+(i.igst || 0)), 0);
+  // Round each individual tax to 2 decimals first, then add!
+  const storedCGSTRounded = +storedCGST.toFixed(2);
+  const storedSGSTRounded = +storedSGST.toFixed(2);
+  const storedIGSTRounded = +storedIGST.toFixed(2);
+  const storedTotalTax = +(storedCGSTRounded + storedSGSTRounded + storedIGSTRounded).toFixed(2);
+  const storedSalesBase = +(resolvedGrandTotal - storedTotalTax).toFixed(2);
+
   // ── Valid items & taxable amounts ─────────────────────────────────────────
-  // Use qty × rate as the authoritative taxable base per item.
-  // CRITICAL: The <RATE> tag in Tally XML is built from itemRate.toFixed(2).
-  // The <AMOUNT> tag must equal qty × itemRate rounded the same way.
-  // If RATE and AMOUNT differ Tally recomputes tax from RATE and gets a mismatch.
   const validItems = items.filter(item => (item.description || item.name || '').toString().trim());
-  const itemAmounts = validItems.map(item => {
+  const itemAmountsBeforeAdjust = validItems.map(item => {
     const qty  = +(item.qty  || 1);
     const rate = +(item.rate || 0);
     return +(qty * rate).toFixed(2);
   });
+  const totalBeforeAdjust = +itemAmountsBeforeAdjust.reduce((s, a) => s + a, 0).toFixed(2);
+  // Adjust the first item's amount to make total sales base exactly storedSalesBase
+  const adjustment = +(storedSalesBase - totalBeforeAdjust).toFixed(2);
+  const itemAmounts = itemAmountsBeforeAdjust.map((amt, idx) => idx === 0 ? +(amt + adjustment).toFixed(2) : amt);
 
-  // ── Compute CGST/SGST/IGST from itemAmounts × rate ────────────────────────
-  // Tally's e-invoice engine rounds EACH duty head independently:
-  //   CGST = round(itemAmount × cgstRate%) = round(219.05 × 2.5%) = round(5.47625) = 5.48
-  //   SGST = round(itemAmount × sgstRate%) = round(219.05 × 2.5%) = round(5.47625) = 5.48
-  // Total = 10.96. The taxable base must be set so this is consistent.
-  // We derive itemAmounts from qty×rate, and tax from itemAmount × half-rate each.
-  let totalCGST = 0, totalSGST = 0, totalIGST = 0;
-  for (const amt of itemAmounts) {
-    if (igstFullRate > 0) {
-      totalIGST = +(totalIGST + +((amt * igstFullRate) / 100).toFixed(2)).toFixed(2);
-    } else if (cgstHalfRate > 0) {
-      // Round each duty head independently — this is what Tally's e-invoice engine does
-      totalCGST = +(totalCGST + +((amt * cgstHalfRate) / 100).toFixed(2)).toFixed(2);
-      totalSGST = +(totalSGST + +((amt * sgstHalfRate) / 100).toFixed(2)).toFixed(2);
-    }
-  }
-  const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-  const totalTax  = +(totalCGST + totalSGST + totalIGST).toFixed(2);
-  const computedGrandTotal = +(salesBase + totalTax).toFixed(2);
+  // ── Use stored tax totals to ensure exact match ────────────────────────────
+  let totalCGST = storedCGSTRounded;
+  let totalSGST = storedSGSTRounded;
+  let totalIGST = storedIGSTRounded;
+  const salesBase = storedSalesBase;
+  const totalTax  = storedTotalTax;
+  const computedGrandTotal = resolvedGrandTotal;
 
   // ── GST ledger names ──────────────────────────────────────────────────────
   const cgstLedger = totalCGST > 0 ? resolveGstLedgerName('cgst', salesBase, totalCGST, tallyGstLedgers?.cgstNames) : '';
@@ -260,9 +259,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       }],
       // RATEDETAILS: always send explicit rates — Tally uses these for Tax Analysis
       rateDetails: [
-                ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: cgstRate.toFixed(2) }] : []),
-                ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate.toFixed(2) }] : []),
-                ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: igstRate.toFixed(2) }] : []),
+                ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: ` ${cgstRate.toFixed(2)}` }] : []),
+                ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: ` ${sgstRate.toFixed(2)}` }] : []),
+                ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: ` ${igstRate.toFixed(2)}` }] : []),
               ],
       accountingAllocations: [{
         ledgerName: salesLedger,

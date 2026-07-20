@@ -2,6 +2,8 @@
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import Invoice from '../models/Invoice.js';
+import { serializeTallyVoucher } from '../services/tallyExportService.js';
+import { normalizeToTallyVoucher } from '../services/normalizeToTallyVoucher.js';
 
 dotenv.config();
 
@@ -12,14 +14,14 @@ async function main() {
   await mongoose.connect(MONGODB_URI);
   console.log('Connected!');
 
-  console.log('Fetching invoice BIW958...');
   const invoice = await Invoice.findOne({ invoiceNo: 'BIW958' }).lean();
-  if (!invoice) {
-    console.log('Invoice not found!');
-    await mongoose.disconnect();
-    return;
-  }
-  console.log('Invoice found! tallyVoucher:', JSON.stringify(invoice.tallyVoucher, null, 2));
+  console.log('Found invoice BIW958, normalizing to tally voucher...');
+  const tallyVoucher = normalizeToTallyVoucher(invoice);
+  console.log('Normalized, serializing to XML...');
+  const xml = serializeTallyVoucher(tallyVoucher, '1', '1', 'Srichakra Industries');
+  console.log('Generated XML:\n');
+  console.log(xml);
+
   await mongoose.disconnect();
 }
 

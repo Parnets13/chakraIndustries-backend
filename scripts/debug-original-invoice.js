@@ -19,7 +19,12 @@ async function main() {
     await mongoose.disconnect();
     return;
   }
-  console.log('Invoice found! tallyVoucher:', JSON.stringify(invoice.tallyVoucher, null, 2));
+  console.log('Original invoice data:');
+  console.log('cgstTotal:', invoice.cgstTotal);
+  console.log('sgstTotal:', invoice.sgstTotal);
+  console.log('igstTotal:', invoice.igstTotal);
+  console.log('grandTotal:', invoice.grandTotal);
+  console.log('items:', JSON.stringify(invoice.items, null, 2));
   await mongoose.disconnect();
 }
 
