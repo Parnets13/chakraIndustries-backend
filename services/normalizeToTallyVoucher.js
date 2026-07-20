@@ -183,18 +183,24 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   });
 
   // ── Compute CGST/SGST/IGST from itemAmounts × rate ────────────────────────
-  // Tally's Tax Analysis computes: each itemAmount × gstRate%, rounds per item, sums.
-  // We MUST use the identical formula so LEDGERENTRIES matches "As per Transaction".
+  // CRITICAL: Tally rounds the TOTAL tax (CGST+SGST combined) per item, then splits.
+  // i.e. for each item: totalItemTax = round(amt × fullRate%), CGST = floor(totalItemTax/2 × 100)/100, SGST = totalItemTax - CGST
+  // This prevents the "10.96 vs 10.95" mismatch caused by rounding each half independently.
   let totalCGST = 0, totalSGST = 0, totalIGST = 0;
   for (const amt of itemAmounts) {
-    if (cgstHalfRate > 0) totalCGST = +(totalCGST + +((amt * cgstHalfRate) / 100).toFixed(2)).toFixed(2);
-    if (sgstHalfRate > 0) totalSGST = +(totalSGST + +((amt * sgstHalfRate) / 100).toFixed(2)).toFixed(2);
-    if (igstFullRate > 0) totalIGST = +(totalIGST + +((amt * igstFullRate) / 100).toFixed(2)).toFixed(2);
+    if (igstFullRate > 0) {
+      totalIGST = +(totalIGST + +((amt * igstFullRate) / 100).toFixed(2)).toFixed(2);
+    } else if (cgstHalfRate > 0) {
+      // Compute full GST first, then split — matches Tally's rounding
+      const fullTax = +((amt * gstRateFull) / 100).toFixed(2);
+      const cgst    = +Math.floor(fullTax / 2 * 100) / 100;  // floor half
+      const sgst    = +(fullTax - cgst).toFixed(2);           // remainder
+      totalCGST = +(totalCGST + cgst).toFixed(2);
+      totalSGST = +(totalSGST + sgst).toFixed(2);
+    }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
   const totalTax  = +(totalCGST + totalSGST + totalIGST).toFixed(2);
-  // Grand total = taxable + tax (may differ from invoice grandTotal by ±0.01 due to rounding)
-  // Use this as the party ledger debit so the voucher always balances exactly.
   const computedGrandTotal = +(salesBase + totalTax).toFixed(2);
 
   // ── GST ledger names ──────────────────────────────────────────────────────
