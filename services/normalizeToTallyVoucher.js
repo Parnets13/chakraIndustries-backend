@@ -322,12 +322,14 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     
     // Only emit GSTLEDGERSOURCE when salesLedger is a real item-specific ledger
     // that has GST rates configured in its Tally master.
-    // 'Sales' is a plain generic fallback ledger with NO GST rate in its master —
-    // emitting GSTLEDGERSOURCE='Sales' causes Tally to read rate=0% from that ledger
-    // while RATEDETAILS says 9%, triggering "Tax amount does not match" on e-invoice print.
-    // Only emit GSTLEDGERSOURCE when the ledger is item-specific (e.g. "SS Bottle Sales Local 5%").
-    const GENERIC_LEDGER_NAMES = new Set(['sales', 'sales accounts', 'sales accounts (group)', '']);
-    const hasSpecificLedger = !GENERIC_LEDGER_NAMES.has(salesLedger.toLowerCase());
+    // IMPORTANT: Sending GSTLEDGERSOURCE causes Tally to read the GST rate from
+    // that ledger's master and recompute tax independently — if the rate in Tally's
+    // ledger master differs from our RATEDETAILS even by 0.01%, it shows the
+    // "Tax amount does not match" warning. The safest approach is to NEVER send
+    // GSTLEDGERSOURCE — instead send explicit RATEDETAILS so Tally uses our rate.
+    // GSTLEDGERSOURCE is only needed for Tally to auto-populate HSN from the ledger.
+    // We already send GSTHSNNAME explicitly, so GSTLEDGERSOURCE is not needed.
+    const hasSpecificLedger = false;  // Always omit GSTLEDGERSOURCE — use RATEDETAILS instead
     const isInterstateItem = itemIGST > 0;
 
     return {
@@ -370,15 +372,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
         actualQty: `${itemQty} ${itemUnit}`,
         billedQty: `${itemQty} ${itemUnit}`,
       }],
-      // Rate details (CGST, SGST/UTGST, or IGST)
-      // CRITICAL: When GSTLEDGERSOURCE is set to a specific item sales ledger
-      // (e.g. "SS Bottle Sales Local 5%"), Tally derives the GST rates from that
-      // ledger's master configuration. Sending RATEDETAILS alongside causes a conflict:
-      // Tally checks ledger-master-rate vs RATEDETAILS and shows "Tax amount does not
-      // match" because it sees two different rate sources. Solution: only send
-      // RATEDETAILS when there is NO specific ledger source (i.e. generic 'Sales' fallback).
-      // When hasSpecificLedger=true, omit RATEDETAILS entirely — Tally will use the ledger.
-    rateDetails: hasSpecificLedger ? [] : [
+      // Rate details — always send explicit RATEDETAILS so Tally uses our rates.
+      // Never rely on GSTLEDGERSOURCE for rate lookup (see comment above).
+    rateDetails: [
       ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: cgstRate }] : []),
       ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate }] : []),
       ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: igstRate }] : []),
@@ -397,21 +393,31 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     };
   }) : [];
 
-  // ── Tax totals for LEDGERENTRIES — already correctly computed above ───────
-  // totalCGST / totalSGST / totalIGST are derived from grandTotal+rate formula.
-  // They exactly match what Tally will recalculate. No further recon needed.
-  const ledgerCGST     = totalCGST;
-  const ledgerSGST     = totalSGST;
-  const ledgerIGST     = totalIGST;
-  const reconTotalTax  = totalTax;
-  const reconSalesBase = salesBase;
+  // ── Tax totals for LEDGERENTRIES — recompute from item amounts × rates ───
+  // Since GSTLEDGERSOURCE is never sent, RATEDETAILS is always present.
+  // Recompute CGST/SGST from (itemAmount × cgstRate) so LEDGERENTRIES matches
+  // exactly what Tally computes from RATEDETAILS.
+  let reconCGST = 0, reconSGST = 0, reconIGST = 0;
+  for (const entry of allInventoryEntries) {
+    for (const rd of (entry.rateDetails || [])) {
+      const t = +((entry.amount * rd.gstRate) / 100).toFixed(2);
+      if (rd.gstRateDutyHead === 'CGST')           reconCGST = +(reconCGST + t).toFixed(2);
+      else if (rd.gstRateDutyHead === 'SGST/UTGST') reconSGST = +(reconSGST + t).toFixed(2);
+      else if (rd.gstRateDutyHead === 'IGST')       reconIGST = +(reconIGST + t).toFixed(2);
+    }
+  }
+  const ledgerCGST      = reconCGST > 0 ? reconCGST : totalCGST;
+  const ledgerSGST      = reconSGST > 0 ? reconSGST : totalSGST;
+  const ledgerIGST      = reconIGST > 0 ? reconIGST : totalIGST;
+  const reconTotalTax   = +(ledgerCGST + ledgerSGST + ledgerIGST).toFixed(2);
+  const reconSalesBase  = +(resolvedGrandTotal - reconTotalTax).toFixed(2);
   const reconGrandTotal = resolvedGrandTotal;
 
-  // Adjust last inventory entry amount to sum exactly to salesBase.
+  // Adjust last inventory entry amount to match reconSalesBase exactly.
   if (allInventoryEntries.length > 0) {
-    const currentItemsSum = +allInventoryEntries.reduce((s, e) => s + (e.amount || 0), 0).toFixed(2);
-    if (currentItemsSum !== reconSalesBase && Math.abs(currentItemsSum - reconSalesBase) <= 0.10) {
-      const diff = +(reconSalesBase - currentItemsSum).toFixed(2);
+    const curSum = +allInventoryEntries.reduce((s, e) => s + (e.amount || 0), 0).toFixed(2);
+    if (curSum !== reconSalesBase && Math.abs(curSum - reconSalesBase) <= 0.10) {
+      const diff = +(reconSalesBase - curSum).toFixed(2);
       const last = allInventoryEntries[allInventoryEntries.length - 1];
       last.amount = +(last.amount + diff).toFixed(2);
       if (last.accountingAllocations?.[0]) last.accountingAllocations[0].amount = last.amount;
