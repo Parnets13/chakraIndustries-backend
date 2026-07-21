@@ -150,11 +150,12 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     return GST_SLABS.reduce((best, s) => Math.abs(s - rate) < Math.abs(best - rate) ? s : best, GST_SLABS[0]);
   };
 
-  // ── Determine GST rate ────────────────────────────────────────────────────
+  // ── Determine invoice-level interstate flag ───────────────────────────────
   const rawIGST = invoiceData.igstTotal ?? items.reduce((s, i) => s + (+(i.igst || 0)), 0);
   const isInterstate = rawIGST > 0;
+
+  // ── Invoice-level fallback rate (used only when item has no taxRate) ──────
   const firstItem = items[0] || {};
-  // Prefer item.taxRate (full GST%), else back-calculate from stored tax amounts
   let gstRateFull = snapToSlab(+(firstItem.taxRate || 0));
   if (!gstRateFull) {
     const rawCGSTsum = invoiceData.cgstTotal ?? items.reduce((s, i) => s + (+(i.cgst || 0)), 0);
@@ -165,7 +166,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       gstRateFull = snapToSlab(+((rawTax / rawBase) * 100).toFixed(4));
     }
   }
-  // Per-duty-head rates (CGST = half of full GST for intrastate)
+  // Invoice-level fallback half-rates (used only when per-item rate is 0)
   const cgstHalfRate = isInterstate ? 0 : snapToSlab(gstRateFull / 2);
   const sgstHalfRate = isInterstate ? 0 : snapToSlab(gstRateFull / 2);
   const igstFullRate = isInterstate ? gstRateFull : 0;
@@ -182,20 +183,31 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     return +(qty * rate).toFixed(2);
   });
 
-  // ── Compute CGST/SGST/IGST from itemAmounts × rate ────────────────────────
-  // Tally's e-invoice engine rounds EACH duty head independently:
-  //   CGST = round(itemAmount × cgstRate%) = round(219.05 × 2.5%) = round(5.47625) = 5.48
-  //   SGST = round(itemAmount × sgstRate%) = round(219.05 × 2.5%) = round(5.47625) = 5.48
-  // Total = 10.96. The taxable base must be set so this is consistent.
-  // We derive itemAmounts from qty×rate, and tax from itemAmount × half-rate each.
+  // ── Compute CGST/SGST/IGST per item using each item's own tax rate ─────────
+  // Tally's e-invoice engine validates EACH item's tax independently:
+  //   tax = round(itemAmount × itemRate%)
+  // Using a single invoice-level rate for all items fails when items have
+  // different GST slabs (e.g. 5% and 18% in the same invoice).
+  // We use item.taxRate (stored from Excel) and fall back to invoice-level rate
+  // only when an item has no taxRate stored.
   let totalCGST = 0, totalSGST = 0, totalIGST = 0;
-  for (const amt of itemAmounts) {
-    if (igstFullRate > 0) {
-      totalIGST = +(totalIGST + +((amt * igstFullRate) / 100).toFixed(2)).toFixed(2);
-    } else if (cgstHalfRate > 0) {
-      // Round each duty head independently — this is what Tally's e-invoice engine does
-      totalCGST = +(totalCGST + +((amt * cgstHalfRate) / 100).toFixed(2)).toFixed(2);
-      totalSGST = +(totalSGST + +((amt * sgstHalfRate) / 100).toFixed(2)).toFixed(2);
+  const itemTaxRates = validItems.map(item => {
+    const itemTaxRateFull = snapToSlab(+(item.taxRate || gstRateFull));
+    const itemIsInterstate = (+(item.igst || 0)) > 0;
+    return {
+      cgst: itemIsInterstate ? 0 : snapToSlab(itemTaxRateFull / 2),
+      sgst: itemIsInterstate ? 0 : snapToSlab(itemTaxRateFull / 2),
+      igst: itemIsInterstate ? itemTaxRateFull : (isInterstate ? igstFullRate : 0),
+    };
+  });
+  for (let i = 0; i < itemAmounts.length; i++) {
+    const amt = itemAmounts[i];
+    const r   = itemTaxRates[i];
+    if (r.igst > 0) {
+      totalIGST = +(totalIGST + +((amt * r.igst) / 100).toFixed(2)).toFixed(2);
+    } else if (r.cgst > 0) {
+      totalCGST = +(totalCGST + +((amt * r.cgst) / 100).toFixed(2)).toFixed(2);
+      totalSGST = +(totalSGST + +((amt * r.sgst) / 100).toFixed(2)).toFixed(2);
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
@@ -231,10 +243,10 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const GENERIC_LEDGERS = new Set(['', 'sales', 'sales accounts', 'sales accounts (group)']);
     const salesLedger = (!rawLedger || GENERIC_LEDGERS.has(rawLedger.toLowerCase())) ? 'Sales' : rawLedger;
 
-    // GST rate for this item — use invoice-level rate (all items same rate for now)
-    const cgstRate = cgstHalfRate;
-    const sgstRate = sgstHalfRate;
-    const igstRate = igstFullRate;
+    // GST rate for this item — use this item's own taxRate, fall back to invoice-level
+    const cgstRate = itemTaxRates[i].cgst;
+    const sgstRate = itemTaxRates[i].sgst;
+    const igstRate = itemTaxRates[i].igst;
 
     return {
       stockItemName: itemName,
