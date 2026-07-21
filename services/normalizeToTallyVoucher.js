@@ -211,8 +211,11 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       const itemIgst = +(item.igst || 0);
       const itemTax  = itemCgst + itemSgst + itemIgst;
       const itemBase = +(item.basic || 0) || itemAmt;
+      // DIAGNOSTIC — log every item so we can see exactly what values arrive
+      console.log(`[normalizeToTallyVoucher] item="${(item.description||item.name||'')}": taxRate=${item.taxRate} cgst=${item.cgst} sgst=${item.sgst} igst=${item.igst} basic=${item.basic} itemAmt=${itemAmt} itemTax=${itemTax} itemBase=${itemBase}`);
       if (itemTax > 0 && itemBase > 0) {
         itemTaxRateFull = snapToSlab(+((itemTax / itemBase) * 100).toFixed(4));
+        console.log(`[normalizeToTallyVoucher]  → back-calculated rate: ${itemTaxRateFull}%`);
       }
     }
 
