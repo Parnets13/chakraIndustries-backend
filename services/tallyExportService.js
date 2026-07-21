@@ -752,6 +752,14 @@ export async function exportStockItems(cfg, triggeredBy) {
       // ERP-only items have no tallyGuid — use Create so they are added as new.
       const action = item.tallyGuid ? 'Alter' : 'Create';
 
+      // SAFETY GUARD: if this item already exists in Tally (ACTION="Alter") and
+      // our ERP has gst=0, do NOT send <GSTRATE> — it would overwrite a correctly
+      // configured nonzero rate in Tally with 0%.  Omitting the tag leaves Tally's
+      // existing value untouched.  New items (ACTION="Create") are sent as-is.
+      const gstRateTag = (gstRate === 0 && action === 'Alter')
+        ? (() => { console.warn(`Skipped updating ledger rate to 0% for ${item.name} — refusing to overwrite existing nonzero rate.`); return ''; })()
+        : `<GSTRATE>${gstRate}</GSTRATE>`;
+
       return `
 <STOCKITEM NAME="${esc(item.name)}" ACTION="${action}">
   <NAME>${esc(item.name)}</NAME>
@@ -760,7 +768,7 @@ export async function exportStockItems(cfg, triggeredBy) {
   <GSTAPPLICABLE>Applicable</GSTAPPLICABLE>
   <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
   <HSNCODE>${esc(item.hsn || '')}</HSNCODE>
-  <GSTRATE>${gstRate}</GSTRATE>
+  ${gstRateTag}
   <COSTINGMETHOD>Avg. Cost</COSTINGMETHOD>
   <VALUATIONMETHOD>Avg. Cost</VALUATIONMETHOD>
   <STANDARDCOST>${costPrice.toFixed(2)}</STANDARDCOST>

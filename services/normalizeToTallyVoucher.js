@@ -150,17 +150,24 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     return GST_SLABS.reduce((best, s) => Math.abs(s - rate) < Math.abs(best - rate) ? s : best, GST_SLABS[0]);
   };
 
-  // ── Determine invoice-level interstate flag ───────────────────────────────
-  const rawIGST = invoiceData.igstTotal ?? items.reduce((s, i) => s + (+(i.igst || 0)), 0);
+  // ── Determine tax sums — prefer nonzero item-level sum over invoice-level ──
+  // BUG FIX: `??` only falls back when the value is null/undefined, not when
+  // it is explicitly 0. If invoiceData.cgstTotal === 0 (even though items have
+  // real cgst amounts), the fallback never fires and gstRateFull resolves to 0.
+  // Fix: always use the item-level sum when it is greater than the invoice-level value.
+  const itemCGSTsum = items.reduce((s, i) => s + (+(i.cgst || 0)), 0);
+  const itemSGSTsum = items.reduce((s, i) => s + (+(i.sgst || 0)), 0);
+  const itemIGSTsum = items.reduce((s, i) => s + (+(i.igst || 0)), 0);
+  const rawCGSTsum  = (invoiceData.cgstTotal && invoiceData.cgstTotal > 0) ? invoiceData.cgstTotal : itemCGSTsum;
+  const rawSGSTsum  = (invoiceData.sgstTotal && invoiceData.sgstTotal > 0) ? invoiceData.sgstTotal : itemSGSTsum;
+  const rawIGST     = (invoiceData.igstTotal && invoiceData.igstTotal > 0) ? invoiceData.igstTotal : itemIGSTsum;
   const isInterstate = rawIGST > 0;
 
   // ── Invoice-level fallback rate (used only when item has no taxRate) ──────
   const firstItem = items[0] || {};
   let gstRateFull = snapToSlab(+(firstItem.taxRate || 0));
   if (!gstRateFull) {
-    const rawCGSTsum = invoiceData.cgstTotal ?? items.reduce((s, i) => s + (+(i.cgst || 0)), 0);
-    const rawSGSTsum = invoiceData.sgstTotal ?? items.reduce((s, i) => s + (+(i.sgst || 0)), 0);
-    const rawTax = rawCGSTsum + rawSGSTsum + rawIGST;
+    const rawTax  = rawCGSTsum + rawSGSTsum + rawIGST;
     const rawBase = resolvedGrandTotal - rawTax;
     if (rawTax > 0 && rawBase > 0) {
       gstRateFull = snapToSlab(+((rawTax / rawBase) * 100).toFixed(4));

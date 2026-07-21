@@ -368,16 +368,27 @@ export async function pushMastersToTally(cfg, triggeredBy) {
     ]);
 
     // ── Build per-record XML fragments ──────────────────────────────────────
-    const stockItemFragments = items.map(item => `
+    const stockItemFragments = items.map(item => {
+      const gstRate = item.gst || 0;
+      // SAFETY GUARD: if this item already exists in Tally (has a tallyGuid = ACTION="Alter")
+      // and our ERP has gst=0, do NOT send <GSTRATE> — it would overwrite a correctly
+      // configured nonzero rate in Tally with 0%.  Omitting the tag leaves Tally's
+      // existing value untouched.  A brand-new item (no tallyGuid = ACTION="Create")
+      // is always sent as-is (a genuinely new 0%-rated product is valid).
+      const gstRateTag = (gstRate === 0 && item.tallyGuid)
+        ? (() => { console.warn(`Skipped updating ledger rate to 0% for ${item.name} — refusing to overwrite existing nonzero rate.`); return ''; })()
+        : `<GSTRATE>${gstRate}</GSTRATE>`;
+      return `
 <STOCKITEM NAME="${esc(item.name)}" ACTION="${item.tallyGuid ? 'Alter' : 'Create'}">
   <NAME>${esc(item.name)}</NAME>
   <UNITS>${tallyUnit(item.unit)}</UNITS>
   <GSTAPPLICABLE>Applicable</GSTAPPLICABLE>
   <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
   <HSNCODE>${esc(item.hsn || '')}</HSNCODE>
-  <GSTRATE>${item.gst || 0}</GSTRATE>
+  ${gstRateTag}
   ${item.tallyGuid ? `<GUID>${esc(item.tallyGuid)}</GUID>` : ''}
-</STOCKITEM>`);
+</STOCKITEM>`;
+    });
 
     // Extra items from POs not in ItemMaster
     const knownNames = new Set(items.map(i => i.name));
