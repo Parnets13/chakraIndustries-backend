@@ -191,16 +191,34 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   });
 
   // ── Compute CGST/SGST/IGST per item using each item's own tax rate ─────────
-  // Tally's e-invoice engine validates EACH item's tax independently:
-  //   tax = round(itemAmount × itemRate%)
-  // Using a single invoice-level rate for all items fails when items have
-  // different GST slabs (e.g. 5% and 18% in the same invoice).
-  // We use item.taxRate (stored from Excel) and fall back to invoice-level rate
-  // only when an item has no taxRate stored.
+  // Rate resolution priority per item:
+  //   1. item.taxRate (stored from Excel) — most reliable
+  //   2. Back-calculate from item's own cgst+sgst amounts vs item amount — catches
+  //      invoices where taxRate was never stored but cgst/sgst values are present
+  //   3. Invoice-level fallback gstRateFull — last resort
   let totalCGST = 0, totalSGST = 0, totalIGST = 0;
-  const itemTaxRates = validItems.map(item => {
-    const itemTaxRateFull = snapToSlab(+(item.taxRate || gstRateFull));
+  const itemTaxRates = validItems.map((item, i) => {
     const itemIsInterstate = (+(item.igst || 0)) > 0;
+    const itemAmt = itemAmounts[i];
+
+    // Step 1: try item.taxRate directly
+    let itemTaxRateFull = snapToSlab(+(item.taxRate || 0));
+
+    // Step 2: if still 0, back-calculate from the item's own cgst/sgst/igst amounts
+    if (!itemTaxRateFull) {
+      const itemCgst = +(item.cgst || 0);
+      const itemSgst = +(item.sgst || 0);
+      const itemIgst = +(item.igst || 0);
+      const itemTax  = itemCgst + itemSgst + itemIgst;
+      const itemBase = +(item.basic || 0) || itemAmt;
+      if (itemTax > 0 && itemBase > 0) {
+        itemTaxRateFull = snapToSlab(+((itemTax / itemBase) * 100).toFixed(4));
+      }
+    }
+
+    // Step 3: fall back to invoice-level rate
+    if (!itemTaxRateFull) itemTaxRateFull = gstRateFull;
+
     return {
       cgst: itemIsInterstate ? 0 : snapToSlab(itemTaxRateFull / 2),
       sgst: itemIsInterstate ? 0 : snapToSlab(itemTaxRateFull / 2),
