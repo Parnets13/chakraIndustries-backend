@@ -1939,9 +1939,43 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         ),
     ].join('');
 
-    const autoStockXml = stockNames.map(name =>
-      `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS></STOCKITEM>`
-    ).join('');
+    // ── Build stock item name → GST rate map from invoice items ─────────────
+    // For each unique stock item, find the best available GST rate:
+    //   1. From invoice item.taxRate (if stored)
+    //   2. Back-calculated from item.cgst+item.sgst+item.basic
+    //   3. From ItemMaster.gst
+    // This ensures the stock item master in Tally gets the correct GSTRATE
+    // even when ItemMaster.gst = 0 (the default for auto-created items).
+    const stockGstRateMap = new Map(); // name → full GST %
+    for (const inv of invoices) {
+      for (const item of (inv.items || [])) {
+        const name = (item.description || item.name || '').trim();
+        if (!name || stockGstRateMap.has(name)) continue;
+        let rate = +(item.taxRate || 0);
+        if (!rate) {
+          const tax  = (+(item.cgst||0)) + (+(item.sgst||0)) + (+(item.igst||0));
+          const base = +(item.basic||0) || (+(item.qty||1) * +(item.rate||0));
+          if (tax > 0 && base > 0) rate = Math.round((tax / base) * 100 * 2) / 2; // round to nearest 0.5
+        }
+        if (rate > 0) stockGstRateMap.set(name, rate);
+      }
+    }
+    // Fill any remaining gaps from ItemMaster.gst
+    const stockItemMasters = await ItemMaster.find({ name: { $in: stockNames } }, 'name gst hsn').lean();
+    for (const im of stockItemMasters) {
+      if (!stockGstRateMap.has(im.name) && im.gst > 0) stockGstRateMap.set(im.name, im.gst);
+    }
+    const stockHsnMap = new Map(stockItemMasters.map(im => [im.name, im.hsn || '']));
+
+    // Always Alter stock items (not just Create) so the GSTRATE is updated
+    // even if the item already exists in Tally with a stale 0% rate.
+    const autoStockXml = stockNames.map(name => {
+      const gstRate = stockGstRateMap.get(name) || 0;
+      const hsn     = stockHsnMap.get(name) || '';
+      const gstRateTag = gstRate > 0 ? `<GSTRATE>${gstRate}</GSTRATE>` : '';
+      const hsnTag     = hsn ? `<HSNCODE>${esc(hsn)}</HSNCODE>` : '';
+      return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}</STOCKITEM>`;
+    }).join('');
 
     LOG(`Sales: auto-creating ${partyNames.length} party ledgers + ${stockNames.length} stock items before vouchers`);
     LOG(`Sales: party names to create: ${partyNames.slice(0, 5).join(', ')}${partyNames.length > 5 ? ` ... (${partyNames.length - 5} more)` : ''}`);
