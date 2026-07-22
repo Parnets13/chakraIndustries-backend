@@ -68,36 +68,35 @@ export function resolveGstLedgerName(taxType, salesBase, taxAmount, availableLed
   const plain = { cgst: 'CGST', sgst: 'SGST', igst: 'IGST' }[taxType] || 'CGST';
   const outPrefix = taxType === 'igst' ? 'Output IGST' : `Output ${taxType.toUpperCase()}`;
 
-  if (!availableLedgerNames || !availableLedgerNames.length) return plain;
-
   // Compute effective rate % (half-rate for CGST/SGST, full rate for IGST)
   let rateStr = '';
   if (salesBase > 0 && taxAmount > 0) {
     const rate = +((taxAmount / salesBase) * 100).toFixed(2);
-    // Common rate brackets: 2.5, 5, 6, 9, 12, 14, 18, 28
     const brackets = [2.5, 5, 6, 9, 12, 14, 18, 28];
-    // Find closest bracket
     const closest = brackets.reduce((best, b) => Math.abs(b - rate) < Math.abs(best - rate) ? b : best, brackets[0]);
     if (Math.abs(closest - rate) < 0.5) rateStr = String(closest);
   }
 
-  // Try rate-specific name first (e.g. "Output CGST @ 9%")
+  // ── Always prefer rate-specific ledger (e.g. "Output CGST @ 9%") ──────────
+  // Plain "CGST" has TAXTYPE="Central Tax" in Tally which forces the rate to 0%
+  // and shows "Others" type on the printed invoice — that is the bug.
+  // Rate-specific ledgers have TAXTYPE="Others" + RATEOFTAXCALCULATION=9 so
+  // Tally displays the correct percentage on print.
+  // We always create these ledgers (ACTION="Create") before sending vouchers,
+  // so it is safe to reference them even if Tally hadn't listed them yet.
   if (rateStr) {
     const rateSpecific = `${outPrefix} @ ${rateStr}%`;
-    if (availableLedgerNames.some(n => n.trim().toLowerCase() === rateSpecific.toLowerCase())) {
-      return rateSpecific;
-    }
+    return rateSpecific;
   }
 
-  // Try plain "Output CGST" style (without rate)
-  const plainOut = availableLedgerNames.find(n => n.trim().toLowerCase() === outPrefix.toLowerCase());
-  if (plainOut) return plainOut;
+  // No rate computed — try what Tally has, then fall back to plain
+  if (availableLedgerNames && availableLedgerNames.length) {
+    const plainOut = availableLedgerNames.find(n => n.trim().toLowerCase() === outPrefix.toLowerCase());
+    if (plainOut) return plainOut;
+    const bareMatch = availableLedgerNames.find(n => n.trim().toLowerCase() === plain.toLowerCase());
+    if (bareMatch) return bareMatch;
+  }
 
-  // Try bare "CGST"/"SGST"/"IGST"
-  const bareMatch = availableLedgerNames.find(n => n.trim().toLowerCase() === plain.toLowerCase());
-  if (bareMatch) return bareMatch;
-
-  // Fallback
   return plain;
 }
 
