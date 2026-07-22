@@ -774,6 +774,14 @@ export async function exportStockItems(cfg, triggeredBy) {
   <STANDARDCOST>${costPrice.toFixed(2)}</STANDARDCOST>
   <STANDARDPRICE>${sellingPrice.toFixed(2)}</STANDARDPRICE>
   ${item.tallyGuid ? `<GUID>${esc(item.tallyGuid)}</GUID>` : ''}
+  ${gstRate > 0 ? `<GSTDETAILS.LIST ACTION="Replace">
+    <APPLICABLEFROM>20230401</APPLICABLEFROM>
+    <TAXABILITY>Taxable</TAXABILITY>
+    <GSTRATEINPERCENT>${gstRate}</GSTRATEINPERCENT>
+    <ISREVERSECHARGE>No</ISREVERSECHARGE>
+    <ISINELIGIBLEITC>No</ISINELIGIBLEITC>
+    <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
+  </GSTDETAILS.LIST>` : ''}
   ${openQty > 0 ? `
   <OPENINGBALANCE>${openQty} ${unit}</OPENINGBALANCE>
   <OPENINGRATE>${openRate.toFixed(2)} /1 ${unit}</OPENINGRATE>
@@ -1975,7 +1983,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       const hsn     = stockHsnMap.get(name) || '';
       const gstRateTag = gstRate > 0 ? `<GSTRATE>${gstRate}</GSTRATE>` : '';
       const hsnTag     = hsn ? `<HSNCODE>${esc(hsn)}</HSNCODE>` : '';
-      return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}</STOCKITEM>`;
+      const gstDetailsTag = gstRate > 0 ? `<GSTDETAILS.LIST ACTION="Replace"><APPLICABLEFROM>20230401</APPLICABLEFROM><TAXABILITY>Taxable</TAXABILITY><GSTRATEINPERCENT>${gstRate}</GSTRATEINPERCENT><ISREVERSECHARGE>No</ISREVERSECHARGE><ISINELIGIBLEITC>No</ISINELIGIBLEITC><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY></GSTDETAILS.LIST>` : '';
+      return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
     }).join('');
 
     LOG(`Sales: auto-creating ${partyNames.length} party ledgers + ${stockNames.length} stock items before vouchers`);
