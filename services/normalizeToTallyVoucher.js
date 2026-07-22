@@ -344,7 +344,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       ledgerName: cgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +ledgerCGST
+      amount: +ledgerCGST,
+      rateOfInvoiceTax: cgstHalfRate,  // tells Tally this entry is at 2.5% — fixes "0%" display
     });
   }
 
@@ -354,7 +355,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       ledgerName: sgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +ledgerSGST
+      amount: +ledgerSGST,
+      rateOfInvoiceTax: sgstHalfRate,  // tells Tally this entry is at 2.5%
     });
   }
 
@@ -364,7 +366,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       ledgerName: igstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      amount: +ledgerIGST
+      amount: +ledgerIGST,
+      rateOfInvoiceTax: igstFullRate,  // tells Tally this entry is at e.g. 5% or 18%
     });
   }
 
