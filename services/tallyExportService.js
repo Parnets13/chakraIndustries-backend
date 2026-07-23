@@ -1508,14 +1508,17 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
         .map(line => line.trim())
         .filter(Boolean);
       for (let line of chunks) {
-        // Strip any embedded 6-digit pincode from this line — all forms:
-        //   "Bangalore-560042"  → "Bangalore"
-        //   "Bangalore 560042"  → "Bangalore"
-        //   "560042"            → skip entirely
-        //   "560042 Karnataka"  → "Karnataka" (pincode at start)
-        line = line.replace(/[-\s]\d{6}(?:\s|$)/, ' ').replace(/^\d{6}(?:\s|$)/, '').trim();
-        line = line.replace(/\s+/g, ' ').trim();
-        if (!line || /^\d{6}$/.test(line)) continue;    // skip standalone pincode lines
+        // Remove 6-digit pincode in all positions:
+        //   "Bangalore-560042" → "Bangalore"
+        //   "560042 Karnataka" → "Karnataka"
+        //   "560042"           → skip entirely
+        //   "Ulsoor Bangalore 560042" → "Ulsoor Bangalore"
+        line = line
+          .replace(/\b\d{6}\b[-\s]*/g, '')  // remove pincode + trailing dash/space
+          .replace(/[-\s]*\b\d{6}\b/g, '')  // remove leading dash/space + pincode
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!line) continue;
         if (!lines.some(existing => existing.toLowerCase() === line.toLowerCase())) {
           lines.push(line);
         }
@@ -1527,9 +1530,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     if (state && !lines.some(line => line.toLowerCase().includes(state.toLowerCase()))) {
       lines.push(state);
     }
-    // Pincode is NOT added to address lines — it is emitted separately via
-    // <PARTYPINCODE> / <CONSIGNEEPINCODE> tags. Adding it here causes Tally
-    // to render it appended to the city line (e.g. "Bangalore-560042").
+    // Pincode goes into <PARTYPINCODE> / <CONSIGNEEPINCODE> tags — NOT in address lines.
     return lines;
   };
 
