@@ -347,7 +347,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       rateOfInvoiceTax: cgstHalfRate,  // tells Tally this entry is at 2.5% — fixes "0%" display
     });
   }
-
+ 
   // 3. SGST
   if (ledgerSGST > 0 && sgstLedger) {
     allLedgerEntries.push({
