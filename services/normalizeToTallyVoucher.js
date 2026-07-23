@@ -475,7 +475,15 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const billToCity        = (invoiceData.billToCity    || invoiceData.partyCity    || '').toString().trim();
   const billToState       = (invoiceData.billToState   || invoiceData.partyState   || '').toString().trim();
   const billToGST         = (invoiceData.billToGST     || invoiceData.partyGST     || '').toString().trim();
-  const billToPincode     = (invoiceData.billToPincode || invoiceData.partyPostal || '').toString().trim();
+
+  // ── billToPincode: use stored value, or extract from address if missing ───
+  // Old invoices uploaded before the frontend fix won't have billToPincode stored.
+  // Extract the 6-digit pincode from the address string as fallback.
+  let billToPincode = (invoiceData.billToPincode || invoiceData.partyPostal || '').toString().trim();
+  if (!billToPincode && billToAddress) {
+    const pinMatch = billToAddress.match(/\b(\d{6})\b/);
+    if (pinMatch) billToPincode = pinMatch[1];
+  }
 
   // ── Party GST / State (Step 6 fields) ────────────────────────────────────
   const partyGST      = (invoiceData.partyGST   || '').toString().trim();
