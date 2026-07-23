@@ -426,7 +426,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const shipToAddress  = (invoiceData.shipToAddress || '').toString().trim();
   let   shipToCity     = (invoiceData.shipToCity    || '').toString().trim();
   let   shipToState    = (invoiceData.shipToState   || '').toString().trim();
-  const shipToGST      = (invoiceData.shipToGST     || '').toString().trim();
+  const rawShipToGST   = (invoiceData.shipToGST     || '').toString().trim();
+  // Only store a valid 15-char GST number — reject dots, dashes, N/A, empty-like values
+  const shipToGST      = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(rawShipToGST) ? rawShipToGST : '';
   // Ship-to data must not inherit the bill-to postal code.  Doing so creates a
   // misleading partial consignee block (a name from ship-to plus a pin from the
   // customer) which Tally can silently reject during GST validation.

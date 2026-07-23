@@ -1508,13 +1508,14 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
         .map(line => line.trim())
         .filter(Boolean);
       for (let line of chunks) {
-        // Strip any embedded pincode from this line — pincodes are 6-digit Indian postal codes.
-        // They appear in three forms:
-        //   "Bangalore-560995"  → strip "-560995"
-        //   "Bangalore 560995"  → strip " 560995"
-        //   "560995"            → skip the line entirely (standalone pincode)
-        line = line.replace(/[-\s]\d{6}$/, '').trim();  // remove trailing -NNNNNN or space NNNNNN
-        if (!line || /^\d{6}$/.test(line)) continue;    // skip standalone 6-digit pincode lines
+        // Strip any embedded 6-digit pincode from this line — all forms:
+        //   "Bangalore-560042"  → "Bangalore"
+        //   "Bangalore 560042"  → "Bangalore"
+        //   "560042"            → skip entirely
+        //   "560042 Karnataka"  → "Karnataka" (pincode at start)
+        line = line.replace(/[-\s]\d{6}(?:\s|$)/, ' ').replace(/^\d{6}(?:\s|$)/, '').trim();
+        line = line.replace(/\s+/g, ' ').trim();
+        if (!line || /^\d{6}$/.test(line)) continue;    // skip standalone pincode lines
         if (!lines.some(existing => existing.toLowerCase() === line.toLowerCase())) {
           lines.push(line);
         }
@@ -1528,7 +1529,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     }
     // Pincode is NOT added to address lines — it is emitted separately via
     // <PARTYPINCODE> / <CONSIGNEEPINCODE> tags. Adding it here causes Tally
-    // to render it appended to the city line (e.g. "Bangalore-560995").
+    // to render it appended to the city line (e.g. "Bangalore-560042").
     return lines;
   };
 
@@ -1539,6 +1540,9 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
 
   const shipToName = (v.shipToName || '').trim();
   const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', v.shipToState || '', v.shipToPincode || '');
+  // Clean shipToGST — reject dots, dashes, N/A, empty-like values
+  const rawShipToGST = (v.shipToGST || '').trim();
+  const shipToGST = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(rawShipToGST) ? rawShipToGST : '';
 
   // ── ROOT-level buyer/consignee tags ──────────────────────────────────────
   // In Tally's XML:
@@ -1584,11 +1588,11 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   </BASICBASEPARTYDETAILS.LIST>`
     : '';
   // This must use shipTo data, NOT billTo data
-  const shipToXml = billToDetailsXml || shipToName || v.shipToGST || v.shipToPincode
+  const shipToXml = billToDetailsXml || shipToName || shipToGST || v.shipToPincode
     ? `${billToDetailsXml}
   <CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
   <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>
-  ${v.shipToGST ? `<CONSIGNEEGSTIN>${esc(v.shipToGST)}</CONSIGNEEGSTIN>` : ''}
+  ${shipToGST ? `<CONSIGNEEGSTIN>${esc(shipToGST)}</CONSIGNEEGSTIN>` : ''}
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
   ${v.shipToState ? `<CONSIGNEESTATENAME>${esc(v.shipToState)}</CONSIGNEESTATENAME>` : ''}
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
@@ -2029,58 +2033,40 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // ── Fetch Tally company period end to cap voucher dates ───────────────────
     // Tally rejects vouchers dated after the company's ENDINGAT date with the
     // MISLEADING "Voucher date is missing" error (even when <DATE> is present).
-    // Cap all dates to period end.
+    // Cap all dates to period end — BUT only if periodEnd is today or in the future.
+    // If periodEnd is in the past, the Tally company period is expired/not updated.
+    // In that case, do NOT cap — send the actual invoice dates and let Tally show
+    // the real error so the user knows to extend the period in Tally.
     let periodEnd = await fetchTallyPeriodEnd(cfg);
-    if (!periodEnd) {
-      // Fallback: use a cached value from TallyConfig if available.
-      // Do NOT fall back to "yesterday" — that silently caps all invoice dates
-      // to the wrong date and causes EXCEPTIONS=1 with no LINEERROR in Tally.
-      // Better to send the actual invoice date and let Tally reject explicitly
-      // (it will then show a LINEERROR we can read) than silently cap to a wrong date.
+    const todayStr = (() => { const n = new Date(); return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`; })();
+
+    // If the live-fetched periodEnd is in the past, discard it — don't cap dates.
+    if (periodEnd && periodEnd < todayStr) {
+      LOG(`exportSalesInvoices: Tally periodEnd "${periodEnd}" is in the past (today=${todayStr}). NOT capping invoice dates. Extend the company period in Tally: F11 → Alter → set period end to 31-March-${new Date().getFullYear()+1}.`);
+      // Clear the stale cached value so it doesn't get used on retry
+      await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
+      periodEnd = null;
+    } else if (periodEnd) {
+      // Valid future/today period end — cache it
+      await TallyConfig.findOneAndUpdate({}, { tallyPeriodEnd: periodEnd }, { sort: { _id: 1 } });
+      LOG(`exportSalesInvoices: voucher dates will be capped to Tally period end ${periodEnd}`);
+    } else {
+      // Could not fetch live — try cache but apply same past-date guard
       const saved = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
       const cachedPeriodEnd = saved?.tallyPeriodEnd;
-      // Validate the cached periodEnd before using it.
-      // Two cases of bad cached values we've seen in the wild:
-      //   1. A future date (e.g. 20270327) — parsed from a Tally response filename or
-      //      a mis-parsed SVTODATE from an unrelated export envelope.
-      //      Guard: reject any cached value that is MORE THAN 1 YEAR in the future.
-      //   2. A "yesterday"-style value from old fallback logic — a date within the
-      //      last 30 days that is NOT a recognisable period-end pattern.
-      //      Guard: if the value is older than 30 days it must look like a real FY end.
-      // In both failure cases, fall back to live-fetch only (no capping).
-      const todayStr = (() => { const n = new Date(); return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`; })();
-      const oneYearFuture = (() => { const n = new Date(); n.setFullYear(n.getFullYear() + 1); return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`; })();
-      const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      const thirtyDaysAgoStr = `${thirtyDaysAgo.getFullYear()}${String(thirtyDaysAgo.getMonth()+1).padStart(2,'0')}${String(thirtyDaysAgo.getDate()).padStart(2,'0')}`;
-
-      if (cachedPeriodEnd && cachedPeriodEnd > oneYearFuture) {
-        // Future date — clearly wrong (e.g. 20270327 from a mis-parsed response)
-        LOG(`exportSalesInvoices: cached tallyPeriodEnd "${cachedPeriodEnd}" is more than 1 year in the future — discarding and using actual invoice dates`);
-        await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
-        periodEnd = null;
-      } else if (cachedPeriodEnd && cachedPeriodEnd > todayStr) {
-        // Future date but within 1 year — also suspicious, discard
-        LOG(`exportSalesInvoices: cached tallyPeriodEnd "${cachedPeriodEnd}" is in the future — discarding`);
-        await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
-        periodEnd = null;
-      } else if (cachedPeriodEnd && cachedPeriodEnd < thirtyDaysAgoStr) {
-        // Value is more than 30 days ago — only trust if it looks like a real FY/period end
-        // Accept: MMDD = 0331 (Mar 31), 0630 (Jun 30), 0930 (Sep 30), 1231 (Dec 31),
-        //         or any day-of-month that is the last day (common for EDU period ends like 0702)
+      if (cachedPeriodEnd && cachedPeriodEnd >= todayStr) {
         periodEnd = cachedPeriodEnd;
         LOG(`exportSalesInvoices: using cached periodEnd from DB: ${periodEnd}`);
       } else if (cachedPeriodEnd) {
-        periodEnd = cachedPeriodEnd;
-        LOG(`exportSalesInvoices: using cached periodEnd from DB: ${periodEnd}`);
+        LOG(`exportSalesInvoices: cached tallyPeriodEnd "${cachedPeriodEnd}" is in the past — discarding, using actual invoice dates`);
+        await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
+        periodEnd = null;
       } else {
-        periodEnd = null; // No capping — use actual invoice dates
-        LOG(`exportSalesInvoices: ⚠ periodEnd unknown — sending actual invoice dates (no capping). If Tally rejects, open Tally Settings → Test Connection to cache the period end.`);
+        periodEnd = null;
+        LOG(`exportSalesInvoices: periodEnd unknown — using actual invoice dates`);
       }
-    } else {
-      // Cache the period end in TallyConfig for fallback use
-      await TallyConfig.findOneAndUpdate({}, { tallyPeriodEnd: periodEnd }, { sort: { _id: 1 } });
     }
-    LOG(`exportSalesInvoices: voucher dates will be capped to ${periodEnd || '(none — actual dates will be used)'}`);
+    LOG(`exportSalesInvoices: voucher dates will be capped to ${periodEnd || '(none — actual invoice dates used)'}`);
 
     const failedItems  = [];
     const skippedItems = [];   // invoices skipped due to validation failure or dedup
