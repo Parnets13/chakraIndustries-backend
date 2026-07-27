@@ -425,7 +425,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const shipToName     = (invoiceData.shipToName    || invoiceData.shipToMailingName || '').toString().trim();
   const shipToAddress  = (invoiceData.shipToAddress || '').toString().trim();
   let   shipToCity     = (invoiceData.shipToCity    || '').toString().trim();
-  let   shipToState    = (invoiceData.shipToState   || '').toString().trim();
+  // shipToState: use stored value first, then fall back to partyState/billToState directly
+  // Many Excel formats store the consignee state in partyState (not shipToState)
+  let   shipToState    = (invoiceData.shipToState   || invoiceData.partyState || invoiceData.billToState || '').toString().trim();
   const rawShipToGST   = (invoiceData.shipToGST     || '').toString().trim();
   // Only store a valid 15-char GST number — reject dots, dashes, N/A, empty-like values
   const shipToGST      = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(rawShipToGST) ? rawShipToGST : '';
