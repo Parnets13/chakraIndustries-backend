@@ -468,6 +468,13 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     else if (pin >= 900001 && pin <= 999999) shipToState = 'Assam';
   }
 
+  // ── Final fallback: if shipToState is still empty, use bill-to state ──────
+  // This ensures CONSIGNEESTATENAME (Ship to place) is ALWAYS populated in Tally.
+  // Without this, ship-to place shows blank on the e-invoice print.
+  if (!shipToState) {
+    shipToState = (invoiceData.partyState || invoiceData.billToState || '').toString().trim();
+  }
+
   // ── Bill To fields ────────────────────────────────────────────────────────
   const billToName        = (invoiceData.billToName    || invoiceData.billToMailingName || partyLedgerName).toString().trim();
   const billToMailingName = (invoiceData.billToMailingName || invoiceData.billToName || partyLedgerName).toString().trim();
