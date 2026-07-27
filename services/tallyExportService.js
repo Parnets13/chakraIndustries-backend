@@ -1589,13 +1589,13 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   </BASICBASEPARTYDETAILS.LIST>`
     : '';
   // This must use shipTo data, NOT billTo data
-  const shipToXml = billToDetailsXml || shipToName || shipToGST || v.shipToPincode
+  const shipToXml = billToDetailsXml || shipToName
     ? `${billToDetailsXml}
   <CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
   <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>
   <CONSIGNEEGSTIN>${esc(shipToGST || '.')}</CONSIGNEEGSTIN>
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
-  ${v.shipToState ? `<CONSIGNEESTATENAME>${esc(v.shipToState)}</CONSIGNEESTATENAME>` : ''}
+  <CONSIGNEESTATENAME>${esc(v.shipToState || partyState || '')}</CONSIGNEESTATENAME>
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
     : '';
 
