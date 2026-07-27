@@ -1604,6 +1604,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   <CONSIGNEEGSTIN>${esc(shipToGST || '.')}</CONSIGNEEGSTIN>
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
   <CONSIGNEESTATENAME>${esc(v.shipToState || partyState || '')}</CONSIGNEESTATENAME>
+  <CONSIGNEEPLACE>${esc(v.shipToState || partyState || '')}</CONSIGNEEPLACE>
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
     : '';
 
