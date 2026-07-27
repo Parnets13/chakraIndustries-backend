@@ -1545,6 +1545,14 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const rawShipToGST = (v.shipToGST || '').trim();
   const shipToGST = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(rawShipToGST) ? rawShipToGST : '';
 
+  // ── GST / party state — defined here so fallbacks below can use it ────────
+  const partyGstIn = (v.partyGST || v.billToGST || '').trim();
+  const partyState = (v.partyState || v.billToState || cfg.state || '').trim();
+  const placeOfSupply = partyState || cfg.state || '';
+  const companyGstIn = (cfg.gstin || '').trim();
+  const companyState = (cfg.state || '').trim();
+  const companyRegLabel = `${companyState} Registration`;
+
   // ── ROOT-level buyer/consignee tags ──────────────────────────────────────
   // In Tally's XML:
   //   ROOT BASICBUYERNAME / BASICBUYERADDRESS  = Consignee (Ship To) on print
@@ -1609,14 +1617,6 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
   // BASICORDERREF = "Order No(s)" in Tally's Dispatch/Order Details section (visible on e-invoice print)
   const poOrderRefXml = v.buyersOrderNo ? `<BASICORDERREF>${esc(v.buyersOrderNo)}</BASICORDERREF>` : '';
-
-  // GST fields
-  const partyGstIn = (v.partyGST || v.billToGST || '').trim();
-  const partyState = (v.partyState || v.billToState || cfg.state || '').trim();
-  const placeOfSupply = partyState || cfg.state || '';
-  const companyGstIn = (cfg.gstin || '').trim();
-  const companyState = (cfg.state || '').trim();
-  const companyRegLabel = `${companyState} Registration`;
 
   // E-Invoice fields — written to Tally XML so the e-invoice prints with IRN/AckNo
   // Tally uses: IRN, ACKNO, ACKDATE (YYYYMMDD) at the voucher root level
