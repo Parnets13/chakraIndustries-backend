@@ -1593,7 +1593,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     ? `${billToDetailsXml}
   <CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
   <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>
-  ${shipToGST ? `<CONSIGNEEGSTIN>${esc(shipToGST)}</CONSIGNEEGSTIN>` : ''}
+  <CONSIGNEEGSTIN>${esc(shipToGST || '.')}</CONSIGNEEGSTIN>
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
   ${v.shipToState ? `<CONSIGNEESTATENAME>${esc(v.shipToState)}</CONSIGNEESTATENAME>` : ''}
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
