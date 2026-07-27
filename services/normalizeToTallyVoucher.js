@@ -425,9 +425,18 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const shipToName     = (invoiceData.shipToName    || invoiceData.shipToMailingName || '').toString().trim();
   const shipToAddress  = (invoiceData.shipToAddress || '').toString().trim();
   let   shipToCity     = (invoiceData.shipToCity    || '').toString().trim();
-  // shipToState: use stored value first, then fall back to partyState/billToState directly
-  // Many Excel formats store the consignee state in partyState (not shipToState)
-  let   shipToState    = (invoiceData.shipToState   || invoiceData.partyState || invoiceData.billToState || '').toString().trim();
+
+  // ── shipToState resolution — strict priority order ────────────────────────
+  // 1. Explicitly stored shipToState (set by Excel column "Ship To State")
+  // 2. Derived from ship-to pincode (most reliable for cross-state deliveries)
+  // 3. Keyword scan of shipToAddress / shipToCity text
+  // 4. Final fallback: bill-to / party state (only when genuinely same address)
+  //
+  // IMPORTANT: Do NOT fall back to partyState/billToState at step 1.
+  // That caused Karnataka (bill-to state) to leak into ship-to state for
+  // out-of-state consignees, producing wrong Place of Supply on the invoice.
+  let shipToState = (invoiceData.shipToState || '').toString().trim();
+
   const rawShipToGST   = (invoiceData.shipToGST     || '').toString().trim();
   // Only store a valid 15-char GST number — reject dots, dashes, N/A, empty-like values
   const shipToGST      = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(rawShipToGST) ? rawShipToGST : '';
@@ -443,7 +452,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     if (pinMatch) shipToPincode = pinMatch[1];
   }
 
-  // ── Derive state from pincode ranges only — no text keyword guessing ──────
+  // ── Derive state from pincode — runs even if shipToState is blank ─────────
+  // (pincode-based derivation is more reliable than text keywords or bill-to fallback)
   if (shipToPincode && !shipToState) {
     const pin = parseInt(shipToPincode, 10);
     if      (pin >= 110001 && pin <= 110999) shipToState = 'Delhi';
@@ -477,9 +487,46 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     else if (pin >= 814001 && pin <= 835999) shipToState = 'Jharkhand';
   }
 
-  // ── Final fallback: use bill-to state only if shipToState still empty ─────
+  // ── Keyword scan of address text (if pincode derivation didn't work) ──────
+  if (!shipToState && (shipToAddress || shipToCity)) {
+    const text = `${shipToAddress} ${shipToCity}`.toLowerCase();
+    const stateKeywords = [
+      ['gorakhpur', 'Uttar Pradesh'], ['lucknow', 'Uttar Pradesh'], ['noida', 'Uttar Pradesh'],
+      ['agra', 'Uttar Pradesh'], ['kanpur', 'Uttar Pradesh'], ['varanasi', 'Uttar Pradesh'],
+      ['mumbai', 'Maharashtra'], ['pune', 'Maharashtra'], ['nagpur', 'Maharashtra'],
+      ['delhi', 'Delhi'], ['new delhi', 'Delhi'], ['bengaluru', 'Karnataka'],
+      ['bangalore', 'Karnataka'], ['mysore', 'Karnataka'], ['hubli', 'Karnataka'],
+      ['chennai', 'Tamil Nadu'], ['coimbatore', 'Tamil Nadu'], ['madurai', 'Tamil Nadu'],
+      ['hyderabad', 'Telangana'], ['warangal', 'Telangana'],
+      ['kolkata', 'West Bengal'], ['howrah', 'West Bengal'],
+      ['ahmedabad', 'Gujarat'], ['surat', 'Gujarat'], ['vadodara', 'Gujarat'],
+      ['jaipur', 'Rajasthan'], ['jodhpur', 'Rajasthan'], ['udaipur', 'Rajasthan'],
+      ['bhopal', 'Madhya Pradesh'], ['indore', 'Madhya Pradesh'], ['gwalior', 'Madhya Pradesh'],
+      ['patna', 'Bihar'], ['gaya', 'Bihar'],
+      ['ranchi', 'Jharkhand'], ['jamshedpur', 'Jharkhand'],
+      ['raipur', 'Chhattisgarh'], ['bilaspur', 'Chhattisgarh'],
+      ['bhubaneswar', 'Odisha'], ['cuttack', 'Odisha'],
+      ['guwahati', 'Assam'],
+      ['kochi', 'Kerala'], ['thiruvananthapuram', 'Kerala'], ['kozhikode', 'Kerala'],
+      ['visakhapatnam', 'Andhra Pradesh'], ['vijayawada', 'Andhra Pradesh'],
+      ['chandigarh', 'Chandigarh'],
+      ['dehradun', 'Uttarakhand'],
+      ['shimla', 'Himachal Pradesh'],
+      ['amritsar', 'Punjab'], ['ludhiana', 'Punjab'],
+      ['gurgaon', 'Haryana'], ['faridabad', 'Haryana'], ['gurugram', 'Haryana'],
+    ];
+    for (const [kw, state] of stateKeywords) {
+      if (text.includes(kw)) { shipToState = state; break; }
+    }
+  }
+
+  // ── Final fallback: use bill-to state ONLY when ship-to name = bill-to name ─
+  // i.e. consignee and buyer are genuinely the same party
   if (!shipToState) {
-    shipToState = (invoiceData.partyState || invoiceData.billToState || '').toString().trim();
+    const sameParty = !shipToName || shipToName.toLowerCase() === (invoiceData.billToName || invoiceData.partyName || '').toString().toLowerCase();
+    if (sameParty) {
+      shipToState = (invoiceData.partyState || invoiceData.billToState || '').toString().trim();
+    }
   }
 
   // ── Bill To fields ────────────────────────────────────────────────────────
