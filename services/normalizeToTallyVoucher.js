@@ -438,11 +438,12 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
 
   // ── Extract pincode from shipToAddress if not stored separately ──────────
   if (shipToAddress && !shipToPincode) {
-    const pinMatch = shipToAddress.match(/[A-Za-z]?(\d{6})(?:\D|$)/);
+    // Match 6-digit number anywhere in the address, optionally preceded by letters
+    const pinMatch = shipToAddress.match(/(?<![0-9])(\d{6})(?![0-9])/);
     if (pinMatch) shipToPincode = pinMatch[1];
   }
 
-  // ── Derive state from pincode ranges ─────────────────────────────────────
+  // ── Derive state from pincode ranges only — no text keyword guessing ──────
   if (shipToPincode && !shipToState) {
     const pin = parseInt(shipToPincode, 10);
     if      (pin >= 110001 && pin <= 110999) shipToState = 'Delhi';
@@ -451,7 +452,6 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     else if (pin >= 160101 && pin <= 160163) shipToState = 'Chandigarh';
     else if (pin >= 171001 && pin <= 177999) shipToState = 'Himachal Pradesh';
     else if (pin >= 180001 && pin <= 194599) shipToState = 'Jammu and Kashmir';
-    else if (pin >= 194600 && pin <= 194599) shipToState = 'Ladakh';
     else if (pin >= 201001 && pin <= 285999) shipToState = 'Uttar Pradesh';
     else if (pin >= 301001 && pin <= 345999) shipToState = 'Rajasthan';
     else if (pin >= 360001 && pin <= 396999) shipToState = 'Gujarat';
@@ -464,7 +464,6 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     else if (pin >= 600001 && pin <= 643999) shipToState = 'Tamil Nadu';
     else if (pin >= 670001 && pin <= 695999) shipToState = 'Kerala';
     else if (pin >= 700001 && pin <= 743999) shipToState = 'West Bengal';
-    else if (pin >= 744101 && pin <= 744303) shipToState = 'Andaman and Nicobar Islands';
     else if (pin >= 751001 && pin <= 770099) shipToState = 'Odisha';
     else if (pin >= 781001 && pin <= 788999) shipToState = 'Assam';
     else if (pin >= 790001 && pin <= 792999) shipToState = 'Arunachal Pradesh';
@@ -476,61 +475,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     else if (pin >= 737101 && pin <= 737139) shipToState = 'Sikkim';
     else if (pin >= 800001 && pin <= 813999) shipToState = 'Bihar';
     else if (pin >= 814001 && pin <= 835999) shipToState = 'Jharkhand';
-    else if (pin >= 110001 && pin <= 110999) shipToState = 'Delhi';
   }
 
-  // ── Derive state from city/address text if still empty ───────────────────
-  // Many invoices don't have pincode — detect state from city or address text
-  if (!shipToState) {
-    const searchText = ((shipToAddress || '') + ' ' + (shipToCity || '')).toLowerCase();
-    const stateKeywords = [
-      ['andhra pradesh', 'Andhra Pradesh'], ['arunachal', 'Arunachal Pradesh'],
-      ['assam', 'Assam'], ['bihar', 'Bihar'], ['chhattisgarh', 'Chhattisgarh'],
-      ['goa', 'Goa'], ['gujarat', 'Gujarat'], ['haryana', 'Haryana'],
-      ['himachal', 'Himachal Pradesh'], ['jharkhand', 'Jharkhand'],
-      ['karnataka', 'Karnataka'], ['kerala', 'Kerala'],
-      ['madhya pradesh', 'Madhya Pradesh'], ['maharashtra', 'Maharashtra'],
-      ['manipur', 'Manipur'], ['meghalaya', 'Meghalaya'], ['mizoram', 'Mizoram'],
-      ['nagaland', 'Nagaland'], ['odisha', 'Odisha'], ['punjab', 'Punjab'],
-      ['rajasthan', 'Rajasthan'], ['sikkim', 'Sikkim'],
-      ['tamil nadu', 'Tamil Nadu'], ['telangana', 'Telangana'],
-      ['tripura', 'Tripura'], ['uttar pradesh', 'Uttar Pradesh'],
-      ['uttarakhand', 'Uttarakhand'], ['west bengal', 'West Bengal'],
-      ['delhi', 'Delhi'], ['jammu', 'Jammu and Kashmir'],
-      ['ladakh', 'Ladakh'], ['chandigarh', 'Chandigarh'],
-      // City → state mappings for common cities
-      ['mumbai', 'Maharashtra'], ['pune', 'Maharashtra'], ['nagpur', 'Maharashtra'],
-      ['bangalore', 'Karnataka'], ['bengaluru', 'Karnataka'], ['mysore', 'Karnataka'],
-      ['hyderabad', 'Telangana'], ['secunderabad', 'Telangana'],
-      ['chennai', 'Tamil Nadu'], ['coimbatore', 'Tamil Nadu'], ['madurai', 'Tamil Nadu'],
-      ['kolkata', 'West Bengal'], ['howrah', 'West Bengal'],
-      ['ahmedabad', 'Gujarat'], ['surat', 'Gujarat'], ['vadodara', 'Gujarat'],
-      ['jaipur', 'Rajasthan'], ['jodhpur', 'Rajasthan'], ['udaipur', 'Rajasthan'],
-      ['lucknow', 'Uttar Pradesh'], ['kanpur', 'Uttar Pradesh'], ['agra', 'Uttar Pradesh'],
-      ['varanasi', 'Uttar Pradesh'], ['allahabad', 'Uttar Pradesh'],
-      ['gorakhpur', 'Uttar Pradesh'], ['noida', 'Uttar Pradesh'], ['ghaziabad', 'Uttar Pradesh'],
-      ['patna', 'Bihar'], ['gaya', 'Bihar'],
-      ['bhopal', 'Madhya Pradesh'], ['indore', 'Madhya Pradesh'], ['gwalior', 'Madhya Pradesh'],
-      ['chandigarh', 'Chandigarh'], ['ludhiana', 'Punjab'], ['amritsar', 'Punjab'],
-      ['gurgaon', 'Haryana'], ['gurugram', 'Haryana'], ['faridabad', 'Haryana'],
-      ['dehradun', 'Uttarakhand'], ['haridwar', 'Uttarakhand'],
-      ['ranchi', 'Jharkhand'], ['jamshedpur', 'Jharkhand'],
-      ['raipur', 'Chhattisgarh'], ['bhilai', 'Chhattisgarh'],
-      ['bhubaneswar', 'Odisha'], ['cuttack', 'Odisha'],
-      ['guwahati', 'Assam'], ['dibrugarh', 'Assam'],
-      ['thiruvananthapuram', 'Kerala'], ['kochi', 'Kerala'], ['kozhikode', 'Kerala'],
-      ['visakhapatnam', 'Andhra Pradesh'], ['vijayawada', 'Andhra Pradesh'],
-      ['vishakhapatnam', 'Andhra Pradesh'],
-    ];
-    for (const [keyword, state] of stateKeywords) {
-      if (searchText.includes(keyword)) {
-        shipToState = state;
-        break;
-      }
-    }
-  }
-
-  // ── Final fallback: use bill-to state ────────────────────────────────────
+  // ── Final fallback: use bill-to state only if shipToState still empty ─────
   if (!shipToState) {
     shipToState = (invoiceData.partyState || invoiceData.billToState || '').toString().trim();
   }
