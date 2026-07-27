@@ -434,43 +434,101 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // customer) which Tally can silently reject during GST validation.
   let   shipToPincode  = (invoiceData.shipToPincode || '').toString().trim();
 
-  // ── Extract pincode/state from shipToAddress when separate fields are empty ─
-  // Raw data from Tally sync often arrives as one concatenated string like:
-  // "BASHA FOOTWEARSADUMNEAR POLICE STATION, SADUMAP517123"
-  // where state code + pincode are concatenated with no space.
+  // ── Extract pincode from shipToAddress if not stored separately ──────────
   if (shipToAddress && !shipToPincode) {
     const pinMatch = shipToAddress.match(/[A-Za-z]?(\d{6})(?:\D|$)/);
     if (pinMatch) shipToPincode = pinMatch[1];
   }
-  // Derive state from pincode ranges (reliable, no regex ambiguity)
+
+  // ── Derive state from pincode ranges ─────────────────────────────────────
   if (shipToPincode && !shipToState) {
     const pin = parseInt(shipToPincode, 10);
-    if      (pin >= 110001 && pin <= 110099) shipToState = 'Delhi';
+    if      (pin >= 110001 && pin <= 110999) shipToState = 'Delhi';
     else if (pin >= 120001 && pin <= 135999) shipToState = 'Haryana';
     else if (pin >= 140001 && pin <= 160099) shipToState = 'Punjab';
+    else if (pin >= 160101 && pin <= 160163) shipToState = 'Chandigarh';
     else if (pin >= 171001 && pin <= 177999) shipToState = 'Himachal Pradesh';
     else if (pin >= 180001 && pin <= 194599) shipToState = 'Jammu and Kashmir';
+    else if (pin >= 194600 && pin <= 194599) shipToState = 'Ladakh';
     else if (pin >= 201001 && pin <= 285999) shipToState = 'Uttar Pradesh';
     else if (pin >= 301001 && pin <= 345999) shipToState = 'Rajasthan';
     else if (pin >= 360001 && pin <= 396999) shipToState = 'Gujarat';
     else if (pin >= 400001 && pin <= 445999) shipToState = 'Maharashtra';
     else if (pin >= 450001 && pin <= 480999) shipToState = 'Madhya Pradesh';
     else if (pin >= 481001 && pin <= 497999) shipToState = 'Chhattisgarh';
-    else if (pin >= 500001 && pin <= 509999) shipToState = 'Telangana';
+    else if (pin >= 500001 && pin <= 514999) shipToState = 'Telangana';
     else if (pin >= 515001 && pin <= 535999) shipToState = 'Andhra Pradesh';
     else if (pin >= 560001 && pin <= 591999) shipToState = 'Karnataka';
     else if (pin >= 600001 && pin <= 643999) shipToState = 'Tamil Nadu';
-    else if (pin >= 682001 && pin <= 695999) shipToState = 'Kerala';
+    else if (pin >= 670001 && pin <= 695999) shipToState = 'Kerala';
     else if (pin >= 700001 && pin <= 743999) shipToState = 'West Bengal';
+    else if (pin >= 744101 && pin <= 744303) shipToState = 'Andaman and Nicobar Islands';
     else if (pin >= 751001 && pin <= 770099) shipToState = 'Odisha';
+    else if (pin >= 781001 && pin <= 788999) shipToState = 'Assam';
+    else if (pin >= 790001 && pin <= 792999) shipToState = 'Arunachal Pradesh';
+    else if (pin >= 793001 && pin <= 794999) shipToState = 'Meghalaya';
+    else if (pin >= 795001 && pin <= 795150) shipToState = 'Manipur';
+    else if (pin >= 796001 && pin <= 796901) shipToState = 'Mizoram';
+    else if (pin >= 797001 && pin <= 798627) shipToState = 'Nagaland';
+    else if (pin >= 799001 && pin <= 799290) shipToState = 'Tripura';
+    else if (pin >= 737101 && pin <= 737139) shipToState = 'Sikkim';
     else if (pin >= 800001 && pin <= 813999) shipToState = 'Bihar';
     else if (pin >= 814001 && pin <= 835999) shipToState = 'Jharkhand';
-    else if (pin >= 900001 && pin <= 999999) shipToState = 'Assam';
+    else if (pin >= 110001 && pin <= 110999) shipToState = 'Delhi';
   }
 
-  // ── Final fallback: if shipToState is still empty, use bill-to state ──────
-  // This ensures CONSIGNEESTATENAME (Ship to place) is ALWAYS populated in Tally.
-  // Without this, ship-to place shows blank on the e-invoice print.
+  // ── Derive state from city/address text if still empty ───────────────────
+  // Many invoices don't have pincode — detect state from city or address text
+  if (!shipToState) {
+    const searchText = ((shipToAddress || '') + ' ' + (shipToCity || '')).toLowerCase();
+    const stateKeywords = [
+      ['andhra pradesh', 'Andhra Pradesh'], ['arunachal', 'Arunachal Pradesh'],
+      ['assam', 'Assam'], ['bihar', 'Bihar'], ['chhattisgarh', 'Chhattisgarh'],
+      ['goa', 'Goa'], ['gujarat', 'Gujarat'], ['haryana', 'Haryana'],
+      ['himachal', 'Himachal Pradesh'], ['jharkhand', 'Jharkhand'],
+      ['karnataka', 'Karnataka'], ['kerala', 'Kerala'],
+      ['madhya pradesh', 'Madhya Pradesh'], ['maharashtra', 'Maharashtra'],
+      ['manipur', 'Manipur'], ['meghalaya', 'Meghalaya'], ['mizoram', 'Mizoram'],
+      ['nagaland', 'Nagaland'], ['odisha', 'Odisha'], ['punjab', 'Punjab'],
+      ['rajasthan', 'Rajasthan'], ['sikkim', 'Sikkim'],
+      ['tamil nadu', 'Tamil Nadu'], ['telangana', 'Telangana'],
+      ['tripura', 'Tripura'], ['uttar pradesh', 'Uttar Pradesh'],
+      ['uttarakhand', 'Uttarakhand'], ['west bengal', 'West Bengal'],
+      ['delhi', 'Delhi'], ['jammu', 'Jammu and Kashmir'],
+      ['ladakh', 'Ladakh'], ['chandigarh', 'Chandigarh'],
+      // City → state mappings for common cities
+      ['mumbai', 'Maharashtra'], ['pune', 'Maharashtra'], ['nagpur', 'Maharashtra'],
+      ['bangalore', 'Karnataka'], ['bengaluru', 'Karnataka'], ['mysore', 'Karnataka'],
+      ['hyderabad', 'Telangana'], ['secunderabad', 'Telangana'],
+      ['chennai', 'Tamil Nadu'], ['coimbatore', 'Tamil Nadu'], ['madurai', 'Tamil Nadu'],
+      ['kolkata', 'West Bengal'], ['howrah', 'West Bengal'],
+      ['ahmedabad', 'Gujarat'], ['surat', 'Gujarat'], ['vadodara', 'Gujarat'],
+      ['jaipur', 'Rajasthan'], ['jodhpur', 'Rajasthan'], ['udaipur', 'Rajasthan'],
+      ['lucknow', 'Uttar Pradesh'], ['kanpur', 'Uttar Pradesh'], ['agra', 'Uttar Pradesh'],
+      ['varanasi', 'Uttar Pradesh'], ['allahabad', 'Uttar Pradesh'],
+      ['gorakhpur', 'Uttar Pradesh'], ['noida', 'Uttar Pradesh'], ['ghaziabad', 'Uttar Pradesh'],
+      ['patna', 'Bihar'], ['gaya', 'Bihar'],
+      ['bhopal', 'Madhya Pradesh'], ['indore', 'Madhya Pradesh'], ['gwalior', 'Madhya Pradesh'],
+      ['chandigarh', 'Chandigarh'], ['ludhiana', 'Punjab'], ['amritsar', 'Punjab'],
+      ['gurgaon', 'Haryana'], ['gurugram', 'Haryana'], ['faridabad', 'Haryana'],
+      ['dehradun', 'Uttarakhand'], ['haridwar', 'Uttarakhand'],
+      ['ranchi', 'Jharkhand'], ['jamshedpur', 'Jharkhand'],
+      ['raipur', 'Chhattisgarh'], ['bhilai', 'Chhattisgarh'],
+      ['bhubaneswar', 'Odisha'], ['cuttack', 'Odisha'],
+      ['guwahati', 'Assam'], ['dibrugarh', 'Assam'],
+      ['thiruvananthapuram', 'Kerala'], ['kochi', 'Kerala'], ['kozhikode', 'Kerala'],
+      ['visakhapatnam', 'Andhra Pradesh'], ['vijayawada', 'Andhra Pradesh'],
+      ['vishakhapatnam', 'Andhra Pradesh'],
+    ];
+    for (const [keyword, state] of stateKeywords) {
+      if (searchText.includes(keyword)) {
+        shipToState = state;
+        break;
+      }
+    }
+  }
+
+  // ── Final fallback: use bill-to state ────────────────────────────────────
   if (!shipToState) {
     shipToState = (invoiceData.partyState || invoiceData.billToState || '').toString().trim();
   }
