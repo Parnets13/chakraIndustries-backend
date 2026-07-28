@@ -1454,7 +1454,36 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`;
 
     // Rate details for GST tax calculation
-    const rateDetailsXml = (item.rateDetails || []).map(rd => `
+    // If rateDetails are missing or all zero, derive from ledger entries (CGST/SGST/IGST amounts)
+    let effectiveRateDetails = (item.rateDetails || []).filter(rd => (rd.gstRate || 0) > 0);
+    if (effectiveRateDetails.length === 0) {
+      // Back-calculate from ledger entries
+      const itemAmt = parseFloat(item.amount) || 0;
+      if (itemAmt > 0) {
+        const cgstEntry = (v.allLedgerEntries || []).find(le => (le.ledgerName || '').toLowerCase().includes('cgst'));
+        const sgstEntry = (v.allLedgerEntries || []).find(le => (le.ledgerName || '').toLowerCase().includes('sgst'));
+        const igstEntry = (v.allLedgerEntries || []).find(le => (le.ledgerName || '').toLowerCase().includes('igst'));
+        const totalBase = (v.allInventoryEntries || []).reduce((s, ie) => s + (parseFloat(ie.amount) || 0), 0) || itemAmt;
+        const GST_SLABS = [0, 2.5, 5, 6, 9, 12, 14, 18, 28];
+        const snap = r => GST_SLABS.reduce((b, s) => Math.abs(s - r) < Math.abs(b - r) ? s : b, 0);
+        if (cgstEntry && totalBase > 0) {
+          const cgstAmt = Math.abs(parseFloat(cgstEntry.amount) || 0);
+          const cgstRate = snap((cgstAmt / totalBase) * 100);
+          if (cgstRate > 0) effectiveRateDetails.push({ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: cgstRate });
+        }
+        if (sgstEntry && totalBase > 0) {
+          const sgstAmt = Math.abs(parseFloat(sgstEntry.amount) || 0);
+          const sgstRate = snap((sgstAmt / totalBase) * 100);
+          if (sgstRate > 0) effectiveRateDetails.push({ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate });
+        }
+        if (igstEntry && totalBase > 0) {
+          const igstAmt = Math.abs(parseFloat(igstEntry.amount) || 0);
+          const igstRate = snap((igstAmt / totalBase) * 100);
+          if (igstRate > 0) effectiveRateDetails.push({ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: igstRate });
+        }
+      }
+    }
+    const rateDetailsXml = effectiveRateDetails.map(rd => `
       <RATEDETAILS.LIST>
         <GSTRATEDUTYHEAD>${esc(rd.gstRateDutyHead || '')}</GSTRATEDUTYHEAD>
         <GSTRATEEVALUATIONTYPE>${esc(rd.gstRateEvaluationType || 'Based on Value')}</GSTRATEEVALUATIONTYPE>
@@ -1684,14 +1713,15 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   </BASICBASEPARTYDETAILS.LIST>`
     : '';
   // This must use shipTo data, NOT billTo data
-  const shipToXml = billToDetailsXml || shipToName
+  // Send CONSIGNEEPLACE even when shipToName is blank — Tally needs it for Ship to place field
+  const shipToXml = billToDetailsXml || shipToName || resolvedShipToState
     ? `${billToDetailsXml}
-  <CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
-  <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>
+  ${shipToName ? `<CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
+  <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>` : ''}
   <CONSIGNEEGSTIN>${esc(shipToGST || '.')}</CONSIGNEEGSTIN>
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
-  <CONSIGNEESTATENAME>${esc(resolvedShipToState || partyState || '')}</CONSIGNEESTATENAME>
-  <CONSIGNEEPLACE>${esc(resolvedShipToState || partyState || '')}</CONSIGNEEPLACE>
+  ${resolvedShipToState ? `<CONSIGNEESTATENAME>${esc(resolvedShipToState)}</CONSIGNEESTATENAME>
+  <CONSIGNEEPLACE>${esc(resolvedShipToState)}</CONSIGNEEPLACE>` : ''}
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
     : '';
 

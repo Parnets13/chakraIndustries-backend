@@ -1315,8 +1315,8 @@ function buildSingleVoucherXml(inv, cfg) {
     : '';
   const shipToXml = shipToListXml || v.shipToGST || v.shipToPincode || resolvedShipToState
     ? `${shipToListXml}
-  <CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
-  <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>
+  ${shipToName ? `<CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
+  <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>` : ''}
   ${v.shipToGST ? `<CONSIGNEEGSTIN>${esc(v.shipToGST)}</CONSIGNEEGSTIN>` : ''}
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
   ${resolvedShipToState ? `<CONSIGNEESTATENAME>${esc(resolvedShipToState)}</CONSIGNEESTATENAME>
