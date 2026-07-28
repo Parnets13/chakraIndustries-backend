@@ -1307,7 +1307,8 @@ function buildSingleVoucherXml(inv, cfg) {
     ${billToAddressLines.length ? `<BASICBUYERADDRESS.LIST TYPE="String">
       ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n      ')}
     </BASICBUYERADDRESS.LIST>` : '<BASICBUYERADDRESS.LIST TYPE="String"></BASICBUYERADDRESS.LIST>'}
-    ${(v.billToState || v.partyState) ? `<BASICBUYERSTATENAME>${esc(v.billToState || v.partyState || '')}</BASICBUYERSTATENAME>` : ''}
+    ${(v.billToState || v.partyState) ? `<BASICBUYERSTATENAME>${esc(v.billToState || v.partyState || '')}</BASICBUYERSTATENAME>
+    <BASICBUYERPLACE>${esc(v.billToState || v.partyState || '')}</BASICBUYERPLACE>` : ''}
     ${(v.billToGST || v.partyGST) ? `<BASICBUYERGSTIN>${esc(v.billToGST || v.partyGST || '')}</BASICBUYERGSTIN>` : ''}
     ${billToPincode ? `<BASICBUYERPINCODE>${esc(billToPincode)}</BASICBUYERPINCODE>` : ''}
   </BASICBASEPARTYDETAILS.LIST>`
