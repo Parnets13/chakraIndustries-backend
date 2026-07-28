@@ -1217,7 +1217,9 @@ function buildSingleVoucherXml(inv, cfg) {
       else if (pin >= 160101 && pin <= 160163) return 'Chandigarh';
       else if (pin >= 171001 && pin <= 177999) return 'Himachal Pradesh';
       else if (pin >= 180001 && pin <= 194599) return 'Jammu and Kashmir';
-      else if (pin >= 201001 && pin <= 285999) return 'Uttar Pradesh';
+      else if (pin >= 201001 && pin <= 244999) return 'Uttar Pradesh';
+      else if (pin >= 245001 && pin <= 249999) return 'Uttarakhand';
+      else if (pin >= 250001 && pin <= 285999) return 'Uttar Pradesh';
       else if (pin >= 301001 && pin <= 345999) return 'Rajasthan';
       else if (pin >= 360001 && pin <= 396999) return 'Gujarat';
       else if (pin >= 400001 && pin <= 445999) return 'Maharashtra';
@@ -1240,6 +1242,7 @@ function buildSingleVoucherXml(inv, cfg) {
       else if (pin >= 737101 && pin <= 737139) return 'Sikkim';
       else if (pin >= 800001 && pin <= 813999) return 'Bihar';
       else if (pin >= 814001 && pin <= 835999) return 'Jharkhand';
+      else if (pin >= 836001 && pin <= 855999) return 'Bihar';
     }
     const text = `${addr} ${(v.shipToCity || '')}`.toLowerCase();
     const kws = [

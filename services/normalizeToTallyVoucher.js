@@ -475,7 +475,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     else if (pin >= 160101 && pin <= 160163) shipToState = 'Chandigarh';
     else if (pin >= 171001 && pin <= 177999) shipToState = 'Himachal Pradesh';
     else if (pin >= 180001 && pin <= 194599) shipToState = 'Jammu and Kashmir';
-    else if (pin >= 201001 && pin <= 285999) shipToState = 'Uttar Pradesh';
+    else if (pin >= 201001 && pin <= 244999) shipToState = 'Uttar Pradesh';
+    else if (pin >= 245001 && pin <= 249999) shipToState = 'Uttarakhand';
+    else if (pin >= 250001 && pin <= 285999) shipToState = 'Uttar Pradesh';
     else if (pin >= 301001 && pin <= 345999) shipToState = 'Rajasthan';
     else if (pin >= 360001 && pin <= 396999) shipToState = 'Gujarat';
     else if (pin >= 400001 && pin <= 445999) shipToState = 'Maharashtra';
@@ -498,6 +500,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     else if (pin >= 737101 && pin <= 737139) shipToState = 'Sikkim';
     else if (pin >= 800001 && pin <= 813999) shipToState = 'Bihar';
     else if (pin >= 814001 && pin <= 835999) shipToState = 'Jharkhand';
+    else if (pin >= 836001 && pin <= 855999) shipToState = 'Bihar';
   }
 
   // ── Keyword scan of address text (if pincode derivation didn't work) ──────
