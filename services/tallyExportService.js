@@ -1677,6 +1677,9 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     ${billToAddressLines.length ? `<BASICBUYERADDRESS.LIST TYPE="String">
       ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n      ')}
     </BASICBUYERADDRESS.LIST>` : '<BASICBUYERADDRESS.LIST TYPE="String"></BASICBUYERADDRESS.LIST>'}
+    ${(v.billToState || v.partyState) ? `<BASICBUYERSTATENAME>${esc(v.billToState || v.partyState || '')}</BASICBUYERSTATENAME>` : ''}
+    ${(v.billToGST || v.partyGST) ? `<BASICBUYERGSTIN>${esc(v.billToGST || v.partyGST || '')}</BASICBUYERGSTIN>` : ''}
+    ${billToPincode ? `<BASICBUYERPINCODE>${esc(billToPincode)}</BASICBUYERPINCODE>` : ''}
   </BASICBASEPARTYDETAILS.LIST>`
     : '';
   // This must use shipTo data, NOT billTo data
