@@ -1270,7 +1270,7 @@ function buildSingleVoucherXml(inv, cfg) {
     for (const [kw, state] of kws) {
       if (text.includes(kw)) return state;
     }
-    const sameParty = !shipToName || shipToName.toLowerCase() === (v.billToName || v.partyLedgerName || '').toLowerCase();
+    const sameParty = !shipToName;
     if (sameParty) return (v.partyState || v.billToState || '').trim();
     return '';
   };

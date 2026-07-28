@@ -1571,10 +1571,11 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const shipToName = (v.shipToName || '').trim();
 
   // ── Resolve shipToState — derive at export time if blank in DB ───────────
-  // Covers old invoices uploaded before the shipToState fix was deployed.
-  // Priority: 1) stored value  2) pincode from address  3) keyword scan  4) bill-to only if same party
+  // Priority: 1) stored value  2) pincode from address  3) keyword scan
+  // 4) bill-to ONLY if shipToName is genuinely blank (no separate consignee)
   const _resolveShipToState = () => {
-    let st = (v.shipToState || '').trim();
+    // Step 1: stored value — trust it completely, never override
+    const st = (v.shipToState || '').trim();
     if (st) return st;
 
     // Extract pincode from shipToAddress
@@ -1644,9 +1645,13 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
       if (text.includes(kw)) return state;
     }
 
-    // Final fallback: use bill-to state only if consignee = buyer (same party)
-    const sameParty = !shipToName || shipToName.toLowerCase() === (v.billToName || v.partyLedgerName || '').toLowerCase();
-    if (sameParty) return (v.partyState || v.billToState || '').trim();
+    // Step 4: fall back to bill-to state ONLY when there is no separate consignee at all
+    // i.e. shipToName is blank — meaning buyer and consignee are the same person
+    if (!shipToName) {
+      return (v.partyState || v.billToState || '').trim();
+    }
+    // shipToName is present but state couldn't be derived — return empty
+    // Tally will leave Ship to place blank rather than showing wrong state
     return '';
   };
   const resolvedShipToState = _resolveShipToState();

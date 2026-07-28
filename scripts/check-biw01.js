@@ -1,34 +1,28 @@
-import 'dotenv/config';
-import axios from 'axios';
+import dotenv from 'dotenv'; dotenv.config();
+import mongoose from 'mongoose';
+import Invoice from '../models/Invoice.js';
 
-const xml = `<ENVELOPE>
-<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>CheckDup</ID></HEADER>
-<BODY><DESC>
-  <STATICVARIABLES>
-    <SVCURRENTCOMPANY>SRI CHAKRA INDUSTRIES</SVCURRENTCOMPANY>
-    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-  </STATICVARIABLES>
-  <TDL><TDLMESSAGE>
-    <COLLECTION NAME="CheckDup">
-      <TYPE>Voucher</TYPE>
-      <FETCH>VoucherNumber, Date, VoucherTypeName, PartyLedgerName, Amount</FETCH>
-    </COLLECTION>
-  </TDLMESSAGE></TDL>
-</DESC></BODY>
-</ENVELOPE>`;
-
-const r = await axios.post('http://localhost:9000', xml, {
-  headers: { 'Content-Type': 'text/xml' }, timeout: 30000
-});
-const body = String(r.data);
-
-// Find all voucher numbers
-const voucherNos = [...body.matchAll(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/gi)].map(m => m[1].trim());
-console.log(`Total vouchers in Tally: ${voucherNos.length}`);
-
-// Check specifically for BIW01
-const biw = voucherNos.filter(v => v.toLowerCase().includes('biw'));
-console.log('BIW vouchers:', biw.length ? biw : '(none found)');
-
-// Show last 10 vouchers
-console.log('Last 10 voucher numbers:', voucherNos.slice(-10));
+await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URI);
+const inv = await Invoice.findOne({ invoiceNo: 'BIW01' }).lean();
+if (inv) {
+  console.log('=== INVOICE BIW01 ===');
+  console.log('shipToName   :', JSON.stringify(inv.shipToName));
+  console.log('shipToAddress:', JSON.stringify(inv.shipToAddress));
+  console.log('shipToState  :', JSON.stringify(inv.shipToState));
+  console.log('billToState  :', JSON.stringify(inv.billToState));
+  console.log('partyState   :', JSON.stringify(inv.partyState));
+  const tv = inv.tallyVoucher;
+  if (tv) {
+    console.log('--- tallyVoucher ---');
+    console.log('tv.shipToName   :', JSON.stringify(tv.shipToName));
+    console.log('tv.shipToState  :', JSON.stringify(tv.shipToState));
+    console.log('tv.shipToAddress:', JSON.stringify(tv.shipToAddress));
+    console.log('tv.billToState  :', JSON.stringify(tv.billToState));
+    console.log('tv.partyState   :', JSON.stringify(tv.partyState));
+  } else {
+    console.log('tallyVoucher: NULL');
+  }
+} else {
+  console.log('BIW01 NOT FOUND in DB');
+}
+await mongoose.disconnect();
