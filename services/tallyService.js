@@ -856,9 +856,70 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   </ALLINVENTORYENTRIES.LIST>`;
       }).join('') : '';
 
-      // ── Bill To / Ship To — stripped pending confirmed-working test ──────────
-      const batchBillToXml = '';
-      const batchShipToXml = '';
+      // ── Bill To / Ship To ────────────────────────────────────────────────
+      const _batchEsc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const _batchResolveShipState = () => {
+        const stored = (inv.shipToState || inv.tallyVoucher?.shipToState || '').trim();
+        if (stored) return stored;
+        const addr = (inv.shipToAddress || inv.tallyVoucher?.shipToAddress || '').trim();
+        const pinMatch = addr.match(/(?<![0-9])(\d{6})(?![0-9])/);
+        if (pinMatch) {
+          const pin = parseInt(pinMatch[1], 10);
+          if (pin>=110001&&pin<=110999) return 'Delhi';
+          if (pin>=120001&&pin<=135999) return 'Haryana';
+          if (pin>=140001&&pin<=160099) return 'Punjab';
+          if (pin>=171001&&pin<=177999) return 'Himachal Pradesh';
+          if (pin>=180001&&pin<=194599) return 'Jammu and Kashmir';
+          if (pin>=201001&&pin<=244999) return 'Uttar Pradesh';
+          if (pin>=245001&&pin<=249999) return 'Uttarakhand';
+          if (pin>=250001&&pin<=285999) return 'Uttar Pradesh';
+          if (pin>=301001&&pin<=345999) return 'Rajasthan';
+          if (pin>=360001&&pin<=396999) return 'Gujarat';
+          if (pin>=400001&&pin<=445999) return 'Maharashtra';
+          if (pin>=450001&&pin<=480999) return 'Madhya Pradesh';
+          if (pin>=481001&&pin<=497999) return 'Chhattisgarh';
+          if (pin>=500001&&pin<=514999) return 'Telangana';
+          if (pin>=515001&&pin<=535999) return 'Andhra Pradesh';
+          if (pin>=560001&&pin<=591999) return 'Karnataka';
+          if (pin>=600001&&pin<=643999) return 'Tamil Nadu';
+          if (pin>=670001&&pin<=695999) return 'Kerala';
+          if (pin>=700001&&pin<=743999) return 'West Bengal';
+          if (pin>=751001&&pin<=770099) return 'Odisha';
+          if (pin>=781001&&pin<=788999) return 'Assam';
+          if (pin>=800001&&pin<=813999) return 'Bihar';
+          if (pin>=814001&&pin<=835999) return 'Jharkhand';
+          if (pin>=836001&&pin<=855999) return 'Bihar';
+        }
+        return '';
+      };
+      const batchShipState   = _batchResolveShipState();
+      const batchBillState   = (inv.billToState || inv.partyState || inv.tallyVoucher?.billToState || '').trim();
+      const batchShipName    = (inv.shipToName || inv.tallyVoucher?.shipToName || '').trim();
+      const batchBillName    = (inv.billToName || inv.partyName || '').trim();
+      const batchBillGstin   = (inv.billToGST || inv.partyGST || inv.tallyVoucher?.billToGST || '').trim();
+      const batchBillAddr    = (inv.billToAddress || inv.partyAddress || inv.tallyVoucher?.billToAddress || '').trim();
+      const batchShipAddr    = (inv.shipToAddress || inv.tallyVoucher?.shipToAddress || '').trim();
+      const batchBillPincode = (inv.billToPincode || inv.partyPostal || '').trim();
+
+      const batchBillToXml = batchBillName ? `
+  <BASICBUYERNAME>${_batchEsc(batchShipName || batchBillName)}</BASICBUYERNAME>
+  <PARTYMAILINGNAME>${_batchEsc(batchBillName)}</PARTYMAILINGNAME>
+  ${batchBillPincode ? `<PARTYPINCODE>${_batchEsc(batchBillPincode)}</PARTYPINCODE>` : ''}
+  ${batchShipName && batchBillName ? `<BASICBASEPARTYDETAILS.LIST>
+    <BASICBUYERNAME>${_batchEsc(batchBillName)}</BASICBUYERNAME>
+    <PARTYMAILINGNAME>${_batchEsc(batchBillName)}</PARTYMAILINGNAME>
+    ${batchBillState ? `<BASICBUYERSTATENAME>${_batchEsc(batchBillState)}</BASICBUYERSTATENAME>
+    <BASICBUYERPLACE>${_batchEsc(batchBillState)}</BASICBUYERPLACE>` : ''}
+    ${batchBillGstin ? `<BASICBUYERGSTIN>${_batchEsc(batchBillGstin)}</BASICBUYERGSTIN>` : ''}
+    ${batchBillPincode ? `<BASICBUYERPINCODE>${_batchEsc(batchBillPincode)}</BASICBUYERPINCODE>` : ''}
+  </BASICBASEPARTYDETAILS.LIST>` : ''}` : '';
+
+      const batchShipToXml = (batchShipName || batchShipState) ? `
+  ${batchShipName ? `<CONSIGNEENAME>${_batchEsc(batchShipName)}</CONSIGNEENAME>
+  <CONSIGNEEMAILINGNAME>${_batchEsc(batchShipName)}</CONSIGNEEMAILINGNAME>` : ''}
+  <CONSIGNEEGSTIN>.</CONSIGNEEGSTIN>
+  ${batchShipState ? `<CONSIGNEESTATENAME>${_batchEsc(batchShipState)}</CONSIGNEESTATENAME>
+  <CONSIGNEEPLACE>${_batchEsc(batchShipState)}</CONSIGNEEPLACE>` : ''}` : '';
 
       const vXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
