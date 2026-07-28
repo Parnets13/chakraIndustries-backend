@@ -160,16 +160,10 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const rawCGSTsum  = (invoiceData.cgstTotal && invoiceData.cgstTotal > 0) ? invoiceData.cgstTotal : itemCGSTsum;
   const rawSGSTsum  = (invoiceData.sgstTotal && invoiceData.sgstTotal > 0) ? invoiceData.sgstTotal : itemSGSTsum;
   const rawIGST     = (invoiceData.igstTotal && invoiceData.igstTotal > 0) ? invoiceData.igstTotal : itemIGSTsum;
-  // ── Determine interstate based on ship-to state vs company state ─────────
-  // Priority: 
-  //   1. If Excel has IGST > 0 → interstate
-  //   2. If shipToState is different from company state (Karnataka) → interstate
-  //   3. Otherwise intrastate (CGST+SGST)
-  const COMPANY_STATE = 'Karnataka';
-  const shipToStateForTax = (invoiceData.shipToState || '').toString().trim();
-  const isInterstateByState = shipToStateForTax
-    && shipToStateForTax.toLowerCase() !== COMPANY_STATE.toLowerCase();
-  const isInterstate = rawIGST > 0 || isInterstateByState;
+  // ── Determine interstate based on Excel data only ────────────────────────
+  // Use IGST amount from Excel — if IGST > 0 then interstate, else intrastate
+  // Do NOT auto-detect from state comparison — use exactly what Excel provides
+  const isInterstate = rawIGST > 0;
 
   // ── Invoice-level fallback rate (used only when item has no taxRate) ──────
   const firstItem = items[0] || {};
@@ -184,10 +178,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // Invoice-level fallback half-rates (used only when per-item rate is 0)
   const cgstHalfRate = isInterstate ? 0 : snapToSlab(gstRateFull / 2);
   const sgstHalfRate = isInterstate ? 0 : snapToSlab(gstRateFull / 2);
-  // igstFullRate: when interstate detected by state comparison, convert CGST+SGST total to IGST
-  // e.g. CGST 2.5% + SGST 2.5% = 5% total → IGST 5%
-  const cgstSgstTotal = snapToSlab((snapToSlab(gstRateFull / 2) * 2));
-  const igstFullRate  = isInterstate ? (gstRateFull || cgstSgstTotal) : 0;
+  const igstFullRate = isInterstate ? gstRateFull : 0;
 
   // ── Valid items & taxable amounts ─────────────────────────────────────────
   // Use qty × rate as the authoritative taxable base per item.
@@ -209,8 +200,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   //   3. Invoice-level fallback gstRateFull — last resort
   let totalCGST = 0, totalSGST = 0, totalIGST = 0;
   const itemTaxRates = validItems.map((item, i) => {
-    // Interstate if: invoice-level isInterstate OR this item has igst > 0
-    const itemIsInterstate = isInterstate || (+(item.igst || 0)) > 0;
+    // Interstate only if this specific item has igst > 0 in Excel
+    const itemIsInterstate = (+(item.igst || 0)) > 0;
     const itemAmt = itemAmounts[i];
 
     // Step 1: try item.taxRate directly
