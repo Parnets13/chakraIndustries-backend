@@ -27,9 +27,23 @@ const userSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['super_admin', 'management', 'purchase_manager', 'production_manager', 'dealer', 'corporate_client'],
+    enum: [
+      'super_admin', 'management', 'purchase_manager', 'production_manager',
+      'dealer', 'corporate_client', 'employee', 'delivery_logistics',
+    ],
     default: 'purchase_manager',
   },
+  mobileNumber: { type: String, trim: true },
+  department: { type: String, trim: true },
+  designation: { type: String, trim: true },
+  joiningDate: { type: Date },
+  gender: { type: String, trim: true },
+  gstNumber: { type: String, trim: true },
+  panNumber: { type: String, trim: true },
+  industry: { type: String, trim: true },
+  profilePhoto: { type: String },
+  drivingLicence: { type: String, trim: true },
+  vehicleNumber: { type: String, trim: true },
   // Dealer-specific fields
   dealerCode: {
     type: String,

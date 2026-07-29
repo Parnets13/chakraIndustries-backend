@@ -79,6 +79,9 @@ import poGeneratorRoutes from './routes/poGeneratorRoutes.js';
 import brsRoutes from './routes/brsRoutes.js';
 import financeRoutes from './routes/financeRoutes.js';
 import productionRoutes from './routes/productionRoutes.js';
+import employeeRoutes from './routes/employeeRoutes.js';
+import deliveryAgentRoutes from './routes/deliveryAgentRoutes.js';
+import productMasterRoutes from './routes/productMasterRoutes.js';
 import { initConnectorServer, getConnectorStatuses } from './services/tallyConnectorServer.js';
 
 // Ensure new models are registered
@@ -150,6 +153,8 @@ import './models/ReturnQC.js';
 import './models/SortingJob.js';
 import './models/Task.js';
 import './models/User.js';
+import './models/Employeeproduct.js';
+import './models/ProductMaster.js';
 import './models/Vendor.js';
 import './models/VendorPrice.js';
 import './models/WarehouseGateEntry.js';
@@ -158,8 +163,18 @@ import './models/WorkOrder.js';
 
 dotenv.config();
 
+process.on('uncaughtException', (err) => {
+  console.error('🔥 UNCAUGHT EXCEPTION:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('🔥 UNHANDLED REJECTION:', reason);
+});
+
 // Server configuration
 const app = express();
+app.set('trust proxy', 1);  
+
+
 
 // Rate limiting middleware — relaxed for local dev, tighter for production
 const limiter = rateLimit({
@@ -172,9 +187,15 @@ const limiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
-    // Skip rate limiting for localhost in development
     const ip = req.ip || req.connection?.remoteAddress || '';
-    return process.env.NODE_ENV !== 'production' && (ip === '::1' || ip === '127.0.0.1' || ip.includes('::ffff:127.0.0.1'));
+    // Skip for localhost
+    if (ip === '::1' || ip === '127.0.0.1' || ip.includes('::ffff:127.0.0.1')) return true;
+    // Skip for LAN/mobile devices in development (192.168.x.x, 10.x.x.x)
+    if (process.env.NODE_ENV !== 'production') {
+      const clean = ip.replace('::ffff:', '');
+      if (/^192\.168\.\d+\.\d+$/.test(clean) || /^10\.\d+\.\d+\.\d+$/.test(clean)) return true;
+    }
+    return false;
   },
 });
 
@@ -182,8 +203,10 @@ const limiter = rateLimit({
 app.use(limiter);
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, Postman)
+    // Mobile apps (React Native) send no Origin header — always allow
     if (!origin) return callback(null, true);
+    // In development allow all origins (LAN testing)
+    if (process.env.NODE_ENV !== 'production') return callback(null, true);
     const allowed = [
       'http://localhost:5000/api/api',
       'https://erp.majesticmall.net',
@@ -295,11 +318,17 @@ app.use('/api/po-generator', poGeneratorRoutes);
 app.use('/api/brs', brsRoutes);
 app.use('/api/finance', financeRoutes);
 app.use('/api/production-entries', productionRoutes);
+app.use('/api/employees', employeeRoutes);
+app.use('/api/delivery-agent', deliveryAgentRoutes);
+app.use('/api/product-master', productMasterRoutes);
 
-// Health check
-// eslint-disable-next-line no-unused-vars
+// Health check — mobile app uses this to verify server is reachable
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'Server is running' });
+  res.json({
+    status: 'Server is running',
+    timestamp: new Date().toISOString(),
+    employees: '/api/employees/register',
+  });
 });
 
 // Error handling middleware
@@ -326,8 +355,8 @@ initConnectorServer(httpServer);
 httpServer.timeout = 2 * 60 * 60 * 1000; // 2 hours
 httpServer.keepAliveTimeout = 65000; // 65 seconds, longer than heartbeat interval
 
-httpServer.listen(PORT, async () => {
-  console.log(`✓ Server running on port ${PORT}`);
+httpServer.listen(PORT, '0.0.0.0', async () => {
+  console.log(`✓ Server running on port ${PORT} (accessible on LAN)`);
   console.log(`✓ Connector Socket.IO server ready`);
   startTallyScheduler();
 
