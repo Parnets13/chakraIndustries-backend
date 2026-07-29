@@ -1,41 +1,33 @@
-import 'dotenv/config';
+import dotenv from 'dotenv'; dotenv.config();
 import mongoose from 'mongoose';
-import TallySyncLog from '../models/TallySyncLog.js';
 import Invoice from '../models/Invoice.js';
 
-await mongoose.connect(process.env.MONGO_URI);
+await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URI);
 
-// Recent Sales export logs
-const logs = await TallySyncLog.find({ type: 'Sales' }).sort({ createdAt: -1 }).limit(15).lean();
-console.log('=== Recent Sales export logs ===');
-if (!logs.length) {
-  console.log('  No Sales sync logs found at all.');
-} else {
-  logs.forEach(l => console.log(
-    new Date(l.createdAt).toLocaleString('en-IN'),
-    '|', l.status,
-    '| records:', l.records,
-    '| error:', (l.error || 'none').slice(0, 100)
-  ));
-}
+const total = await Invoice.countDocuments({ source: 'excel_upload' });
+const synced = await Invoice.countDocuments({ source: 'excel_upload', tallySync: true });
+const pending = await Invoice.countDocuments({ source: 'excel_upload', tallySync: { $ne: true } });
+const failed = await Invoice.countDocuments({ source: 'excel_upload', retryCount: { $gte: 3 } });
 
-// Invoice tallySync breakdown
-const synced   = await Invoice.countDocuments({ tallySync: true });
-const pending  = await Invoice.find({ tallySync: { $ne: true }, source: { $nin: ['Tally','tally'] }, status: { $nin: ['Cancelled'] } }).lean();
+console.log('Total invoices:', total);
+console.log('Synced:', synced);
+console.log('Pending:', pending);
+console.log('Failed (retryCount>=3):', failed);
 
-console.log('\n=== Invoice tallySync status ===');
-console.log('  tallySync=true  (marked as exported):', synced);
-console.log('  tallySync=false (pending, never sent):', pending.length);
-
-if (pending.length > 0) {
-  console.log('\nPending invoices (BIW series + others):');
-  pending.forEach(inv => console.log(
-    ' ', inv.invoiceNo,
-    '| party:', inv.partyName,
-    '| amount: ₹' + inv.grandTotal,
-    '| tallySync:', inv.tallySync,
-    '| tallySyncAt:', inv.tallySyncAt || 'never'
-  ));
+// Show first 5 pending
+const pendingInvs = await Invoice.find({ source: 'excel_upload', tallySync: { $ne: true } })
+  .limit(5).lean();
+for (const inv of pendingInvs) {
+  console.log(`\n${inv.invoiceNo}: retryCount=${inv.retryCount||0} tallySync=${inv.tallySync}`);
+  console.log('  shipToName:', inv.shipToName);
+  console.log('  shipToState:', inv.shipToState);
+  const tv = inv.tallyVoucher;
+  if (tv) {
+    console.log('  tv.shipToState:', tv.shipToState);
+    console.log('  tv.shipToName:', tv.shipToName);
+  } else {
+    console.log('  tallyVoucher: NULL');
+  }
 }
 
 await mongoose.disconnect();

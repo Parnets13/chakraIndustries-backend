@@ -709,10 +709,8 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
     const autoLedgerXml = [
       // System ledgers — Tally skips if already present
       `<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT></LEDGER>`,
-      // Rate-specific GST ledgers: TAXTYPE="Others" + RATEOFTAXCALCULATION is what
-      // makes Tally print the correct % (e.g. 2.5%, 9%) on the invoice.
-      // TAXTYPE="Central Tax" / "State Tax" forces 0% — that is the bug seen on print.
-      // ACTION="Alter" creates them if missing AND fixes them if they exist with wrong type.
+      // Rate-specific GST ledgers: TAXTYPE=Others + RATEOFTAXCALCULATION.
+      // Do NOT use SUBTYPE — it causes silent EXCEPTIONS=1 in some Tally versions.
       `<LEDGER NAME="Output CGST @ 2.5%" ACTION="Alter"><NAME>Output CGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
       `<LEDGER NAME="Output SGST @ 2.5%" ACTION="Alter"><NAME>Output SGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
       `<LEDGER NAME="Output CGST @ 6%" ACTION="Alter"><NAME>Output CGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
@@ -858,9 +856,70 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
   </ALLINVENTORYENTRIES.LIST>`;
       }).join('') : '';
 
-      // ── Bill To / Ship To — stripped pending confirmed-working test ──────────
-      const batchBillToXml = '';
-      const batchShipToXml = '';
+      // ── Bill To / Ship To ────────────────────────────────────────────────
+      const _batchEsc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const _batchResolveShipState = () => {
+        const stored = (inv.shipToState || inv.tallyVoucher?.shipToState || '').trim();
+        if (stored) return stored;
+        const addr = (inv.shipToAddress || inv.tallyVoucher?.shipToAddress || '').trim();
+        const pinMatch = addr.match(/(?<![0-9])(\d{6})(?![0-9])/);
+        if (pinMatch) {
+          const pin = parseInt(pinMatch[1], 10);
+          if (pin>=110001&&pin<=110999) return 'Delhi';
+          if (pin>=120001&&pin<=135999) return 'Haryana';
+          if (pin>=140001&&pin<=160099) return 'Punjab';
+          if (pin>=171001&&pin<=177999) return 'Himachal Pradesh';
+          if (pin>=180001&&pin<=194599) return 'Jammu and Kashmir';
+          if (pin>=201001&&pin<=244999) return 'Uttar Pradesh';
+          if (pin>=245001&&pin<=249999) return 'Uttarakhand';
+          if (pin>=250001&&pin<=285999) return 'Uttar Pradesh';
+          if (pin>=301001&&pin<=345999) return 'Rajasthan';
+          if (pin>=360001&&pin<=396999) return 'Gujarat';
+          if (pin>=400001&&pin<=445999) return 'Maharashtra';
+          if (pin>=450001&&pin<=480999) return 'Madhya Pradesh';
+          if (pin>=481001&&pin<=497999) return 'Chhattisgarh';
+          if (pin>=500001&&pin<=514999) return 'Telangana';
+          if (pin>=515001&&pin<=535999) return 'Andhra Pradesh';
+          if (pin>=560001&&pin<=591999) return 'Karnataka';
+          if (pin>=600001&&pin<=643999) return 'Tamil Nadu';
+          if (pin>=670001&&pin<=695999) return 'Kerala';
+          if (pin>=700001&&pin<=743999) return 'West Bengal';
+          if (pin>=751001&&pin<=770099) return 'Odisha';
+          if (pin>=781001&&pin<=788999) return 'Assam';
+          if (pin>=800001&&pin<=813999) return 'Bihar';
+          if (pin>=814001&&pin<=835999) return 'Jharkhand';
+          if (pin>=836001&&pin<=855999) return 'Bihar';
+        }
+        return '';
+      };
+      const batchShipState   = _batchResolveShipState();
+      const batchBillState   = (inv.billToState || inv.partyState || inv.tallyVoucher?.billToState || '').trim();
+      const batchShipName    = (inv.shipToName || inv.tallyVoucher?.shipToName || '').trim();
+      const batchBillName    = (inv.billToName || inv.partyName || '').trim();
+      const batchBillGstin   = (inv.billToGST || inv.partyGST || inv.tallyVoucher?.billToGST || '').trim();
+      const batchBillAddr    = (inv.billToAddress || inv.partyAddress || inv.tallyVoucher?.billToAddress || '').trim();
+      const batchShipAddr    = (inv.shipToAddress || inv.tallyVoucher?.shipToAddress || '').trim();
+      const batchBillPincode = (inv.billToPincode || inv.partyPostal || '').trim();
+
+      const batchBillToXml = batchBillName ? `
+  <BASICBUYERNAME>${_batchEsc(batchShipName || batchBillName)}</BASICBUYERNAME>
+  <PARTYMAILINGNAME>${_batchEsc(batchBillName)}</PARTYMAILINGNAME>
+  ${batchBillPincode ? `<PARTYPINCODE>${_batchEsc(batchBillPincode)}</PARTYPINCODE>` : ''}
+  ${batchShipName && batchBillName ? `<BASICBASEPARTYDETAILS.LIST>
+    <BASICBUYERNAME>${_batchEsc(batchBillName)}</BASICBUYERNAME>
+    <PARTYMAILINGNAME>${_batchEsc(batchBillName)}</PARTYMAILINGNAME>
+    ${batchBillState ? `<BASICBUYERSTATENAME>${_batchEsc(batchBillState)}</BASICBUYERSTATENAME>
+    <BASICBUYERPLACE>${_batchEsc(batchBillState)}</BASICBUYERPLACE>` : ''}
+    ${batchBillGstin ? `<BASICBUYERGSTIN>${_batchEsc(batchBillGstin)}</BASICBUYERGSTIN>` : ''}
+    ${batchBillPincode ? `<BASICBUYERPINCODE>${_batchEsc(batchBillPincode)}</BASICBUYERPINCODE>` : ''}
+  </BASICBASEPARTYDETAILS.LIST>` : ''}` : '';
+
+      const batchShipToXml = (batchShipName || batchShipState) ? `
+  ${batchShipName ? `<CONSIGNEENAME>${_batchEsc(batchShipName)}</CONSIGNEENAME>
+  <CONSIGNEEMAILINGNAME>${_batchEsc(batchShipName)}</CONSIGNEEMAILINGNAME>` : ''}
+  <CONSIGNEEGSTIN>.</CONSIGNEEGSTIN>
+  ${batchShipState ? `<CONSIGNEESTATENAME>${_batchEsc(batchShipState)}</CONSIGNEESTATENAME>
+  <CONSIGNEEPLACE>${_batchEsc(batchShipState)}</CONSIGNEEPLACE>` : ''}` : '';
 
       const vXml = `
 <VOUCHER VCHTYPE="Sales" ACTION="${action}" OBJVIEW="Invoice Voucher View">
@@ -1204,7 +1263,84 @@ function buildSingleVoucherXml(inv, cfg) {
   const billToAddressLines = normalizeAddressLines(v.billToAddress || '', v.billToCity || '', v.billToState || '', billToPincode);
 
   const shipToName = (v.shipToName || '').trim();
-  const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', v.shipToState || '', v.shipToPincode || '');
+
+  // ── Resolve shipToState — derive at export time if blank in DB ───────────
+  const _resolveShipToStateSvc = () => {
+    let st = (v.shipToState || '').trim();
+    if (st) return st;
+    const addr = (v.shipToAddress || '').trim();
+    const pinMatch = addr.match(/(?<![0-9])(\d{6})(?![0-9])/);
+    if (pinMatch) {
+      const pin = parseInt(pinMatch[1], 10);
+      if      (pin >= 110001 && pin <= 110999) return 'Delhi';
+      else if (pin >= 120001 && pin <= 135999) return 'Haryana';
+      else if (pin >= 140001 && pin <= 160099) return 'Punjab';
+      else if (pin >= 160101 && pin <= 160163) return 'Chandigarh';
+      else if (pin >= 171001 && pin <= 177999) return 'Himachal Pradesh';
+      else if (pin >= 180001 && pin <= 194599) return 'Jammu and Kashmir';
+      else if (pin >= 201001 && pin <= 244999) return 'Uttar Pradesh';
+      else if (pin >= 245001 && pin <= 249999) return 'Uttarakhand';
+      else if (pin >= 250001 && pin <= 285999) return 'Uttar Pradesh';
+      else if (pin >= 301001 && pin <= 345999) return 'Rajasthan';
+      else if (pin >= 360001 && pin <= 396999) return 'Gujarat';
+      else if (pin >= 400001 && pin <= 445999) return 'Maharashtra';
+      else if (pin >= 450001 && pin <= 480999) return 'Madhya Pradesh';
+      else if (pin >= 481001 && pin <= 497999) return 'Chhattisgarh';
+      else if (pin >= 500001 && pin <= 514999) return 'Telangana';
+      else if (pin >= 515001 && pin <= 535999) return 'Andhra Pradesh';
+      else if (pin >= 560001 && pin <= 591999) return 'Karnataka';
+      else if (pin >= 600001 && pin <= 643999) return 'Tamil Nadu';
+      else if (pin >= 670001 && pin <= 695999) return 'Kerala';
+      else if (pin >= 700001 && pin <= 743999) return 'West Bengal';
+      else if (pin >= 751001 && pin <= 770099) return 'Odisha';
+      else if (pin >= 781001 && pin <= 788999) return 'Assam';
+      else if (pin >= 790001 && pin <= 792999) return 'Arunachal Pradesh';
+      else if (pin >= 793001 && pin <= 794999) return 'Meghalaya';
+      else if (pin >= 795001 && pin <= 795150) return 'Manipur';
+      else if (pin >= 796001 && pin <= 796901) return 'Mizoram';
+      else if (pin >= 797001 && pin <= 798627) return 'Nagaland';
+      else if (pin >= 799001 && pin <= 799290) return 'Tripura';
+      else if (pin >= 737101 && pin <= 737139) return 'Sikkim';
+      else if (pin >= 800001 && pin <= 813999) return 'Bihar';
+      else if (pin >= 814001 && pin <= 835999) return 'Jharkhand';
+      else if (pin >= 836001 && pin <= 855999) return 'Bihar';
+    }
+    const text = `${addr} ${(v.shipToCity || '')}`.toLowerCase();
+    const kws = [
+      ['gorakhpur','Uttar Pradesh'],['lucknow','Uttar Pradesh'],['noida','Uttar Pradesh'],
+      ['agra','Uttar Pradesh'],['kanpur','Uttar Pradesh'],['varanasi','Uttar Pradesh'],
+      ['allahabad','Uttar Pradesh'],['prayagraj','Uttar Pradesh'],['meerut','Uttar Pradesh'],
+      ['mumbai','Maharashtra'],['pune','Maharashtra'],['nagpur','Maharashtra'],['thane','Maharashtra'],
+      ['delhi','Delhi'],['new delhi','Delhi'],
+      ['bengaluru','Karnataka'],['bangalore','Karnataka'],['mysore','Karnataka'],
+      ['chennai','Tamil Nadu'],['coimbatore','Tamil Nadu'],['madurai','Tamil Nadu'],
+      ['hyderabad','Telangana'],['warangal','Telangana'],['secunderabad','Telangana'],
+      ['kolkata','West Bengal'],['howrah','West Bengal'],
+      ['ahmedabad','Gujarat'],['surat','Gujarat'],['vadodara','Gujarat'],['rajkot','Gujarat'],
+      ['jaipur','Rajasthan'],['jodhpur','Rajasthan'],['udaipur','Rajasthan'],
+      ['bhopal','Madhya Pradesh'],['indore','Madhya Pradesh'],['gwalior','Madhya Pradesh'],
+      ['patna','Bihar'],['gaya','Bihar'],['muzaffarpur','Bihar'],
+      ['ranchi','Jharkhand'],['jamshedpur','Jharkhand'],['dhanbad','Jharkhand'],
+      ['raipur','Chhattisgarh'],['bilaspur','Chhattisgarh'],
+      ['bhubaneswar','Odisha'],['cuttack','Odisha'],
+      ['guwahati','Assam'],
+      ['kochi','Kerala'],['thiruvananthapuram','Kerala'],['kozhikode','Kerala'],
+      ['visakhapatnam','Andhra Pradesh'],['vijayawada','Andhra Pradesh'],
+      ['chandigarh','Chandigarh'],['dehradun','Uttarakhand'],
+      ['shimla','Himachal Pradesh'],
+      ['amritsar','Punjab'],['ludhiana','Punjab'],['jalandhar','Punjab'],
+      ['gurgaon','Haryana'],['faridabad','Haryana'],['gurugram','Haryana'],
+    ];
+    for (const [kw, state] of kws) {
+      if (text.includes(kw)) return state;
+    }
+    const sameParty = !shipToName;
+    if (sameParty) return (v.partyState || v.billToState || '').trim();
+    return '';
+  };
+  const resolvedShipToState = _resolveShipToStateSvc();
+
+  const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', resolvedShipToState, v.shipToPincode || '');
 
   // ROOT level: ship-to data when present, else bill-to
   // FIX: PARTYMAILINGNAME is the Bill To mailing name — must always be billToMailingName,
@@ -1235,15 +1371,20 @@ function buildSingleVoucherXml(inv, cfg) {
     ${billToAddressLines.length ? `<BASICBUYERADDRESS.LIST TYPE="String">
       ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n      ')}
     </BASICBUYERADDRESS.LIST>` : '<BASICBUYERADDRESS.LIST TYPE="String"></BASICBUYERADDRESS.LIST>'}
+    ${(v.billToState || v.partyState) ? `<BASICBUYERSTATENAME>${esc(v.billToState || v.partyState || '')}</BASICBUYERSTATENAME>
+    <BASICBUYERPLACE>${esc(v.billToState || v.partyState || '')}</BASICBUYERPLACE>` : ''}
+    ${(v.billToGST || v.partyGST) ? `<BASICBUYERGSTIN>${esc(v.billToGST || v.partyGST || '')}</BASICBUYERGSTIN>` : ''}
+    ${billToPincode ? `<BASICBUYERPINCODE>${esc(billToPincode)}</BASICBUYERPINCODE>` : ''}
   </BASICBASEPARTYDETAILS.LIST>`
     : '';
-  const shipToXml = shipToListXml || v.shipToGST || v.shipToPincode
+  const shipToXml = shipToListXml || v.shipToGST || v.shipToPincode || resolvedShipToState
     ? `${shipToListXml}
-  <CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
-  <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>
+  ${shipToName ? `<CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
+  <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>` : ''}
   ${v.shipToGST ? `<CONSIGNEEGSTIN>${esc(v.shipToGST)}</CONSIGNEEGSTIN>` : ''}
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
-  ${v.shipToState ? `<CONSIGNEESTATENAME>${esc(v.shipToState)}</CONSIGNEESTATENAME>` : ''}
+  ${resolvedShipToState ? `<CONSIGNEESTATENAME>${esc(resolvedShipToState)}</CONSIGNEESTATENAME>
+  <CONSIGNEEPLACE>${esc(resolvedShipToState)}</CONSIGNEEPLACE>` : ''}
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
     : '';
 

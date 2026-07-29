@@ -160,6 +160,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const rawCGSTsum  = (invoiceData.cgstTotal && invoiceData.cgstTotal > 0) ? invoiceData.cgstTotal : itemCGSTsum;
   const rawSGSTsum  = (invoiceData.sgstTotal && invoiceData.sgstTotal > 0) ? invoiceData.sgstTotal : itemSGSTsum;
   const rawIGST     = (invoiceData.igstTotal && invoiceData.igstTotal > 0) ? invoiceData.igstTotal : itemIGSTsum;
+  // ── Determine interstate based on Excel data only ────────────────────────
+  // Use IGST amount from Excel — if IGST > 0 then interstate, else intrastate
+  // Do NOT auto-detect from state comparison — use exactly what Excel provides
   const isInterstate = rawIGST > 0;
 
   // ── Invoice-level fallback rate (used only when item has no taxRate) ──────
@@ -197,6 +200,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   //   3. Invoice-level fallback gstRateFull — last resort
   let totalCGST = 0, totalSGST = 0, totalIGST = 0;
   const itemTaxRates = validItems.map((item, i) => {
+    // Interstate only if this specific item has igst > 0 in Excel
     const itemIsInterstate = (+(item.igst || 0)) > 0;
     const itemAmt = itemAmounts[i];
 
@@ -347,7 +351,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       rateOfInvoiceTax: cgstHalfRate,  // tells Tally this entry is at 2.5% — fixes "0%" display
     });
   }
-
+ 
   // 3. SGST
   if (ledgerSGST > 0 && sgstLedger) {
     allLedgerEntries.push({
@@ -425,45 +429,111 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const shipToName     = (invoiceData.shipToName    || invoiceData.shipToMailingName || '').toString().trim();
   const shipToAddress  = (invoiceData.shipToAddress || '').toString().trim();
   let   shipToCity     = (invoiceData.shipToCity    || '').toString().trim();
-  let   shipToState    = (invoiceData.shipToState   || '').toString().trim();
-  const shipToGST      = (invoiceData.shipToGST     || '').toString().trim();
+
+  // ── shipToState resolution — strict priority order ────────────────────────
+  // 1. Explicitly stored shipToState (set by Excel column "Ship To State")
+  // 2. Derived from ship-to pincode (most reliable for cross-state deliveries)
+  // 3. Keyword scan of shipToAddress / shipToCity text
+  // 4. Final fallback: bill-to / party state (only when genuinely same address)
+  //
+  // IMPORTANT: Do NOT fall back to partyState/billToState at step 1.
+  // That caused Karnataka (bill-to state) to leak into ship-to state for
+  // out-of-state consignees, producing wrong Place of Supply on the invoice.
+  let shipToState = (invoiceData.shipToState || '').toString().trim();
+
+  const rawShipToGST   = (invoiceData.shipToGST     || '').toString().trim();
+  // Only store a valid 15-char GST number — reject dots, dashes, N/A, empty-like values
+  const shipToGST      = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(rawShipToGST) ? rawShipToGST : '';
   // Ship-to data must not inherit the bill-to postal code.  Doing so creates a
   // misleading partial consignee block (a name from ship-to plus a pin from the
   // customer) which Tally can silently reject during GST validation.
   let   shipToPincode  = (invoiceData.shipToPincode || '').toString().trim();
 
-  // ── Extract pincode/state from shipToAddress when separate fields are empty ─
-  // Raw data from Tally sync often arrives as one concatenated string like:
-  // "BASHA FOOTWEARSADUMNEAR POLICE STATION, SADUMAP517123"
-  // where state code + pincode are concatenated with no space.
+  // ── Extract pincode from shipToAddress if not stored separately ──────────
   if (shipToAddress && !shipToPincode) {
-    const pinMatch = shipToAddress.match(/[A-Za-z]?(\d{6})(?:\D|$)/);
+    // Match 6-digit number anywhere in the address, optionally preceded by letters
+    const pinMatch = shipToAddress.match(/(?<![0-9])(\d{6})(?![0-9])/);
     if (pinMatch) shipToPincode = pinMatch[1];
   }
-  // Derive state from pincode ranges (reliable, no regex ambiguity)
+
+  // ── Derive state from pincode — runs even if shipToState is blank ─────────
+  // (pincode-based derivation is more reliable than text keywords or bill-to fallback)
   if (shipToPincode && !shipToState) {
     const pin = parseInt(shipToPincode, 10);
-    if      (pin >= 110001 && pin <= 110099) shipToState = 'Delhi';
+    if      (pin >= 110001 && pin <= 110999) shipToState = 'Delhi';
     else if (pin >= 120001 && pin <= 135999) shipToState = 'Haryana';
     else if (pin >= 140001 && pin <= 160099) shipToState = 'Punjab';
+    else if (pin >= 160101 && pin <= 160163) shipToState = 'Chandigarh';
     else if (pin >= 171001 && pin <= 177999) shipToState = 'Himachal Pradesh';
     else if (pin >= 180001 && pin <= 194599) shipToState = 'Jammu and Kashmir';
-    else if (pin >= 201001 && pin <= 285999) shipToState = 'Uttar Pradesh';
+    else if (pin >= 201001 && pin <= 244999) shipToState = 'Uttar Pradesh';
+    else if (pin >= 245001 && pin <= 249999) shipToState = 'Uttarakhand';
+    else if (pin >= 250001 && pin <= 285999) shipToState = 'Uttar Pradesh';
     else if (pin >= 301001 && pin <= 345999) shipToState = 'Rajasthan';
     else if (pin >= 360001 && pin <= 396999) shipToState = 'Gujarat';
     else if (pin >= 400001 && pin <= 445999) shipToState = 'Maharashtra';
     else if (pin >= 450001 && pin <= 480999) shipToState = 'Madhya Pradesh';
     else if (pin >= 481001 && pin <= 497999) shipToState = 'Chhattisgarh';
-    else if (pin >= 500001 && pin <= 509999) shipToState = 'Telangana';
+    else if (pin >= 500001 && pin <= 514999) shipToState = 'Telangana';
     else if (pin >= 515001 && pin <= 535999) shipToState = 'Andhra Pradesh';
     else if (pin >= 560001 && pin <= 591999) shipToState = 'Karnataka';
     else if (pin >= 600001 && pin <= 643999) shipToState = 'Tamil Nadu';
-    else if (pin >= 682001 && pin <= 695999) shipToState = 'Kerala';
+    else if (pin >= 670001 && pin <= 695999) shipToState = 'Kerala';
     else if (pin >= 700001 && pin <= 743999) shipToState = 'West Bengal';
     else if (pin >= 751001 && pin <= 770099) shipToState = 'Odisha';
+    else if (pin >= 781001 && pin <= 788999) shipToState = 'Assam';
+    else if (pin >= 790001 && pin <= 792999) shipToState = 'Arunachal Pradesh';
+    else if (pin >= 793001 && pin <= 794999) shipToState = 'Meghalaya';
+    else if (pin >= 795001 && pin <= 795150) shipToState = 'Manipur';
+    else if (pin >= 796001 && pin <= 796901) shipToState = 'Mizoram';
+    else if (pin >= 797001 && pin <= 798627) shipToState = 'Nagaland';
+    else if (pin >= 799001 && pin <= 799290) shipToState = 'Tripura';
+    else if (pin >= 737101 && pin <= 737139) shipToState = 'Sikkim';
     else if (pin >= 800001 && pin <= 813999) shipToState = 'Bihar';
     else if (pin >= 814001 && pin <= 835999) shipToState = 'Jharkhand';
-    else if (pin >= 900001 && pin <= 999999) shipToState = 'Assam';
+    else if (pin >= 836001 && pin <= 855999) shipToState = 'Bihar';
+  }
+
+  // ── Keyword scan of address text (if pincode derivation didn't work) ──────
+  if (!shipToState && (shipToAddress || shipToCity)) {
+    const text = `${shipToAddress} ${shipToCity}`.toLowerCase();
+    const stateKeywords = [
+      ['gorakhpur', 'Uttar Pradesh'], ['lucknow', 'Uttar Pradesh'], ['noida', 'Uttar Pradesh'],
+      ['agra', 'Uttar Pradesh'], ['kanpur', 'Uttar Pradesh'], ['varanasi', 'Uttar Pradesh'],
+      ['mumbai', 'Maharashtra'], ['pune', 'Maharashtra'], ['nagpur', 'Maharashtra'],
+      ['delhi', 'Delhi'], ['new delhi', 'Delhi'], ['bengaluru', 'Karnataka'],
+      ['bangalore', 'Karnataka'], ['mysore', 'Karnataka'], ['hubli', 'Karnataka'],
+      ['chennai', 'Tamil Nadu'], ['coimbatore', 'Tamil Nadu'], ['madurai', 'Tamil Nadu'],
+      ['hyderabad', 'Telangana'], ['warangal', 'Telangana'],
+      ['kolkata', 'West Bengal'], ['howrah', 'West Bengal'],
+      ['ahmedabad', 'Gujarat'], ['surat', 'Gujarat'], ['vadodara', 'Gujarat'],
+      ['jaipur', 'Rajasthan'], ['jodhpur', 'Rajasthan'], ['udaipur', 'Rajasthan'],
+      ['bhopal', 'Madhya Pradesh'], ['indore', 'Madhya Pradesh'], ['gwalior', 'Madhya Pradesh'],
+      ['patna', 'Bihar'], ['gaya', 'Bihar'],
+      ['ranchi', 'Jharkhand'], ['jamshedpur', 'Jharkhand'],
+      ['raipur', 'Chhattisgarh'], ['bilaspur', 'Chhattisgarh'],
+      ['bhubaneswar', 'Odisha'], ['cuttack', 'Odisha'],
+      ['guwahati', 'Assam'],
+      ['kochi', 'Kerala'], ['thiruvananthapuram', 'Kerala'], ['kozhikode', 'Kerala'],
+      ['visakhapatnam', 'Andhra Pradesh'], ['vijayawada', 'Andhra Pradesh'],
+      ['chandigarh', 'Chandigarh'],
+      ['dehradun', 'Uttarakhand'],
+      ['shimla', 'Himachal Pradesh'],
+      ['amritsar', 'Punjab'], ['ludhiana', 'Punjab'],
+      ['gurgaon', 'Haryana'], ['faridabad', 'Haryana'], ['gurugram', 'Haryana'],
+    ];
+    for (const [kw, state] of stateKeywords) {
+      if (text.includes(kw)) { shipToState = state; break; }
+    }
+  }
+
+  // ── Final fallback: use bill-to state ONLY when ship-to name = bill-to name ─
+  // i.e. consignee and buyer are genuinely the same party
+  if (!shipToState) {
+    const sameParty = !shipToName || shipToName.toLowerCase() === (invoiceData.billToName || invoiceData.partyName || '').toString().toLowerCase();
+    if (sameParty) {
+      shipToState = (invoiceData.partyState || invoiceData.billToState || '').toString().trim();
+    }
   }
 
   // ── Bill To fields ────────────────────────────────────────────────────────
@@ -473,7 +543,15 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const billToCity        = (invoiceData.billToCity    || invoiceData.partyCity    || '').toString().trim();
   const billToState       = (invoiceData.billToState   || invoiceData.partyState   || '').toString().trim();
   const billToGST         = (invoiceData.billToGST     || invoiceData.partyGST     || '').toString().trim();
-  const billToPincode     = (invoiceData.billToPincode || invoiceData.partyPostal || '').toString().trim();
+
+  // ── billToPincode: use stored value, or extract from address if missing ───
+  // Old invoices uploaded before the frontend fix won't have billToPincode stored.
+  // Extract the 6-digit pincode from the address string as fallback.
+  let billToPincode = (invoiceData.billToPincode || invoiceData.partyPostal || '').toString().trim();
+  if (!billToPincode && billToAddress) {
+    const pinMatch = billToAddress.match(/\b(\d{6})\b/);
+    if (pinMatch) billToPincode = pinMatch[1];
+  }
 
   // ── Party GST / State (Step 6 fields) ────────────────────────────────────
   const partyGST      = (invoiceData.partyGST   || '').toString().trim();

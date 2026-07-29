@@ -1454,7 +1454,36 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`;
 
     // Rate details for GST tax calculation
-    const rateDetailsXml = (item.rateDetails || []).map(rd => `
+    // If rateDetails are missing or all zero, derive from ledger entries (CGST/SGST/IGST amounts)
+    let effectiveRateDetails = (item.rateDetails || []).filter(rd => (rd.gstRate || 0) > 0);
+    if (effectiveRateDetails.length === 0) {
+      // Back-calculate from ledger entries
+      const itemAmt = parseFloat(item.amount) || 0;
+      if (itemAmt > 0) {
+        const cgstEntry = (v.allLedgerEntries || []).find(le => (le.ledgerName || '').toLowerCase().includes('cgst'));
+        const sgstEntry = (v.allLedgerEntries || []).find(le => (le.ledgerName || '').toLowerCase().includes('sgst'));
+        const igstEntry = (v.allLedgerEntries || []).find(le => (le.ledgerName || '').toLowerCase().includes('igst'));
+        const totalBase = (v.allInventoryEntries || []).reduce((s, ie) => s + (parseFloat(ie.amount) || 0), 0) || itemAmt;
+        const GST_SLABS = [0, 2.5, 5, 6, 9, 12, 14, 18, 28];
+        const snap = r => GST_SLABS.reduce((b, s) => Math.abs(s - r) < Math.abs(b - r) ? s : b, 0);
+        if (cgstEntry && totalBase > 0) {
+          const cgstAmt = Math.abs(parseFloat(cgstEntry.amount) || 0);
+          const cgstRate = snap((cgstAmt / totalBase) * 100);
+          if (cgstRate > 0) effectiveRateDetails.push({ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: cgstRate });
+        }
+        if (sgstEntry && totalBase > 0) {
+          const sgstAmt = Math.abs(parseFloat(sgstEntry.amount) || 0);
+          const sgstRate = snap((sgstAmt / totalBase) * 100);
+          if (sgstRate > 0) effectiveRateDetails.push({ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate });
+        }
+        if (igstEntry && totalBase > 0) {
+          const igstAmt = Math.abs(parseFloat(igstEntry.amount) || 0);
+          const igstRate = snap((igstAmt / totalBase) * 100);
+          if (igstRate > 0) effectiveRateDetails.push({ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: igstRate });
+        }
+      }
+    }
+    const rateDetailsXml = effectiveRateDetails.map(rd => `
       <RATEDETAILS.LIST>
         <GSTRATEDUTYHEAD>${esc(rd.gstRateDutyHead || '')}</GSTRATEDUTYHEAD>
         <GSTRATEEVALUATIONTYPE>${esc(rd.gstRateEvaluationType || 'Based on Value')}</GSTRATEEVALUATIONTYPE>
@@ -1508,13 +1537,17 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
         .map(line => line.trim())
         .filter(Boolean);
       for (let line of chunks) {
-        // Strip any embedded pincode from this line — pincodes are 6-digit Indian postal codes.
-        // They appear in three forms:
-        //   "Bangalore-560995"  → strip "-560995"
-        //   "Bangalore 560995"  → strip " 560995"
-        //   "560995"            → skip the line entirely (standalone pincode)
-        line = line.replace(/[-\s]\d{6}$/, '').trim();  // remove trailing -NNNNNN or space NNNNNN
-        if (!line || /^\d{6}$/.test(line)) continue;    // skip standalone 6-digit pincode lines
+        // Remove 6-digit pincode in all positions:
+        //   "Bangalore-560042" → "Bangalore"
+        //   "560042 Karnataka" → "Karnataka"
+        //   "560042"           → skip entirely
+        //   "Ulsoor Bangalore 560042" → "Ulsoor Bangalore"
+        line = line
+          .replace(/\b\d{6}\b[-\s]*/g, '')  // remove pincode + trailing dash/space
+          .replace(/[-\s]*\b\d{6}\b/g, '')  // remove leading dash/space + pincode
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!line) continue;
         if (!lines.some(existing => existing.toLowerCase() === line.toLowerCase())) {
           lines.push(line);
         }
@@ -1526,9 +1559,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     if (state && !lines.some(line => line.toLowerCase().includes(state.toLowerCase()))) {
       lines.push(state);
     }
-    // Pincode is NOT added to address lines — it is emitted separately via
-    // <PARTYPINCODE> / <CONSIGNEEPINCODE> tags. Adding it here causes Tally
-    // to render it appended to the city line (e.g. "Bangalore-560995").
+    // Pincode goes into <PARTYPINCODE> / <CONSIGNEEPINCODE> tags — NOT in address lines.
     return lines;
   };
 
@@ -1538,7 +1569,109 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const billToAddressLines = normalizeAddressLines(v.billToAddress || '', v.billToCity || '', v.billToState || '', billToPincode);
 
   const shipToName = (v.shipToName || '').trim();
-  const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', v.shipToState || '', v.shipToPincode || '');
+
+  // ── Resolve shipToState — derive at export time if blank in DB ───────────
+  // Priority: 1) stored value  2) pincode from address  3) keyword scan
+  // 4) bill-to ONLY if shipToName is genuinely blank (no separate consignee)
+  const _resolveShipToState = () => {
+    // Step 1: stored value — trust it completely, never override
+    const st = (v.shipToState || '').trim();
+    if (st) return st;
+
+    // Extract pincode from shipToAddress
+    const addr = (v.shipToAddress || '').trim();
+    const pinMatch = addr.match(/(?<![0-9])(\d{6})(?![0-9])/);
+    if (pinMatch) {
+      const pin = parseInt(pinMatch[1], 10);
+      if      (pin >= 110001 && pin <= 110999) return 'Delhi';
+      else if (pin >= 120001 && pin <= 135999) return 'Haryana';
+      else if (pin >= 140001 && pin <= 160099) return 'Punjab';
+      else if (pin >= 160101 && pin <= 160163) return 'Chandigarh';
+      else if (pin >= 171001 && pin <= 177999) return 'Himachal Pradesh';
+      else if (pin >= 180001 && pin <= 194599) return 'Jammu and Kashmir';
+      else if (pin >= 201001 && pin <= 244999) return 'Uttar Pradesh';
+      else if (pin >= 245001 && pin <= 249999) return 'Uttarakhand';
+      else if (pin >= 250001 && pin <= 285999) return 'Uttar Pradesh';
+      else if (pin >= 301001 && pin <= 345999) return 'Rajasthan';
+      else if (pin >= 360001 && pin <= 396999) return 'Gujarat';
+      else if (pin >= 400001 && pin <= 445999) return 'Maharashtra';
+      else if (pin >= 450001 && pin <= 480999) return 'Madhya Pradesh';
+      else if (pin >= 481001 && pin <= 497999) return 'Chhattisgarh';
+      else if (pin >= 500001 && pin <= 514999) return 'Telangana';
+      else if (pin >= 515001 && pin <= 535999) return 'Andhra Pradesh';
+      else if (pin >= 560001 && pin <= 591999) return 'Karnataka';
+      else if (pin >= 600001 && pin <= 643999) return 'Tamil Nadu';
+      else if (pin >= 670001 && pin <= 695999) return 'Kerala';
+      else if (pin >= 700001 && pin <= 743999) return 'West Bengal';
+      else if (pin >= 751001 && pin <= 770099) return 'Odisha';
+      else if (pin >= 781001 && pin <= 788999) return 'Assam';
+      else if (pin >= 790001 && pin <= 792999) return 'Arunachal Pradesh';
+      else if (pin >= 793001 && pin <= 794999) return 'Meghalaya';
+      else if (pin >= 795001 && pin <= 795150) return 'Manipur';
+      else if (pin >= 796001 && pin <= 796901) return 'Mizoram';
+      else if (pin >= 797001 && pin <= 798627) return 'Nagaland';
+      else if (pin >= 799001 && pin <= 799290) return 'Tripura';
+      else if (pin >= 737101 && pin <= 737139) return 'Sikkim';
+      else if (pin >= 800001 && pin <= 813999) return 'Bihar';
+      else if (pin >= 814001 && pin <= 835999) return 'Jharkhand';
+      else if (pin >= 836001 && pin <= 855999) return 'Bihar';
+    }
+
+    // Keyword scan of address + city text
+    const text = `${addr} ${(v.shipToCity || '')}`.toLowerCase();
+    const kws = [
+      ['gorakhpur','Uttar Pradesh'],['lucknow','Uttar Pradesh'],['noida','Uttar Pradesh'],
+      ['agra','Uttar Pradesh'],['kanpur','Uttar Pradesh'],['varanasi','Uttar Pradesh'],
+      ['allahabad','Uttar Pradesh'],['prayagraj','Uttar Pradesh'],['meerut','Uttar Pradesh'],
+      ['mumbai','Maharashtra'],['pune','Maharashtra'],['nagpur','Maharashtra'],['thane','Maharashtra'],
+      ['delhi','Delhi'],['new delhi','Delhi'],
+      ['bengaluru','Karnataka'],['bangalore','Karnataka'],['mysore','Karnataka'],['hubli','Karnataka'],
+      ['chennai','Tamil Nadu'],['coimbatore','Tamil Nadu'],['madurai','Tamil Nadu'],
+      ['hyderabad','Telangana'],['warangal','Telangana'],['secunderabad','Telangana'],
+      ['kolkata','West Bengal'],['howrah','West Bengal'],
+      ['ahmedabad','Gujarat'],['surat','Gujarat'],['vadodara','Gujarat'],['rajkot','Gujarat'],
+      ['jaipur','Rajasthan'],['jodhpur','Rajasthan'],['udaipur','Rajasthan'],['kota','Rajasthan'],
+      ['bhopal','Madhya Pradesh'],['indore','Madhya Pradesh'],['gwalior','Madhya Pradesh'],
+      ['patna','Bihar'],['gaya','Bihar'],['muzaffarpur','Bihar'],
+      ['ranchi','Jharkhand'],['jamshedpur','Jharkhand'],['dhanbad','Jharkhand'],
+      ['raipur','Chhattisgarh'],['bilaspur','Chhattisgarh'],
+      ['bhubaneswar','Odisha'],['cuttack','Odisha'],
+      ['guwahati','Assam'],['dibrugarh','Assam'],
+      ['kochi','Kerala'],['thiruvananthapuram','Kerala'],['kozhikode','Kerala'],
+      ['visakhapatnam','Andhra Pradesh'],['vijayawada','Andhra Pradesh'],['guntur','Andhra Pradesh'],
+      ['chandigarh','Chandigarh'],['dehradun','Uttarakhand'],
+      ['shimla','Himachal Pradesh'],['manali','Himachal Pradesh'],
+      ['amritsar','Punjab'],['ludhiana','Punjab'],['jalandhar','Punjab'],
+      ['gurgaon','Haryana'],['faridabad','Haryana'],['gurugram','Haryana'],['panipat','Haryana'],
+    ];
+    for (const [kw, state] of kws) {
+      if (text.includes(kw)) return state;
+    }
+
+    // Step 4: fall back to bill-to state ONLY when there is no separate consignee at all
+    // i.e. shipToName is blank — meaning buyer and consignee are the same person
+    if (!shipToName) {
+      return (v.partyState || v.billToState || '').trim();
+    }
+    // shipToName is present but state couldn't be derived — return empty
+    // Tally will leave Ship to place blank rather than showing wrong state
+    return '';
+  };
+  const resolvedShipToState = _resolveShipToState();
+
+  const shipToAddressLines = normalizeAddressLines(v.shipToAddress || '', v.shipToCity || '', resolvedShipToState, v.shipToPincode || '');
+  // Clean shipToGST — reject dots, dashes, N/A, empty-like values
+  const rawShipToGST = (v.shipToGST || '').trim();
+  const shipToGST = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(rawShipToGST) ? rawShipToGST : '';
+
+  // ── GST / party state — defined here so fallbacks below can use it ────────
+  const partyGstIn = (v.partyGST || v.billToGST || '').trim();
+  const partyState = (v.partyState || v.billToState || cfg.state || '').trim();
+  // Place of Supply = ship-to state (GST law) → fallback to bill-to/party state
+  const placeOfSupply = resolvedShipToState || partyState || cfg.state || '';
+  const companyGstIn = (cfg.gstin || '').trim();
+  const companyState = (cfg.state || '').trim();
+  const companyRegLabel = `${companyState} Registration`;
 
   // ── ROOT-level buyer/consignee tags ──────────────────────────────────────
   // In Tally's XML:
@@ -1581,16 +1714,22 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     ${billToAddressLines.length ? `<BASICBUYERADDRESS.LIST TYPE="String">
       ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n      ')}
     </BASICBUYERADDRESS.LIST>` : '<BASICBUYERADDRESS.LIST TYPE="String"></BASICBUYERADDRESS.LIST>'}
+    ${(v.billToState || v.partyState) ? `<BASICBUYERSTATENAME>${esc(v.billToState || v.partyState || '')}</BASICBUYERSTATENAME>
+    <BASICBUYERPLACE>${esc(v.billToState || v.partyState || '')}</BASICBUYERPLACE>` : ''}
+    ${(v.billToGST || v.partyGST) ? `<BASICBUYERGSTIN>${esc(v.billToGST || v.partyGST || '')}</BASICBUYERGSTIN>` : ''}
+    ${billToPincode ? `<BASICBUYERPINCODE>${esc(billToPincode)}</BASICBUYERPINCODE>` : ''}
   </BASICBASEPARTYDETAILS.LIST>`
     : '';
   // This must use shipTo data, NOT billTo data
-  const shipToXml = billToDetailsXml || shipToName || v.shipToGST || v.shipToPincode
+  // Send CONSIGNEEPLACE even when shipToName is blank — Tally needs it for Ship to place field
+  const shipToXml = billToDetailsXml || shipToName || resolvedShipToState
     ? `${billToDetailsXml}
-  <CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
-  <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>
-  ${v.shipToGST ? `<CONSIGNEEGSTIN>${esc(v.shipToGST)}</CONSIGNEEGSTIN>` : ''}
+  ${shipToName ? `<CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
+  <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>` : ''}
+  <CONSIGNEEGSTIN>${esc(shipToGST || '.')}</CONSIGNEEGSTIN>
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
-  ${v.shipToState ? `<CONSIGNEESTATENAME>${esc(v.shipToState)}</CONSIGNEESTATENAME>` : ''}
+  ${resolvedShipToState ? `<CONSIGNEESTATENAME>${esc(resolvedShipToState)}</CONSIGNEESTATENAME>
+  <CONSIGNEEPLACE>${esc(resolvedShipToState)}</CONSIGNEEPLACE>` : ''}
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
     : '';
 
@@ -1604,14 +1743,6 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const poDateXml = v.poDate ? `<BASICORDERDATE>${esc(v.poDate)}</BASICORDERDATE>` : '';
   // BASICORDERREF = "Order No(s)" in Tally's Dispatch/Order Details section (visible on e-invoice print)
   const poOrderRefXml = v.buyersOrderNo ? `<BASICORDERREF>${esc(v.buyersOrderNo)}</BASICORDERREF>` : '';
-
-  // GST fields
-  const partyGstIn = (v.partyGST || v.billToGST || '').trim();
-  const partyState = (v.partyState || v.billToState || cfg.state || '').trim();
-  const placeOfSupply = partyState || cfg.state || '';
-  const companyGstIn = (cfg.gstin || '').trim();
-  const companyState = (cfg.state || '').trim();
-  const companyRegLabel = `${companyState} Registration`;
 
   // E-Invoice fields — written to Tally XML so the e-invoice prints with IRN/AckNo
   // Tally uses: IRN, ACKNO, ACKDATE (YYYYMMDD) at the voucher root level
@@ -1908,15 +2039,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // specific per-item sales ledger.
       `<LEDGER NAME="Sales" ACTION="Create"><NAME>Sales</NAME><PARENT>Sales Accounts</PARENT><ISREVENUE>Yes</ISREVENUE><AFFECTSSTOCK>No</AFFECTSSTOCK></LEDGER>`,
       // SAFEGUARD: Create/configure rate-specific GST ledgers that vouchers reference.
-      // TAXTYPE="Others" + RATEOFTAXCALCULATION is what makes Tally display "9%" on print.
-      // Plain "CGST" with TAXTYPE="Central Tax" always shows 0% — that's the bug.
-      //
-      // We use ACTION="Alter" on the rate-specific ledgers so their TAXTYPE and
-      // RATEOFTAXCALCULATION are always correct. This is safe because these ledgers
-      // only define the rate metadata — altering them does NOT change amounts on any
-      // existing voucher. Only altering plain "CGST"/"SGST" would corrupt history.
-      //
-      // Plain "CGST"/"SGST"/"IGST" stay as ACTION="Create" — never touch them.
+      // Use TAXTYPE=Others + RATEOFTAXCALCULATION — this is the stable approach.
+      // SUBTYPE tag causes silent EXCEPTIONS=1 in some Tally versions — do not use it.
       `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
       `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
       `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
@@ -2029,58 +2153,40 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // ── Fetch Tally company period end to cap voucher dates ───────────────────
     // Tally rejects vouchers dated after the company's ENDINGAT date with the
     // MISLEADING "Voucher date is missing" error (even when <DATE> is present).
-    // Cap all dates to period end.
+    // Cap all dates to period end — BUT only if periodEnd is today or in the future.
+    // If periodEnd is in the past, the Tally company period is expired/not updated.
+    // In that case, do NOT cap — send the actual invoice dates and let Tally show
+    // the real error so the user knows to extend the period in Tally.
     let periodEnd = await fetchTallyPeriodEnd(cfg);
-    if (!periodEnd) {
-      // Fallback: use a cached value from TallyConfig if available.
-      // Do NOT fall back to "yesterday" — that silently caps all invoice dates
-      // to the wrong date and causes EXCEPTIONS=1 with no LINEERROR in Tally.
-      // Better to send the actual invoice date and let Tally reject explicitly
-      // (it will then show a LINEERROR we can read) than silently cap to a wrong date.
+    const todayStr = (() => { const n = new Date(); return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`; })();
+
+    // If the live-fetched periodEnd is in the past, discard it — don't cap dates.
+    if (periodEnd && periodEnd < todayStr) {
+      LOG(`exportSalesInvoices: Tally periodEnd "${periodEnd}" is in the past (today=${todayStr}). NOT capping invoice dates. Extend the company period in Tally: F11 → Alter → set period end to 31-March-${new Date().getFullYear()+1}.`);
+      // Clear the stale cached value so it doesn't get used on retry
+      await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
+      periodEnd = null;
+    } else if (periodEnd) {
+      // Valid future/today period end — cache it
+      await TallyConfig.findOneAndUpdate({}, { tallyPeriodEnd: periodEnd }, { sort: { _id: 1 } });
+      LOG(`exportSalesInvoices: voucher dates will be capped to Tally period end ${periodEnd}`);
+    } else {
+      // Could not fetch live — try cache but apply same past-date guard
       const saved = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
       const cachedPeriodEnd = saved?.tallyPeriodEnd;
-      // Validate the cached periodEnd before using it.
-      // Two cases of bad cached values we've seen in the wild:
-      //   1. A future date (e.g. 20270327) — parsed from a Tally response filename or
-      //      a mis-parsed SVTODATE from an unrelated export envelope.
-      //      Guard: reject any cached value that is MORE THAN 1 YEAR in the future.
-      //   2. A "yesterday"-style value from old fallback logic — a date within the
-      //      last 30 days that is NOT a recognisable period-end pattern.
-      //      Guard: if the value is older than 30 days it must look like a real FY end.
-      // In both failure cases, fall back to live-fetch only (no capping).
-      const todayStr = (() => { const n = new Date(); return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`; })();
-      const oneYearFuture = (() => { const n = new Date(); n.setFullYear(n.getFullYear() + 1); return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`; })();
-      const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      const thirtyDaysAgoStr = `${thirtyDaysAgo.getFullYear()}${String(thirtyDaysAgo.getMonth()+1).padStart(2,'0')}${String(thirtyDaysAgo.getDate()).padStart(2,'0')}`;
-
-      if (cachedPeriodEnd && cachedPeriodEnd > oneYearFuture) {
-        // Future date — clearly wrong (e.g. 20270327 from a mis-parsed response)
-        LOG(`exportSalesInvoices: cached tallyPeriodEnd "${cachedPeriodEnd}" is more than 1 year in the future — discarding and using actual invoice dates`);
-        await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
-        periodEnd = null;
-      } else if (cachedPeriodEnd && cachedPeriodEnd > todayStr) {
-        // Future date but within 1 year — also suspicious, discard
-        LOG(`exportSalesInvoices: cached tallyPeriodEnd "${cachedPeriodEnd}" is in the future — discarding`);
-        await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
-        periodEnd = null;
-      } else if (cachedPeriodEnd && cachedPeriodEnd < thirtyDaysAgoStr) {
-        // Value is more than 30 days ago — only trust if it looks like a real FY/period end
-        // Accept: MMDD = 0331 (Mar 31), 0630 (Jun 30), 0930 (Sep 30), 1231 (Dec 31),
-        //         or any day-of-month that is the last day (common for EDU period ends like 0702)
+      if (cachedPeriodEnd && cachedPeriodEnd >= todayStr) {
         periodEnd = cachedPeriodEnd;
         LOG(`exportSalesInvoices: using cached periodEnd from DB: ${periodEnd}`);
       } else if (cachedPeriodEnd) {
-        periodEnd = cachedPeriodEnd;
-        LOG(`exportSalesInvoices: using cached periodEnd from DB: ${periodEnd}`);
+        LOG(`exportSalesInvoices: cached tallyPeriodEnd "${cachedPeriodEnd}" is in the past — discarding, using actual invoice dates`);
+        await TallyConfig.findOneAndUpdate({}, { $unset: { tallyPeriodEnd: 1 } }, { sort: { _id: 1 } });
+        periodEnd = null;
       } else {
-        periodEnd = null; // No capping — use actual invoice dates
-        LOG(`exportSalesInvoices: ⚠ periodEnd unknown — sending actual invoice dates (no capping). If Tally rejects, open Tally Settings → Test Connection to cache the period end.`);
+        periodEnd = null;
+        LOG(`exportSalesInvoices: periodEnd unknown — using actual invoice dates`);
       }
-    } else {
-      // Cache the period end in TallyConfig for fallback use
-      await TallyConfig.findOneAndUpdate({}, { tallyPeriodEnd: periodEnd }, { sort: { _id: 1 } });
     }
-    LOG(`exportSalesInvoices: voucher dates will be capped to ${periodEnd || '(none — actual dates will be used)'}`);
+    LOG(`exportSalesInvoices: voucher dates will be capped to ${periodEnd || '(none — actual invoice dates used)'}`);
 
     const failedItems  = [];
     const skippedItems = [];   // invoices skipped due to validation failure or dedup
