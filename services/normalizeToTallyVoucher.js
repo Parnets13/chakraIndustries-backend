@@ -301,12 +301,12 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
         actualQty: `${itemQty} ${itemUnit}`,
         billedQty:  `${itemQty} ${itemUnit}`,
       }],
-      // RATEDETAILS: always send explicit rates — Tally uses these for Tax Analysis
-      rateDetails: [
-        ...(cgstRate > 0 ? [{ gstRateDutyHead: 'CGST',       gstRateEvaluationType: 'Based on Value', gstRate: cgstRate }] : []),
-        ...(sgstRate > 0 ? [{ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate }] : []),
-        ...(igstRate > 0 ? [{ gstRateDutyHead: 'IGST',       gstRateEvaluationType: 'Based on Value', gstRate: igstRate }] : []),
-      ],
+      // RATEDETAILS: Do NOT send explicit rates in inventory entries.
+      // Per Tally official docs, sending RATEDETAILS in the voucher causes Tally to
+      // treat the GST rate as "overridden in transaction" and shows tax mismatch warning.
+      // Tally calculates the correct GST from the ledger's RATEOFTAXCALCULATION itself.
+      // Only the LEDGERENTRIES amounts (CGST/SGST/IGST) are needed.
+      rateDetails: [],
       accountingAllocations: [{
         ledgerName: salesLedger,
         isDeemedPositive: false,
@@ -341,14 +341,16 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     }],
   });
 
-  // 2. CGST — use reconCGST (matches exactly what Tally will recalculate from rateDetails)
+  // 2. CGST
   if (ledgerCGST > 0 && cgstLedger) {
     allLedgerEntries.push({
       ledgerName: cgstLedger,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
       amount: +ledgerCGST,
-      rateOfInvoiceTax: cgstHalfRate,  // tells Tally this entry is at 2.5% — fixes "0%" display
+      // Do NOT set rateOfInvoiceTax — it causes Tally to recompute tax from rate×base
+      // which produces a rounding difference (e.g. 190.48 × 2.5% = 4.762 vs stored 4.76)
+      // and shows "Tax amount does not match" warning. Tally reads rate from ledger master.
     });
   }
  
@@ -359,7 +361,6 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       isDeemedPositive: false,
       isLastDeemedPositive: false,
       amount: +ledgerSGST,
-      rateOfInvoiceTax: sgstHalfRate,  // tells Tally this entry is at 2.5%
     });
   }
 
@@ -370,7 +371,6 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       isDeemedPositive: false,
       isLastDeemedPositive: false,
       amount: +ledgerIGST,
-      rateOfInvoiceTax: igstFullRate,  // tells Tally this entry is at e.g. 5% or 18%
     });
   }
 
