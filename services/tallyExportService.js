@@ -2077,18 +2077,18 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
       `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
       `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 2.5%" ACTION="Alter"><NAME>Output CGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 2.5%" ACTION="Alter"><NAME>Output SGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 6%" ACTION="Alter"><NAME>Output CGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 6%" ACTION="Alter"><NAME>Output SGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 9%" ACTION="Alter"><NAME>Output CGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 9%" ACTION="Alter"><NAME>Output SGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 14%" ACTION="Alter"><NAME>Output CGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 14%" ACTION="Alter"><NAME>Output SGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 5%" ACTION="Alter"><NAME>Output IGST @ 5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 12%" ACTION="Alter"><NAME>Output IGST @ 12%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>12</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 18%" ACTION="Alter"><NAME>Output IGST @ 18%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>18</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 28%" ACTION="Alter"><NAME>Output IGST @ 28%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>28</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 2.5%" ACTION="Create"><NAME>Output CGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 2.5%" ACTION="Create"><NAME>Output SGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 6%" ACTION="Create"><NAME>Output CGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 6%" ACTION="Create"><NAME>Output SGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 9%" ACTION="Create"><NAME>Output CGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 9%" ACTION="Create"><NAME>Output SGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 14%" ACTION="Create"><NAME>Output CGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 14%" ACTION="Create"><NAME>Output SGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 5%" ACTION="Create"><NAME>Output IGST @ 5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>5</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 12%" ACTION="Create"><NAME>Output IGST @ 12%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>12</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 18%" ACTION="Create"><NAME>Output IGST @ 18%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>18</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 28%" ACTION="Create"><NAME>Output IGST @ 28%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>28</RATEOFTAXCALCULATION></LEDGER>`,
       ...partyNames.map(name =>
         `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sundry Debtors</PARENT></LEDGER>`
       ),
@@ -2141,15 +2141,17 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     }
     const stockHsnMap = new Map(stockItemMasters.map(im => [im.name, im.hsn || '']));
 
-    // Always Alter stock items (not just Create) so the GSTRATE is updated
-    // even if the item already exists in Tally with a stale 0% rate.
+    // SAFE: Use ACTION="Create" for stock items — Tally skips items that already exist.
+    // We must NOT use ACTION="Alter" here because altering an existing stock item's
+    // GSTDETAILS.LIST causes Tally to re-validate ALL existing vouchers that reference
+    // that item, which makes previously-correct manually-created invoices show tax mismatch.
     const autoStockXml = stockNames.map(name => {
       const gstRate = stockGstRateMap.get(name) || 0;
       const hsn     = stockHsnMap.get(name) || '';
       const gstRateTag = gstRate > 0 ? `<GSTRATE>${gstRate}</GSTRATE>` : '';
       const hsnTag     = hsn ? `<HSNCODE>${esc(hsn)}</HSNCODE>` : '';
       const gstDetailsTag = gstRate > 0 ? `<GSTDETAILS.LIST ACTION="Replace"><APPLICABLEFROM>20230401</APPLICABLEFROM><TAXABILITY>Taxable</TAXABILITY><GSTRATEINPERCENT>${gstRate}</GSTRATEINPERCENT><ISREVERSECHARGE>No</ISREVERSECHARGE><ISINELIGIBLEITC>No</ISINELIGIBLEITC><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY></GSTDETAILS.LIST>` : '';
-      return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
+      return `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
     }).join('');
 
     LOG(`Sales: auto-creating ${partyNames.length} party ledgers + ${stockNames.length} stock items before vouchers`);
