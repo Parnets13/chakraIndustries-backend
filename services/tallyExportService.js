@@ -2144,18 +2144,65 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     }
     const stockHsnMap = new Map(stockItemMasters.map(im => [im.name, im.hsn || '']));
 
-    // SAFE: Use ACTION="Create" for stock items — Tally skips items that already exist.
-    // We must NOT use ACTION="Alter" here because altering an existing stock item's
-    // GSTDETAILS.LIST causes Tally to re-validate ALL existing vouchers that reference
-    // that item, which makes previously-correct manually-created invoices show tax mismatch.
+    // ── Fetch current GST rates from Tally for these stock items ─────────────
+    // Per Tally official docs: tax validation priority is Stock Item GST rate FIRST.
+    // If the stock item has no GST rate set in Tally, Expected Tax = 0.
+    // If we send CGST 4.76, Tally shows "Tax amount does not match" because it
+    // expected 0. We must ensure the stock item has the correct GST rate in Tally.
+    //
+    // Strategy (safe, non-destructive):
+    //   - Fetch current GST rate for each item from Tally
+    //   - If item DOES NOT exist → CREATE with correct rate
+    //   - If item EXISTS with WRONG rate (0 or missing) → ALTER only the GSTDETAILS
+    //   - If item EXISTS with CORRECT rate → skip (no change, no re-validation)
+    //
+    // This is the ONLY safe way to ensure correct tax: fix missing rates on first use,
+    // never touch items that already have the correct rate.
+    let tallyStockGstMap = new Map(); // name → current Tally GST rate
+    try {
+      const co = (cfg.companyName || '').trim().toUpperCase();
+      const coTag = co ? `<SVCURRENTCOMPANY>${esc(co)}</SVCURRENTCOMPANY>` : '';
+      const fetchXml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>StockGSTCheck</ID></HEADER>
+<BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+<TDL><TDLMESSAGE><COLLECTION NAME="StockGSTCheck"><TYPE>Stock Item</TYPE><FETCH>Name,GSTApplicable,GSTRate</FETCH></COLLECTION></TDLMESSAGE></TDL>
+</DESC></BODY></ENVELOPE>`;
+      const resp = await postXmlWithRetry(cfg, fetchXml, 30000);
+      if (resp) {
+        for (const m of resp.matchAll(/<STOCKITEM[^>]*NAME="([^"]+)"[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
+          const iname = m[1].trim();
+          const block = m[2];
+          const rate = parseFloat((block.match(/<GSTRATE>(.*?)<\/GSTRATE>/i)?.[1] || '0'));
+          tallyStockGstMap.set(iname.toLowerCase(), rate);
+        }
+        LOG(`exportSalesInvoices: fetched GST rates for ${tallyStockGstMap.size} stock items from Tally`);
+      }
+    } catch (e) {
+      LOG(`exportSalesInvoices: could not fetch stock item GST rates (non-fatal): ${e.message}`);
+    }
+
     const autoStockXml = stockNames.map(name => {
       const gstRate = stockGstRateMap.get(name) || 0;
       const hsn     = stockHsnMap.get(name) || '';
       const gstRateTag = gstRate > 0 ? `<GSTRATE>${gstRate}</GSTRATE>` : '';
       const hsnTag     = hsn ? `<HSNCODE>${esc(hsn)}</HSNCODE>` : '';
       const gstDetailsTag = gstRate > 0 ? `<GSTDETAILS.LIST ACTION="Replace"><APPLICABLEFROM>20230401</APPLICABLEFROM><TAXABILITY>Taxable</TAXABILITY><GSTRATEINPERCENT>${gstRate}</GSTRATEINPERCENT><ISREVERSECHARGE>No</ISREVERSECHARGE><ISINELIGIBLEITC>No</ISINELIGIBLEITC><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY></GSTDETAILS.LIST>` : '';
-      return `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
-    }).join('');
+
+      const tallyCurrentRate = tallyStockGstMap.get(name.toLowerCase());
+      const existsInTally = tallyCurrentRate !== undefined;
+      const rateIsCorrect = existsInTally && Math.abs(tallyCurrentRate - gstRate) < 0.1;
+
+      if (!existsInTally) {
+        // Item doesn't exist → CREATE with full GST setup
+        return `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
+      } else if (!rateIsCorrect && gstRate > 0) {
+        // Item exists but has wrong/missing GST rate → ALTER only GST details
+        LOG(`exportSalesInvoices: stock item "${name}" has Tally GST rate=${tallyCurrentRate}, expected=${gstRate} → altering GST only`);
+        return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
+      } else {
+        // Item exists with correct rate → skip entirely
+        return '';
+      }
+    }).filter(Boolean).join('');
 
     LOG(`Sales: auto-creating ${partyNames.length} party ledgers + ${stockNames.length} stock items before vouchers`);
     LOG(`Sales: party names to create: ${partyNames.slice(0, 5).join(', ')}${partyNames.length > 5 ? ` ... (${partyNames.length - 5} more)` : ''}`);
