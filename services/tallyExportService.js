@@ -1667,8 +1667,11 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   // ── GST / party state — defined here so fallbacks below can use it ────────
   const partyGstIn = (v.partyGST || v.billToGST || '').trim();
   const partyState = (v.partyState || v.billToState || cfg.state || '').trim();
-  // Place of Supply = ship-to state (GST law) → fallback to bill-to/party state
-  const placeOfSupply = resolvedShipToState || partyState || cfg.state || '';
+  // Place of Supply = Bill To (Buyer) state per GST and e-Invoice rules
+  // CRITICAL: This must be the Bill To state, NOT the Ship To state
+  // GST Place of Supply is determined by the location of the buyer (Bill To), not the delivery address (Ship To)
+  const billToStateForSupply = (v.billToState || v.partyState || cfg.state || '').trim();
+  const placeOfSupply = billToStateForSupply;
   const companyGstIn = (cfg.gstin || '').trim();
   const companyState = (cfg.state || '').trim();
   const companyRegLabel = `${companyState} Registration`;
@@ -1778,7 +1781,7 @@ ${addressListXml}
   ${poDateXml}
   <NARRATION>${esc(v.narration || '')}</NARRATION>
   <GSTREGISTRATIONTYPE>${esc(partyGstIn ? 'Regular' : 'Unregistered')}</GSTREGISTRATIONTYPE>
-  <STATENAME>${esc(partyState)}</STATENAME>
+  <STATENAME>${esc(billToStateForSupply)}</STATENAME>
   <COUNTRYOFRESIDENCE>India</COUNTRYOFRESIDENCE>
   ${partyGstIn ? `<PARTYGSTIN>${esc(partyGstIn)}</PARTYGSTIN>` : ''}
   <PLACEOFSUPPLY>${esc(placeOfSupply)}</PLACEOFSUPPLY>
