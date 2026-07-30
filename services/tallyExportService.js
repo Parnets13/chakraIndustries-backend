@@ -1449,9 +1449,12 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : '';
     const hsnSourceXml = !isGenericLedger && hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
     <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : '';
-    // Always emit GST override tags, even without GSTLEDGERSOURCE — they're needed for e-invoice.
-    const gstOverrideXml = `<GSTOVRDNTAXABILITY>${esc(item.gstOverrideTaxability || 'Taxable')}</GSTOVRDNTAXABILITY>
-    <GSTOVRDNTYPEOFSUPPLY>${esc(item.gstOverrideSupplyType || 'Goods')}</GSTOVRDNTYPEOFSUPPLY>`;
+    // DO NOT emit GSTOVRDNTAXABILITY or GSTOVRDNTYPEOFSUPPLY.
+    // Per Tally official docs (help.tallysolutions.com/gst-rate-details-are-overridden):
+    // sending these tags tells Tally the GST rate is "overridden" in the voucher,
+    // which causes "GST Rate Details are overridden in transaction" mismatch for
+    // every imported invoice. Tally should read GST rate from the item master, not the voucher.
+    const gstOverrideXml = '';
 
     // Rate details for GST tax calculation
     // If rateDetails are missing or all zero, derive from ledger entries (CGST/SGST/IGST amounts)
