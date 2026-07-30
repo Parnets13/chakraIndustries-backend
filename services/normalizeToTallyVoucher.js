@@ -66,33 +66,19 @@ function capDate(voucherDate, periodEnd) {
  */
 export function resolveGstLedgerName(taxType, salesBase, taxAmount, availableLedgerNames) {
   const plain = { cgst: 'CGST', sgst: 'SGST', igst: 'IGST' }[taxType] || 'CGST';
-  const outPrefix = taxType === 'igst' ? 'Output IGST' : `Output ${taxType.toUpperCase()}`;
 
-  // Compute effective rate % (half-rate for CGST/SGST, full rate for IGST)
-  let rateStr = '';
-  if (salesBase > 0 && taxAmount > 0) {
-    const rate = +((taxAmount / salesBase) * 100).toFixed(2);
-    const brackets = [2.5, 5, 6, 9, 12, 14, 18, 28];
-    const closest = brackets.reduce((best, b) => Math.abs(b - rate) < Math.abs(best - rate) ? b : best, brackets[0]);
-    if (Math.abs(closest - rate) < 0.5) rateStr = String(closest);
-  }
-
-  // ── Always prefer rate-specific ledger (e.g. "Output CGST @ 9%") ──────────
-  // Plain "CGST" has TAXTYPE="Central Tax" in Tally which forces the rate to 0%
-  // and shows "Others" type on the printed invoice — that is the bug.
-  // Rate-specific ledgers have TAXTYPE="Others" + RATEOFTAXCALCULATION=9 so
-  // Tally displays the correct percentage on print.
-  // We always create these ledgers (ACTION="Create") before sending vouchers,
-  // so it is safe to reference them even if Tally hadn't listed them yet.
-  if (rateStr) {
-    const rateSpecific = `${outPrefix} @ ${rateStr}%`;
-    return rateSpecific;
-  }
-
-  // No rate computed — try what Tally has, then fall back to plain
+  // Per Tally official docs (help.tallysolutions.com/tally/why_is_gst_not_calculated):
+  // "If GST rates are specified in the tax ledger as well as the stock item, it creates
+  // a conflict. Use common GST ledgers WITHOUT specifying tax rates, so that GST is
+  // picked from the stock item."
+  //
+  // We use plain CGST/SGST/IGST ledgers (Type=Central Tax/State Tax/Integrated Tax,
+  // no RATEOFTAXCALCULATION). The GST rate is set on the stock item master.
+  // This is the ONLY way to avoid "Tax amount does not match" warning.
+  //
+  // Note: if Tally has an "Output CGST @ 2.5%" style ledger and the manually-created
+  // invoices use that, we check availableLedgerNames for exact match first.
   if (availableLedgerNames && availableLedgerNames.length) {
-    const plainOut = availableLedgerNames.find(n => n.trim().toLowerCase() === outPrefix.toLowerCase());
-    if (plainOut) return plainOut;
     const bareMatch = availableLedgerNames.find(n => n.trim().toLowerCase() === plain.toLowerCase());
     if (bareMatch) return bareMatch;
   }
