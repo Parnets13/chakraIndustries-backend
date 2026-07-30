@@ -1705,10 +1705,37 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   </BASICBUYERADDRESS.LIST>
   ${rootPincode ? `<PARTYPINCODE>${esc(rootPincode)}</PARTYPINCODE>` : ''}`
     : '';
+  // ── e-Invoice validation: PLACE must be city/town (3–100 chars), NOT state name ─────
+  // Tally e-Invoice validation rule: "Buyer (Bill To) Place should be between 3 and 100 characters"
+  // The PLACE tag must carry the city/town, not the state. State goes in STATENAME.
+  const billToPlace = (v.billToCity || v.partyCity || v.billToState || v.partyState || '').toString().trim();
+
+  // Consignee place: city of delivery. Fall back to shipToState if city missing.
+  const consigneePlace = (v.shipToCity || resolvedShipToState || '').toString().trim();
+
+  // ── Consignor (Dispatch From) block — REQUIRED for e-Invoice validation ──────────────
+  // e-Invoice rules: Name 3–100 chars, Address not blank, State valid, Place 3–100 chars, Pincode 6 digits
+  const consignorName    = (cfg.companyName || 'Sri Chakra Industries').toString().trim();
+  const consignorAddress = (cfg.address     || '13/14, Azeez Sait Industrial Estate, Nayandahalli, Mysore Road, Bangalore-560039').toString().trim();
+  const consignorCity    = (cfg.city        || 'Bengaluru').toString().trim();
+  const consignorState   = (cfg.state       || 'Karnataka').toString().trim();
+  const consignorPincode = (cfg.pincode     || '560039').toString().replace(/\D/g, '').slice(0, 6);
+
+  // Tally XML tags for Consignor (Dispatch From) — maps to e-Invoice "Dispatch From" fields
+  const consignorXml = `
+  <BASICSHIPADDRESSNAME>${esc(consignorName)}</BASICSHIPADDRESSNAME>
+  <BASICSHIPADDRESS.LIST TYPE="String">
+    <BASICSHIPADDRESS>${esc(consignorAddress)}</BASICSHIPADDRESS>
+  </BASICSHIPADDRESS.LIST>
+  <BASICSHIPPLACE>${esc(consignorCity)}</BASICSHIPPLACE>
+  <BASICSHIPSTATE>${esc(consignorState)}</BASICSHIPSTATE>
+  <BASICSHIPPINCODE>${esc(consignorPincode)}</BASICSHIPPINCODE>`;
+
   // BASICBASEPARTYDETAILS.LIST = Bill To (Buyer) block — always bill-to data.
   // Only written when ship-to is present (otherwise root tags already carry bill-to data).
   // FIX: Include PARTYMAILINGNAME inside this block so Tally can render it in the
   // Bill To section of the invoice print.
+  // e-Invoice fix: BASICBUYERPLACE must be city (3–100 chars), not state name.
   const billToDetailsXml = shipToName && (billToName || billToAddressLines.length)
     ? `
   <BASICBASEPARTYDETAILS.LIST>
@@ -1717,22 +1744,23 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     ${billToAddressLines.length ? `<BASICBUYERADDRESS.LIST TYPE="String">
       ${billToAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n      ')}
     </BASICBUYERADDRESS.LIST>` : '<BASICBUYERADDRESS.LIST TYPE="String"></BASICBUYERADDRESS.LIST>'}
-    ${(v.billToState || v.partyState) ? `<BASICBUYERSTATENAME>${esc(v.billToState || v.partyState || '')}</BASICBUYERSTATENAME>
-    <BASICBUYERPLACE>${esc(v.billToState || v.partyState || '')}</BASICBUYERPLACE>` : ''}
+    ${(v.billToState || v.partyState) ? `<BASICBUYERSTATENAME>${esc(v.billToState || v.partyState || '')}</BASICBUYERSTATENAME>` : ''}
+    ${billToPlace ? `<BASICBUYERPLACE>${esc(billToPlace)}</BASICBUYERPLACE>` : ''}
     ${(v.billToGST || v.partyGST) ? `<BASICBUYERGSTIN>${esc(v.billToGST || v.partyGST || '')}</BASICBUYERGSTIN>` : ''}
     ${billToPincode ? `<BASICBUYERPINCODE>${esc(billToPincode)}</BASICBUYERPINCODE>` : ''}
   </BASICBASEPARTYDETAILS.LIST>`
     : '';
-  // This must use shipTo data, NOT billTo data
-  // Send CONSIGNEEPLACE even when shipToName is blank — Tally needs it for Ship to place field
+
+  // Consignee (Ship To) block.
+  // e-Invoice fix: CONSIGNEEPLACE must be city (3–100 chars), not state name.
   const shipToXml = billToDetailsXml || shipToName || resolvedShipToState
     ? `${billToDetailsXml}
   ${shipToName ? `<CONSIGNEENAME>${esc(shipToName)}</CONSIGNEENAME>
   <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>` : ''}
   <CONSIGNEEGSTIN>${esc(shipToGST || '.')}</CONSIGNEEGSTIN>
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
-  ${resolvedShipToState ? `<CONSIGNEESTATENAME>${esc(resolvedShipToState)}</CONSIGNEESTATENAME>
-  <CONSIGNEEPLACE>${esc(resolvedShipToState)}</CONSIGNEEPLACE>` : ''}
+  ${resolvedShipToState ? `<CONSIGNEESTATENAME>${esc(resolvedShipToState)}</CONSIGNEESTATENAME>` : ''}
+  ${consigneePlace ? `<CONSIGNEEPLACE>${esc(consigneePlace)}</CONSIGNEEPLACE>` : ''}
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
     : '';
 
@@ -1789,7 +1817,7 @@ ${addressListXml}
   <CMPGSTIN>${esc(companyGstIn)}</CMPGSTIN>
   <CMPGSTSTATE>${esc(companyState)}</CMPGSTSTATE>
   <CMPGSTREGISTRATIONTYPE>Regular</CMPGSTREGISTRATIONTYPE>
-  <VCHSTATUSTAXUNIT>${esc(companyRegLabel)}</VCHSTATUSTAXUNIT>${billToXml}${shipToXml}${invoiceOrderListXml}${ledgerEntriesXml}${inventoryEntriesXml}${eInvoiceXml}
+  <VCHSTATUSTAXUNIT>${esc(companyRegLabel)}</VCHSTATUSTAXUNIT>${consignorXml}${billToXml}${shipToXml}${invoiceOrderListXml}${ledgerEntriesXml}${inventoryEntriesXml}${eInvoiceXml}
 </VOUCHER>`;
 }
 
