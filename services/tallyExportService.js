@@ -1395,11 +1395,8 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
       <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
       <AMOUNT>${(ba.amount || 0).toFixed(2)}</AMOUNT>
     </BILLALLOCATIONS.LIST>`).join('') : '';
-    const rateOfInvoiceTaxXml = entry.rateOfInvoiceTax ? `
-    <RATEOFINVOICETAX.LIST TYPE="Number">
-      <RATEOFINVOICETAX>${esc(entry.rateOfInvoiceTax)}</RATEOFINVOICETAX>
-    </RATEOFINVOICETAX.LIST>
-    <ROUNDTYPE>&#4; Not Applicable</ROUNDTYPE>` : '';
+    const rateOfInvoiceTaxXml = ''; // Never send RATEOFINVOICETAX — causes Tally to recompute
+    // tax from rate×base which produces rounding difference and "Tax amount does not match" warning.
     const vatExpAmountXml = entry.vatExpAmount ? `
     <VATEXPAMOUNT>${entry.vatExpAmount.toFixed(2)}</VATEXPAMOUNT>` : '';
     return `
@@ -1486,12 +1483,10 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
         }
       }
     }
-    const rateDetailsXml = effectiveRateDetails.map(rd => `
-      <RATEDETAILS.LIST>
-        <GSTRATEDUTYHEAD>${esc(rd.gstRateDutyHead || '')}</GSTRATEDUTYHEAD>
-        <GSTRATEEVALUATIONTYPE>${esc(rd.gstRateEvaluationType || 'Based on Value')}</GSTRATEEVALUATIONTYPE>
-        <GSTRATE>${rd.gstRate || 0}</GSTRATE>
-      </RATEDETAILS.LIST>`).join('');
+    // Never send RATEDETAILS — per Tally official docs, sending RATEDETAILS in the voucher
+    // causes Tally to treat the GST rate as "overridden in transaction" and shows
+    // "Tax amount does not match" warning. Tally reads rate from the stock item master.
+    const rateDetailsXml = '';
 
     // Godown: use item-level batchAllocations if present, else build from item/voucher fields
     const batch = item.batchAllocations?.[0];
