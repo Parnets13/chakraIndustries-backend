@@ -2061,33 +2061,64 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       invoices.flatMap(inv => (inv.items || []).map(i => (i.description || i.name || '').trim())).filter(Boolean)
     )];
 
-    // ── CRITICAL: Auto-create item-specific sales ledgers ─────────────────────
-    // GST-enabled vouchers require each stock item to have a dedicated sales ledger.
-    // Collect the ACTUAL tallySalesLedger names used in each invoice item —
-    // these are the exact names sent in GSTLEDGERSOURCE and must exist in Tally.
-    const salesLedgerNames = new Set(['Sales Accounts']);  // fallback always created
+    // ── Collect explicit tallySalesLedger names from invoices + ItemMaster ──────
+    // Only explicit, pre-existing ledger names go here — NO auto-computed names.
+    // Sales ledgers in Tally are per product CATEGORY (e.g. "SS Bottle Sales Local 5%"),
+    // not per item name. Any computed name that doesn't exist in Tally will cause
+    // GSTLEDGERSOURCE to point to a non-existent ledger → Tax Analysis blank → mismatch.
+    const salesLedgerNames = new Set(['Sales Accounts', 'Sales']); // base fallbacks always created
 
     for (const inv of invoices) {
       for (const item of (inv.items || [])) {
         const ledger = (item.tallySalesLedger || '').trim();
-        if (ledger && ledger.toLowerCase() !== 'sales accounts') {
+        if (ledger && !['sales accounts', 'sales'].includes(ledger.toLowerCase())) {
           salesLedgerNames.add(ledger);
         }
       }
     }
 
-    // Also add computed names from ItemMaster for items without a stored ledger
-    // ── CRITICAL: regex must match normalizeToTallyVoucher exactly ─────────────
-    // normalizeToTallyVoucher computes: itemName.replace(/\s+\d+ML|\s+\d+L|\s+\d+G$/gi, '').trim()
-    // This auto-masters block must use the IDENTICAL regex so the created ledger name
-    // matches the GSTLEDGERSOURCE written into the voucher XML.
+    // Also collect from ItemMaster — explicit tallySalesLedger fields only, no computed names
     const itemMasters = await ItemMaster.find({ name: { $in: stockNames } }).lean();
     for (const im of itemMasters) {
-      if (im.gst > 0) {
-        const baseName = im.name.replace(/\s+\d+ML|\s+\d+L|\s+\d+G$/gi, '').trim();
-        salesLedgerNames.add(`${baseName} Sales Local ${im.gst}%`);
-        salesLedgerNames.add(`${baseName} Sales Interstate`);
+      const l = (im.tallySalesLedger || '').trim();
+      if (l && !['sales accounts', 'sales'].includes(l.toLowerCase())) {
+        salesLedgerNames.add(l);
       }
+    }
+
+    // ── PRE-EXPORT VALIDATION: cross-check every item's sales ledger against live Tally list ──
+    // tallySalesLedgers was fetched from Tally at the top of this function.
+    // If a ledger name is not in that list, the voucher will silently produce a tax mismatch.
+    // Warn loudly now so the user can fix ItemMaster mappings before re-exporting.
+    if (tallySalesLedgers.length > 0) {
+      const unmappedItems = []; // { invoiceNo, itemName, ledger }
+      for (const inv of invoices) {
+        for (const item of (inv.items || [])) {
+          const n = (item.description || item.name || '').trim();
+          if (!n) continue;
+          const im = itemMasters.find(m => m.name === n);
+          const ledger = (item.tallySalesLedger || im?.tallySalesLedger || '').trim();
+          const GENERIC = new Set(['', 'sales', 'sales accounts', 'sales accounts (group)']);
+          if (GENERIC.has(ledger.toLowerCase())) {
+            // No ledger mapped at all
+            unmappedItems.push({ invoiceNo: inv.invoiceNo, itemName: n, ledger: '(not set)' });
+          } else if (!tallySalesLedgers.includes(ledger)) {
+            // Ledger name set but does not exist in Tally
+            unmappedItems.push({ invoiceNo: inv.invoiceNo, itemName: n, ledger });
+          }
+        }
+      }
+      if (unmappedItems.length > 0) {
+        const lines = [...new Map(unmappedItems.map(x => [`${x.itemName}|${x.ledger}`, x])).values()];
+        const detail = lines.map(x => `  • "${x.itemName}" → ledger="${x.ledger}" (invoice ${x.invoiceNo})`).join('\n');
+        ERR(`exportSalesInvoices: ${lines.length} item(s) have missing or unrecognised Tally sales ledger:\n${detail}`);
+        ERR(`exportSalesInvoices: Fix ItemMaster.tallySalesLedger for these items to an existing Tally Sales Accounts ledger (e.g. "SS Bottle Sales Local 5%"), then re-export.`);
+        LOG(`exportSalesInvoices: ⚠ Continuing export but these invoices will show "Tax amount does not match" in Tally Tax Analysis until fixed.`);
+      } else {
+        LOG(`exportSalesInvoices: ✓ All item sales ledgers verified against Tally live list.`);
+      }
+    } else {
+      LOG(`exportSalesInvoices: tallySalesLedgers list empty (connector mode or fetch failed) — skipping ledger pre-validation.`);
     }
 
     const autoLedgerXml = [
