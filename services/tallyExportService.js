@@ -2070,25 +2070,26 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // specific per-item sales ledger.
       `<LEDGER NAME="Sales" ACTION="Create"><NAME>Sales</NAME><PARENT>Sales Accounts</PARENT><ISREVENUE>Yes</ISREVENUE><AFFECTSSTOCK>No</AFFECTSSTOCK></LEDGER>`,
       // SAFEGUARD: Create/configure rate-specific GST ledgers that vouchers reference.
-      // Keep TAXTYPE=Others + RATEOFTAXCALCULATION — do NOT change to Central Tax/State Tax.
-      // Changing existing ledger TAXTYPE causes Tally to re-validate all existing vouchers
-      // that reference those ledgers, breaking previously-correct manually-created invoices.
-      // The tax mismatch warning is resolved by sending exact Excel CGST/SGST amounts.
+      // ACTION="Alter" is used so that ledgers already created with TAXTYPE=Others are
+      // corrected to Central Tax / State Tax / Integrated Tax on the next export run.
+      // Tally's e-invoice module ONLY recognises Central/State/Integrated Tax ledgers when
+      // computing expected GST — ledgers typed "Others" produce "Tax amount does not match"
+      // on every e-invoice print even when the rupee amounts are exactly right.
       `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
       `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
       `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 2.5%" ACTION="Create"><NAME>Output CGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 2.5%" ACTION="Create"><NAME>Output SGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 6%" ACTION="Create"><NAME>Output CGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 6%" ACTION="Create"><NAME>Output SGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 9%" ACTION="Create"><NAME>Output CGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 9%" ACTION="Create"><NAME>Output SGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 14%" ACTION="Create"><NAME>Output CGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 14%" ACTION="Create"><NAME>Output SGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 5%" ACTION="Create"><NAME>Output IGST @ 5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 12%" ACTION="Create"><NAME>Output IGST @ 12%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>12</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 18%" ACTION="Create"><NAME>Output IGST @ 18%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>18</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 28%" ACTION="Create"><NAME>Output IGST @ 28%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>28</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 2.5%" ACTION="Alter"><NAME>Output CGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 2.5%" ACTION="Alter"><NAME>Output SGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 6%" ACTION="Alter"><NAME>Output CGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 6%" ACTION="Alter"><NAME>Output SGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 9%" ACTION="Alter"><NAME>Output CGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 9%" ACTION="Alter"><NAME>Output SGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 14%" ACTION="Alter"><NAME>Output CGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 14%" ACTION="Alter"><NAME>Output SGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 5%" ACTION="Alter"><NAME>Output IGST @ 5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>5</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 12%" ACTION="Alter"><NAME>Output IGST @ 12%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>12</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 18%" ACTION="Alter"><NAME>Output IGST @ 18%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>18</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 28%" ACTION="Alter"><NAME>Output IGST @ 28%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>28</RATEOFTAXCALCULATION></LEDGER>`,
       ...partyNames.map(name =>
         `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sundry Debtors</PARENT></LEDGER>`
       ),
