@@ -356,35 +356,53 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   });
 
   // 2. CGST
+  // rateOfInvoiceTax: the CGST component rate (half of total GST rate).
+  // Derived from totalCGST / salesBase — snapped to the nearest GST slab.
+  // VATEXPAMOUNT mirrors AMOUNT exactly; both must be identical per Tally e-invoice validation.
   if (ledgerCGST > 0 && cgstLedger) {
+    const cgstComponentRate = salesBase > 0 ? +((ledgerCGST / salesBase) * 100).toFixed(2) : 0;
+    const snappedCgstRate   = cgstComponentRate > 0 ? [2.5, 5, 6, 9, 12, 14, 18, 28].reduce(
+      (best, s) => Math.abs(s - cgstComponentRate) < Math.abs(best - cgstComponentRate) ? s : best, 0
+    ) : 0;
     allLedgerEntries.push({
-      ledgerName: cgstLedger,
-      isDeemedPositive: false,
+      ledgerName:         cgstLedger,
+      isDeemedPositive:   false,
       isLastDeemedPositive: false,
-      amount: +ledgerCGST,
-      // Do NOT set rateOfInvoiceTax — it causes Tally to recompute tax from rate×base
-      // which produces a rounding difference (e.g. 190.48 × 2.5% = 4.762 vs stored 4.76)
-      // and shows "Tax amount does not match" warning. Tally reads rate from ledger master.
+      amount:             +ledgerCGST,
+      rateOfInvoiceTax:   snappedCgstRate,   // e.g. 2.5 for a 5% GST item
+      vatExpAmount:       +ledgerCGST,        // must equal amount exactly
     });
   }
- 
+
   // 3. SGST
   if (ledgerSGST > 0 && sgstLedger) {
+    const sgstComponentRate = salesBase > 0 ? +((ledgerSGST / salesBase) * 100).toFixed(2) : 0;
+    const snappedSgstRate   = sgstComponentRate > 0 ? [2.5, 5, 6, 9, 12, 14, 18, 28].reduce(
+      (best, s) => Math.abs(s - sgstComponentRate) < Math.abs(best - sgstComponentRate) ? s : best, 0
+    ) : 0;
     allLedgerEntries.push({
-      ledgerName: sgstLedger,
-      isDeemedPositive: false,
+      ledgerName:         sgstLedger,
+      isDeemedPositive:   false,
       isLastDeemedPositive: false,
-      amount: +ledgerSGST,
+      amount:             +ledgerSGST,
+      rateOfInvoiceTax:   snappedSgstRate,   // same as CGST component rate
+      vatExpAmount:       +ledgerSGST,
     });
   }
 
   // 4. IGST
   if (ledgerIGST > 0 && igstLedger) {
+    const igstComponentRate = salesBase > 0 ? +((ledgerIGST / salesBase) * 100).toFixed(2) : 0;
+    const snappedIgstRate   = igstComponentRate > 0 ? [5, 12, 18, 28].reduce(
+      (best, s) => Math.abs(s - igstComponentRate) < Math.abs(best - igstComponentRate) ? s : best, 0
+    ) : 0;
     allLedgerEntries.push({
-      ledgerName: igstLedger,
-      isDeemedPositive: false,
+      ledgerName:         igstLedger,
+      isDeemedPositive:   false,
       isLastDeemedPositive: false,
-      amount: +ledgerIGST,
+      amount:             +ledgerIGST,
+      rateOfInvoiceTax:   snappedIgstRate,   // full GST rate e.g. 18
+      vatExpAmount:       +ledgerIGST,
     });
   }
 

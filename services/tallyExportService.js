@@ -1395,22 +1395,36 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
       <TDSDEDUCTEEISSPECIALRATE>No</TDSDEDUCTEEISSPECIALRATE>
       <AMOUNT>${(ba.amount || 0).toFixed(2)}</AMOUNT>
     </BILLALLOCATIONS.LIST>`).join('') : '';
-    const rateOfInvoiceTaxXml = ''; // Never send RATEOFINVOICETAX — causes Tally to recompute
-    // tax from rate×base which produces rounding difference and "Tax amount does not match" warning.
-    const vatExpAmountXml = entry.vatExpAmount ? `
-    <VATEXPAMOUNT>${entry.vatExpAmount.toFixed(2)}</VATEXPAMOUNT>` : '';
+    // RATEOFINVOICETAX.LIST — required by Tally's e-invoice engine to confirm the
+    // tax component rate for CGST/SGST/IGST duty ledger entries. Without it Tally
+    // cannot verify the posted amount against the expected amount and raises
+    // "Tax amount does not match" even when the rupee value is arithmetically correct.
+    // Only emitted when rateOfInvoiceTax is stored on the entry (GST duty lines only).
+    const rateOfInvoiceTaxXml = (entry.rateOfInvoiceTax != null && entry.rateOfInvoiceTax > 0)
+      ? `
+    <RATEOFINVOICETAX.LIST TYPE="Number">
+      <RATEOFINVOICETAX> ${entry.rateOfInvoiceTax.toFixed(2)}</RATEOFINVOICETAX>
+    </RATEOFINVOICETAX.LIST>`
+      : '';
+    // VATEXPAMOUNT — must equal AMOUNT exactly on GST duty ledger entries.
+    // Tally's e-invoice module checks VATEXPAMOUNT against its own computed expected tax;
+    // omitting it (or sending a different value) produces the tax mismatch warning.
+    const vatExpAmountXml = (entry.vatExpAmount != null)
+      ? `
+    <VATEXPAMOUNT>${(entry.vatExpAmount).toFixed(2)}</VATEXPAMOUNT>`
+      : '';
     return `
   <LEDGERENTRIES.LIST>
     <OLDAUDITENTRYIDS.LIST TYPE="Number">
       <OLDAUDITENTRYIDS>-1</OLDAUDITENTRYIDS>
-    </OLDAUDITENTRYIDS.LIST>${rateOfInvoiceTaxXml}${vatExpAmountXml}
+    </OLDAUDITENTRYIDS.LIST>${rateOfInvoiceTaxXml}
     <LEDGERNAME>${esc(entry.ledgerName || '')}</LEDGERNAME>
     <GSTCLASS>&#4; Not Applicable</GSTCLASS>
     <ISDEEMEDPOSITIVE>${entry.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${entry.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <ISCAPVATTAXALTERED>No</ISCAPVATTAXALTERED>
     <ISCAPVATNOTCLAIMED>No</ISCAPVATNOTCLAIMED>
-    <AMOUNT>${(entry.amount || 0).toFixed(2)}</AMOUNT>${billAllocsXml}
+    <AMOUNT>${(entry.amount || 0).toFixed(2)}</AMOUNT>${vatExpAmountXml}${billAllocsXml}
   </LEDGERENTRIES.LIST>`;
   }).join('');
 
