@@ -1537,18 +1537,22 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
       <VOUCHERCOMPONENTLIST.LIST></VOUCHERCOMPONENTLIST.LIST>
     </BATCHALLOCATIONS.LIST>`;
 
+    // ── Tag order matches REVTEST01.xml exactly ───────────────────────────────
+    // GSTOVRDNTAXABILITY + GSTOVRDNTYPEOFSUPPLY are required — without them Tally
+    // cannot classify the supply for GST and Tax Analysis shows a blank Tax Rate.
+    // They appear in every confirmed working e-invoice (REVTEST01, BIW20_test_fixed).
+    // RATEDETAILS.LIST must come AFTER ACCOUNTINGALLOCATIONS.LIST per reference XML.
     return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
     <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-    <RATE>${esc(item.rate || '')}</RATE>
+    ${gstSourceXml ? gstSourceXml + '\n    ' : ''}<GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
+    ${hsnSourceXml ? hsnSourceXml + '\n    ' : ''}<GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
+    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>\n    ` : ''}<RATE>${esc(item.rate || '')}</RATE>
     <AMOUNT>${itemAmountTag.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${esc(formatQty(item.actualQty || ''))}</ACTUALQTY>
-    <BILLEDQTY>${esc(formatQty(item.billedQty || ''))}</BILLEDQTY>
-    ${gstSourceXml}
-    ${hsnSourceXml}
-    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${rateDetailsXml}${batchAllocXml}${acctAllocsXml}
+    <BILLEDQTY>${esc(formatQty(item.billedQty || ''))}</BILLEDQTY>${batchAllocXml}${acctAllocsXml}${rateDetailsXml}
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
 
