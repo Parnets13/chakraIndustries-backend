@@ -66,18 +66,34 @@ function capDate(voucherDate, periodEnd) {
  */
 export function resolveGstLedgerName(taxType, salesBase, taxAmount, availableLedgerNames) {
   const plain = { cgst: 'CGST', sgst: 'SGST', igst: 'IGST' }[taxType] || 'CGST';
+  const outPrefix = taxType === 'igst' ? 'Output IGST' : `Output ${taxType.toUpperCase()}`;
 
-  // Per Tally official docs (help.tallysolutions.com/tally/why_is_gst_not_calculated):
-  // "If GST rates are specified in the tax ledger as well as the stock item, it creates
-  // a conflict. Use common GST ledgers WITHOUT specifying tax rates, so that GST is
-  // picked from the stock item."
-  //
-  // We use plain CGST/SGST/IGST ledgers (Type=Central Tax/State Tax/Integrated Tax,
-  // no RATEOFTAXCALCULATION). The GST rate is set on the stock item master.
-  // This is the ONLY way to avoid "Tax amount does not match" warning.
-  //
-  // Note: if Tally has an "Output CGST @ 2.5%" style ledger and the manually-created
-  // invoices use that, we check availableLedgerNames for exact match first.
+  // Compute effective rate % (half-rate for CGST/SGST, full rate for IGST)
+  let rateStr = '';
+  if (salesBase > 0 && taxAmount > 0) {
+    const rate = +((taxAmount / salesBase) * 100).toFixed(2);
+    const brackets = [2.5, 5, 6, 9, 12, 14, 18, 28];
+    const closest = brackets.reduce((best, b) => Math.abs(b - rate) < Math.abs(best - rate) ? b : best, brackets[0]);
+    if (Math.abs(closest - rate) < 0.5) rateStr = String(closest);
+  }
+
+  // Use rate-specific ledgers e.g. "Output CGST @ 2.5%"
+  // These have TAXTYPE=Others + RATEOFTAXCALCULATION=2.5, which is the
+  // correct type for GST output ledgers per Tally docs.
+  // The tax amount we send must exactly equal: ROUND(taxableBase × rate / 100, 2)
+  // which is what Tally computes — no mismatch.
+  if (rateStr) {
+    const rateSpecific = `${outPrefix} @ ${rateStr}%`;
+    // Check if Tally actually has this ledger
+    if (availableLedgerNames && availableLedgerNames.length) {
+      const match = availableLedgerNames.find(n => n.trim().toLowerCase() === rateSpecific.toLowerCase());
+      if (match) return match;
+    }
+    // Return the rate-specific name — export creates it with ACTION="Create" if missing
+    return rateSpecific;
+  }
+
+  // No rate computed — use plain ledger
   if (availableLedgerNames && availableLedgerNames.length) {
     const bareMatch = availableLedgerNames.find(n => n.trim().toLowerCase() === plain.toLowerCase());
     if (bareMatch) return bareMatch;
