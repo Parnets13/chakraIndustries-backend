@@ -1451,27 +1451,34 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     const gstLedgerSrc = (item.gstLedgerSource || item.accountingAllocations?.[0]?.ledgerName || '').trim();
     const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
     const gstHsnName   = (item.gstHsnName || '').trim();
-    // Never emit GSTLEDGERSOURCE — it causes Tally to look up the rate from the
-    // ledger master and conflict with our RATEDETAILS, producing the
-    // "Tax amount does not match" warning on e-invoice print.
-    // We send RATEDETAILS explicitly instead.
-    const isGenericLedger = true;  // always suppress GSTLEDGERSOURCE
-    const gstSourceXml = !isGenericLedger ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
-    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>` : '';
-    const hsnSourceXml = !isGenericLedger && hsnLedgerSrc ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
-    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>` : '';
-    // DO NOT emit GSTOVRDNTAXABILITY or GSTOVRDNTYPEOFSUPPLY.
-    // Per Tally official docs (help.tallysolutions.com/gst-rate-details-are-overridden):
-    // sending these tags tells Tally the GST rate is "overridden" in the voucher,
-    // which causes "GST Rate Details are overridden in transaction" mismatch for
-    // every imported invoice. Tally should read GST rate from the item master, not the voucher.
-    const gstOverrideXml = '';
 
-    // Rate details for GST tax calculation
-    // If rateDetails are missing or all zero, derive from ledger entries (CGST/SGST/IGST amounts)
-    let effectiveRateDetails = (item.rateDetails || []).filter(rd => (rd.gstRate || 0) > 0);
-    if (effectiveRateDetails.length === 0) {
-      // Back-calculate from ledger entries
+    // ── GSTLEDGERSOURCE / HSNLEDGERSOURCE ────────────────────────────────────
+    // Required per BIW20_EXACT_COPY.xml (confirmed working e-invoice).
+    // Without GSTLEDGERSOURCE Tally's Tax Analysis cannot populate "Tax Rate" or
+    // "As per Transaction", leaving it blank and triggering the tax mismatch warning.
+    // Emit only when a real sales ledger name is known (not empty / generic fallback).
+    const GENERIC_LEDGER_NAMES = new Set(['', 'sales', 'sales accounts']);
+    const hasRealLedger = gstLedgerSrc && !GENERIC_LEDGER_NAMES.has(gstLedgerSrc.toLowerCase());
+    const gstSourceXml = hasRealLedger
+      ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
+    <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>`
+      : '';
+    const hsnSourceXml = hasRealLedger && hsnLedgerSrc
+      ? `<HSNSOURCETYPE>${esc(item.hsnSourceType || 'Ledger')}</HSNSOURCETYPE>
+    <HSNLEDGERSOURCE>${esc(hsnLedgerSrc)}</HSNLEDGERSOURCE>`
+      : '';
+
+    // ── RATEDETAILS.LIST ──────────────────────────────────────────────────────
+    // Required per BIW20_EXACT_COPY.xml lines 293-315.
+    // Carries per-item CGST/SGST/IGST component rates so Tally can populate
+    // the Tax rate column in Tax Analysis and reconcile "As per Transaction"
+    // with "As per Calculation". Without this the Tax rate column is blank
+    // and e-invoice throws "Tax amount does not match".
+    // Use stored rateDetails from normalizeToTallyVoucher (already computed per-item).
+    // Fall back to back-calculating from ledger entry amounts if missing.
+    let effectiveRateDetails = (item.rateDetails || []);
+    if (!effectiveRateDetails.some(rd => (rd.gstRate || 0) > 0)) {
+      // Back-calculate from ledger entries (old invoices without stored rateDetails)
       const itemAmt = parseFloat(item.amount) || 0;
       if (itemAmt > 0) {
         const cgstEntry = (v.allLedgerEntries || []).find(le => (le.ledgerName || '').toLowerCase().includes('cgst'));
@@ -1480,27 +1487,34 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
         const totalBase = (v.allInventoryEntries || []).reduce((s, ie) => s + (parseFloat(ie.amount) || 0), 0) || itemAmt;
         const GST_SLABS = [0, 2.5, 5, 6, 9, 12, 14, 18, 28];
         const snap = r => GST_SLABS.reduce((b, s) => Math.abs(s - r) < Math.abs(b - r) ? s : b, 0);
+        const fallback = [];
         if (cgstEntry && totalBase > 0) {
-          const cgstAmt = Math.abs(parseFloat(cgstEntry.amount) || 0);
-          const cgstRate = snap((cgstAmt / totalBase) * 100);
-          if (cgstRate > 0) effectiveRateDetails.push({ gstRateDutyHead: 'CGST', gstRateEvaluationType: 'Based on Value', gstRate: cgstRate });
+          const r = snap((Math.abs(parseFloat(cgstEntry.amount) || 0) / totalBase) * 100);
+          if (r > 0) fallback.push({ gstRateDutyHead: 'CGST',       gstRateEvaluationType: 'Based on Value', gstRate: r });
         }
         if (sgstEntry && totalBase > 0) {
-          const sgstAmt = Math.abs(parseFloat(sgstEntry.amount) || 0);
-          const sgstRate = snap((sgstAmt / totalBase) * 100);
-          if (sgstRate > 0) effectiveRateDetails.push({ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate });
+          const r = snap((Math.abs(parseFloat(sgstEntry.amount) || 0) / totalBase) * 100);
+          if (r > 0) fallback.push({ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: r });
         }
         if (igstEntry && totalBase > 0) {
-          const igstAmt = Math.abs(parseFloat(igstEntry.amount) || 0);
-          const igstRate = snap((igstAmt / totalBase) * 100);
-          if (igstRate > 0) effectiveRateDetails.push({ gstRateDutyHead: 'IGST', gstRateEvaluationType: 'Based on Value', gstRate: igstRate });
+          const r = snap((Math.abs(parseFloat(igstEntry.amount) || 0) / totalBase) * 100);
+          if (r > 0) fallback.push({ gstRateDutyHead: 'IGST',       gstRateEvaluationType: 'Based on Value', gstRate: r });
         }
+        if (fallback.length > 0) effectiveRateDetails = fallback;
       }
     }
-    // Never send RATEDETAILS — per Tally official docs, sending RATEDETAILS in the voucher
-    // causes Tally to treat the GST rate as "overridden in transaction" and shows
-    // "Tax amount does not match" warning. Tally reads rate from the stock item master.
-    const rateDetailsXml = '';
+    const rateDetailsXml = effectiveRateDetails.map(rd => {
+      const rate = rd.gstRate || 0;
+      const evalType = rd.gstRateEvaluationType || 'Based on Value';
+      // Mirror reference XML: &#4; Not Applicable for zero-rate Cess, else the value
+      const evalTag  = evalType === 'Not Applicable' ? '&#4; Not Applicable' : esc(evalType);
+      const rateTag  = rate > 0 ? `\n                <GSTRATE> ${rate.toFixed(2)}</GSTRATE>` : '';
+      return `
+    <RATEDETAILS.LIST>
+      <GSTRATEDUTYHEAD>${esc(rd.gstRateDutyHead)}</GSTRATEDUTYHEAD>
+      <GSTRATEVALUATIONTYPE>${evalTag}</GSTRATEVALUATIONTYPE>${rateTag}
+    </RATEDETAILS.LIST>`;
+    }).join('');
 
     // Godown: use item-level batchAllocations if present, else build from item/voucher fields
     const batch = item.batchAllocations?.[0];
@@ -1534,7 +1548,6 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     <BILLEDQTY>${esc(formatQty(item.billedQty || ''))}</BILLEDQTY>
     ${gstSourceXml}
     ${hsnSourceXml}
-    ${gstOverrideXml}
     ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${rateDetailsXml}${batchAllocXml}${acctAllocsXml}
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');

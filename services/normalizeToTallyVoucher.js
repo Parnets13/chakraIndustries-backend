@@ -293,6 +293,30 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const sgstRate = itemTaxRates[i].sgst;
     const igstRate = itemTaxRates[i].igst;
 
+    // ── GSTLEDGERSOURCE = sales ledger for this item ─────────────────────────
+    // Per BIW20_EXACT_COPY.xml (confirmed working e-invoice), GSTSOURCETYPE=Ledger and
+    // GSTLEDGERSOURCE=<sales ledger name> must be present on each inventory entry.
+    // Without it Tally's Tax Analysis shows Tax Rate = blank and "As per Transaction = 0",
+    // causing the "Tax amount does not match" mismatch shown in screenshot 1.
+    // HSNLEDGERSOURCE also uses the same ledger — Tally reads HSN from the ledger master.
+    const gstLedgerSource = salesLedger;  // same as accountingAllocations ledger name
+
+    // ── RATEDETAILS: explicit CGST/SGST/IGST rates for this item ────────────
+    // Per BIW20_EXACT_COPY.xml lines 293-315, RATEDETAILS.LIST inside
+    // ALLINVENTORYENTRIES.LIST carries the component rates (2.5/2.5/5 for 5% GST).
+    // Without it Tally cannot populate the Tax rate column in Tax Analysis and
+    // "As per Calculation" stays at the correct value while "As per Transaction"
+    // stays blank — the mismatch that generates the e-invoice warning.
+    // These are informational rates (not override) — Tally reads them for display
+    // and cross-check, not to recompute tax from scratch.
+    const rateDetails = [];
+    if (cgstRate > 0) rateDetails.push({ gstRateDutyHead: 'CGST',      gstRateEvaluationType: 'Based on Value', gstRate: cgstRate });
+    if (sgstRate > 0) rateDetails.push({ gstRateDutyHead: 'SGST/UTGST', gstRateEvaluationType: 'Based on Value', gstRate: sgstRate });
+    if (igstRate > 0) rateDetails.push({ gstRateDutyHead: 'IGST',       gstRateEvaluationType: 'Based on Value', gstRate: igstRate });
+    // Always include Cess + State Cess stubs — present in reference XML, Tally expects them
+    rateDetails.push({ gstRateDutyHead: 'Cess',       gstRateEvaluationType: 'Not Applicable', gstRate: 0 });
+    rateDetails.push({ gstRateDutyHead: 'State Cess', gstRateEvaluationType: 'Based on Value',  gstRate: 0 });
+
     return {
       stockItemName: itemName,
       isDeemedPositive: false,
@@ -301,12 +325,11 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       amount:   itemAmount,   // MUST match RATE tag: qty × rate
       actualQty: `${itemQty} ${itemUnit}`,
       billedQty:  `${itemQty} ${itemUnit}`,
-      gstSourceType: '',
-      gstLedgerSource: '',   // never set — causes Tally ledger-master rate conflict
-      hsnSourceType: '',
-      hsnLedgerSource: '',
-      gstOverrideTaxability: 'Taxable',
-      gstOverrideSupplyType: 'Goods',
+      // GSTLEDGERSOURCE — required for Tax Analysis to show Tax Rate and "As per Transaction"
+      gstSourceType:   'Ledger',
+      gstLedgerSource: gstLedgerSource,
+      hsnSourceType:   'Ledger',
+      hsnLedgerSource: gstLedgerSource,   // same ledger carries both GST rate and HSN
       gstHsnName: itemHSN,
       batchAllocations: [{
         godownName: 'Srichakra Industries',
@@ -315,12 +338,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
         actualQty: `${itemQty} ${itemUnit}`,
         billedQty:  `${itemQty} ${itemUnit}`,
       }],
-      // RATEDETAILS: Do NOT send explicit rates in inventory entries.
-      // Per Tally official docs, sending RATEDETAILS in the voucher causes Tally to
-      // treat the GST rate as "overridden in transaction" and shows tax mismatch warning.
-      // Tally calculates the correct GST from the ledger's RATEOFTAXCALCULATION itself.
-      // Only the LEDGERENTRIES amounts (CGST/SGST/IGST) are needed.
-      rateDetails: [],
+      // RATEDETAILS — component rates for Tax Analysis display and e-invoice cross-check
+      rateDetails,
       accountingAllocations: [{
         ledgerName: salesLedger,
         isDeemedPositive: false,
