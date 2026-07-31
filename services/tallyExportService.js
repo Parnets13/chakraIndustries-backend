@@ -2083,27 +2083,28 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // This "Sales" ledger is created once and reused for all invoices without a
       // specific per-item sales ledger.
       `<LEDGER NAME="Sales" ACTION="Create"><NAME>Sales</NAME><PARENT>Sales Accounts</PARENT><ISREVENUE>Yes</ISREVENUE><AFFECTSSTOCK>No</AFFECTSSTOCK></LEDGER>`,
-      // SAFEGUARD: Create/configure rate-specific GST ledgers that vouchers reference.
-      // ACTION="Alter" is used so that ledgers already created with TAXTYPE=Others are
-      // corrected to Central Tax / State Tax / Integrated Tax on the next export run.
-      // Tally's e-invoice module ONLY recognises Central/State/Integrated Tax ledgers when
-      // computing expected GST — ledgers typed "Others" produce "Tax amount does not match"
-      // on every e-invoice print even when the rupee amounts are exactly right.
-      `<LEDGER NAME="CGST" ACTION="Create"><NAME>CGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE></LEDGER>`,
-      `<LEDGER NAME="SGST" ACTION="Create"><NAME>SGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE></LEDGER>`,
-      `<LEDGER NAME="IGST" ACTION="Create"><NAME>IGST</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 2.5%" ACTION="Alter"><NAME>Output CGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 2.5%" ACTION="Alter"><NAME>Output SGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 6%" ACTION="Alter"><NAME>Output CGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 6%" ACTION="Alter"><NAME>Output SGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 9%" ACTION="Alter"><NAME>Output CGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 9%" ACTION="Alter"><NAME>Output SGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 14%" ACTION="Alter"><NAME>Output CGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 14%" ACTION="Alter"><NAME>Output SGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 5%" ACTION="Alter"><NAME>Output IGST @ 5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 12%" ACTION="Alter"><NAME>Output IGST @ 12%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>12</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 18%" ACTION="Alter"><NAME>Output IGST @ 18%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>18</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 28%" ACTION="Alter"><NAME>Output IGST @ 28%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>28</RATEOFTAXCALCULATION></LEDGER>`,
+      // ── CGST / SGST / IGST duty ledgers — DO NOT auto-create or auto-alter ────
+      // These 15 ledgers (CGST, SGST, IGST plain + Output CGST/SGST @ 2.5%/6%/9%/14%
+      // and Output IGST @ 5%/12%/18%/28%) are manually configured in Tally with
+      // Type of Duty/Tax = GST and the correct Tax Type (Central Tax / State Tax /
+      // Integrated Tax) set via the GST Details sub-screen in the Tally UI.
+      //
+      // DO NOT generate XML for these ledgers here. Tally's XML import schema does not
+      // accept "Central Tax", "State Tax", or "Integrated Tax" as values for the top-level
+      // <TAXTYPE> tag — valid values are only: GST, Others, VAT, TDS, TCS. Sending the
+      // wrong TAXTYPE value causes Tally to silently reset the ledger back to
+      // Type of Duty/Tax = Others, which is the root cause of the
+      // "Tax amount does not match the value calculated as per the set tax rate" warning
+      // on e-invoice save/print.
+      //
+      // If a new company or client needs these 15 ledgers, they must be created manually
+      // in the Tally UI following this configuration:
+      //   Gateway of Tally → Accounts Info → Ledgers → Create
+      //   Under: Duties & Taxes
+      //   Type of Duty/Tax: GST
+      //   Tax Type: Central Tax (for CGST), State Tax (for SGST), Integrated Tax (for IGST)
+      //   Percentage of Calculation: 2.5 / 6 / 9 / 14 / 5 / 12 / 18 / 28 as applicable
+      // ─────────────────────────────────────────────────────────────────────────────────
       ...partyNames.map(name =>
         `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sundry Debtors</PARENT></LEDGER>`
       ),
