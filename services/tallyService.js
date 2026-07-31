@@ -709,23 +709,22 @@ export async function pushSalesVouchersToTally(cfg, triggeredBy) {
     const autoLedgerXml = [
       // System ledgers — Tally skips if already present
       `<LEDGER NAME="Sales Accounts" ACTION="Create"><NAME>Sales Accounts</NAME><PARENT>Sales Accounts</PARENT></LEDGER>`,
-      // Rate-specific GST ledgers: TAXTYPE=Others + RATEOFTAXCALCULATION.
-      // ACTION="Create" — Tally skips if already present. We must NOT use ACTION="Alter"
-      // because altering existing GST ledger masters triggers Tally to re-validate ALL
-      // existing vouchers that reference those ledgers, causing previously-correct
-      // manually-created invoices to start showing tax mismatch.
-      `<LEDGER NAME="Output CGST @ 2.5%" ACTION="Create"><NAME>Output CGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 2.5%" ACTION="Create"><NAME>Output SGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 6%" ACTION="Create"><NAME>Output CGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 6%" ACTION="Create"><NAME>Output SGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 9%" ACTION="Create"><NAME>Output CGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 9%" ACTION="Create"><NAME>Output SGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output CGST @ 14%" ACTION="Create"><NAME>Output CGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output SGST @ 14%" ACTION="Create"><NAME>Output SGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 5%" ACTION="Create"><NAME>Output IGST @ 5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>5</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 12%" ACTION="Create"><NAME>Output IGST @ 12%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>12</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 18%" ACTION="Create"><NAME>Output IGST @ 18%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>18</RATEOFTAXCALCULATION></LEDGER>`,
-      `<LEDGER NAME="Output IGST @ 28%" ACTION="Create"><NAME>Output IGST @ 28%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Others</TAXTYPE><RATEOFTAXCALCULATION>28</RATEOFTAXCALCULATION></LEDGER>`,
+      // Rate-specific GST ledgers with correct TAXTYPE per official Tally docs:
+      // help.tallysolutions.com/set-up-tax-ledgers-for-gst/
+      // Type of Duty/Tax must be "GST", Tax Type = Central Tax / State Tax / Integrated Tax
+      // Using ACTION="Alter" to fix existing ledgers that were wrongly created with TAXTYPE=Others
+      `<LEDGER NAME="Output CGST @ 2.5%" ACTION="Alter"><NAME>Output CGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 2.5%" ACTION="Alter"><NAME>Output SGST @ 2.5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>2.5</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 6%" ACTION="Alter"><NAME>Output CGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 6%" ACTION="Alter"><NAME>Output SGST @ 6%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>6</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 9%" ACTION="Alter"><NAME>Output CGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 9%" ACTION="Alter"><NAME>Output SGST @ 9%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>9</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output CGST @ 14%" ACTION="Alter"><NAME>Output CGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Central Tax</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output SGST @ 14%" ACTION="Alter"><NAME>Output SGST @ 14%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>State Tax</TAXTYPE><RATEOFTAXCALCULATION>14</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 5%" ACTION="Alter"><NAME>Output IGST @ 5%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>5</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 12%" ACTION="Alter"><NAME>Output IGST @ 12%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>12</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 18%" ACTION="Alter"><NAME>Output IGST @ 18%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>18</RATEOFTAXCALCULATION></LEDGER>`,
+      `<LEDGER NAME="Output IGST @ 28%" ACTION="Alter"><NAME>Output IGST @ 28%</NAME><PARENT>Duties &amp; Taxes</PARENT><TAXTYPE>Integrated Tax</TAXTYPE><RATEOFTAXCALCULATION>28</RATEOFTAXCALCULATION></LEDGER>`,
       // Party ledgers — one per unique customer; Tally skips if already present
       ...partyNames.map(name =>
         `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sundry Debtors</PARENT></LEDGER>`
