@@ -234,13 +234,25 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     };
   });
   for (let i = 0; i < itemAmounts.length; i++) {
+    const item = validItems[i];
+    const r    = itemTaxRates[i];
+    // ── Use Excel-provided tax amounts directly when available ────────────────
+    // Per Tally docs, Tally auto-fills tax amounts from the rate on manual entry.
+    // When importing via XML we must send the EXACT same amount Tally would compute
+    // OR the exact value from Excel — using the Excel value is most reliable because
+    // it is what the business confirmed and avoids recompute rounding differences.
+    const excelCGST = +(item.cgst || 0);
+    const excelSGST = +(item.sgst || 0);
+    const excelIGST = +(item.igst || 0);
     const amt = itemAmounts[i];
-    const r   = itemTaxRates[i];
+
     if (r.igst > 0) {
-      totalIGST = +(totalIGST + +((amt * r.igst) / 100).toFixed(2)).toFixed(2);
+      // Use Excel IGST if available, else compute
+      totalIGST = +(totalIGST + (excelIGST > 0 ? excelIGST : +((amt * r.igst) / 100).toFixed(2))).toFixed(2);
     } else if (r.cgst > 0) {
-      totalCGST = +(totalCGST + +((amt * r.cgst) / 100).toFixed(2)).toFixed(2);
-      totalSGST = +(totalSGST + +((amt * r.sgst) / 100).toFixed(2)).toFixed(2);
+      // Use Excel CGST/SGST if available, else compute
+      totalCGST = +(totalCGST + (excelCGST > 0 ? excelCGST : +((amt * r.cgst) / 100).toFixed(2))).toFixed(2);
+      totalSGST = +(totalSGST + (excelSGST > 0 ? excelSGST : +((amt * r.sgst) / 100).toFixed(2))).toFixed(2);
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
