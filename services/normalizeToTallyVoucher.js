@@ -283,21 +283,42 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const itemHSN   = (item.hsn   || '').toString().trim();
     const itemAmount = itemAmounts[i];  // = qty × rate, rounded to 2dp
 
-    // Sales ledger for this item
-    const rawLedger = (item.tallySalesLedger || '').toString().trim();
-    const GENERIC_LEDGERS = new Set(['', 'sales', 'sales accounts', 'sales accounts (group)']);
-    const salesLedger = (!rawLedger || GENERIC_LEDGERS.has(rawLedger.toLowerCase())) ? 'Sales' : rawLedger;
-
     // GST rate for this item — use this item's own taxRate, fall back to invoice-level
     const cgstRate = itemTaxRates[i].cgst;
     const sgstRate = itemTaxRates[i].sgst;
     const igstRate = itemTaxRates[i].igst;
+    const itemGstRateFull = (cgstRate + sgstRate) || igstRate; // full GST% for this item
+
+    // Sales ledger for this item
+    // Priority:
+    //   1. tallySalesLedger stored on item / ItemMaster — use as-is if it's a real name
+    //   2. Compute from item name + GST rate (e.g. "SS Bottle Sales Local 5%")
+    //      This gives Tally a specific ledger name for GSTLEDGERSOURCE so it can
+    //      populate the Tax Rate column in Tax Analysis and populate "As per Transaction".
+    //      Without a real ledger name, GSTLEDGERSOURCE is suppressed and Tally shows
+    //      blank Tax Rate → "Tax amount does not match" warning on e-invoice.
+    const rawLedger = (item.tallySalesLedger || '').toString().trim();
+    const GENERIC_LEDGERS = new Set(['', 'sales', 'sales accounts', 'sales accounts (group)']);
+    let salesLedger;
+    if (rawLedger && !GENERIC_LEDGERS.has(rawLedger.toLowerCase())) {
+      // Explicit item-master ledger — use it directly
+      salesLedger = rawLedger;
+    } else if (itemGstRateFull > 0) {
+      // Compute ledger name from item name + GST rate, matching Tally convention:
+      //   "SS Bottle Sales Local 5%"  (intrastate)
+      //   "SS Bottle Sales Interstate" (interstate)
+      const baseName = itemName.replace(/\s+\d+ML|\s+\d+L|\s+\d+G$/gi, '').trim();
+      salesLedger = igstRate > 0
+        ? `${baseName} Sales Interstate`
+        : `${baseName} Sales Local ${itemGstRateFull}%`;
+    } else {
+      salesLedger = 'Sales';
+    }
 
     // ── GSTLEDGERSOURCE = sales ledger for this item ─────────────────────────
-    // Per BIW20_EXACT_COPY.xml (confirmed working e-invoice), GSTSOURCETYPE=Ledger and
-    // GSTLEDGERSOURCE=<sales ledger name> must be present on each inventory entry.
-    // Without it Tally's Tax Analysis shows Tax Rate = blank and "As per Transaction = 0",
-    // causing the "Tax amount does not match" mismatch shown in screenshot 1.
+    // Per REVTEST01.xml + BIW20_test_fixed.xml (both confirmed working e-invoices):
+    // GSTSOURCETYPE=Ledger and GSTLEDGERSOURCE=<sales ledger name> must be present.
+    // Without it Tally's Tax Analysis shows Tax Rate = blank and "As per Transaction = 0".
     // HSNLEDGERSOURCE also uses the same ledger — Tally reads HSN from the ledger master.
     const gstLedgerSource = salesLedger;  // same as accountingAllocations ledger name
 

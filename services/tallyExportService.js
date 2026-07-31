@@ -2077,10 +2077,14 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     }
 
     // Also add computed names from ItemMaster for items without a stored ledger
+    // ── CRITICAL: regex must match normalizeToTallyVoucher exactly ─────────────
+    // normalizeToTallyVoucher computes: itemName.replace(/\s+\d+ML|\s+\d+L|\s+\d+G$/gi, '').trim()
+    // This auto-masters block must use the IDENTICAL regex so the created ledger name
+    // matches the GSTLEDGERSOURCE written into the voucher XML.
     const itemMasters = await ItemMaster.find({ name: { $in: stockNames } }).lean();
     for (const im of itemMasters) {
       if (im.gst > 0) {
-        const baseName = im.name.replace(/\d+ML|\d+L|\d+G/gi, '').trim();
+        const baseName = im.name.replace(/\s+\d+ML|\s+\d+L|\s+\d+G$/gi, '').trim();
         salesLedgerNames.add(`${baseName} Sales Local ${im.gst}%`);
         salesLedgerNames.add(`${baseName} Sales Interstate`);
       }
