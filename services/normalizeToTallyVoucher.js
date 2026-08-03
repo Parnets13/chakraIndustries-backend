@@ -183,76 +183,74 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   const igstFullRate = isInterstate ? gstRateFull : 0;
 
   // ── Valid items & taxable amounts ─────────────────────────────────────────
-  // Use qty × rate as the authoritative taxable base per item.
-  // CRITICAL: The <RATE> tag in Tally XML is built from itemRate.toFixed(2).
-  // The <AMOUNT> tag must equal qty × itemRate rounded the same way.
-  // If RATE and AMOUNT differ Tally recomputes tax from RATE and gets a mismatch.
+  // item.basic  = taxable amount after discount (authoritative — set from Excel)
+  // item.amount = same as basic for non-discounted items
+  // item.total  = basic + CGST + SGST + IGST
+  //
+  // We use item.basic as the Tally AMOUNT for the inventory entry, because that is
+  // the assessable value Tally uses to compute expected tax in Tax Analysis.
+  // If we use qty×rate instead, discounted invoices get a different base from what
+  // Tally expects, causing "As per Calculation" ≠ "As per Transaction".
   const validItems = items.filter(item => (item.description || item.name || '').toString().trim());
   const itemAmounts = validItems.map(item => {
-    const qty  = +(item.qty  || 1);
-    const rate = +(item.rate || 0);
-    return +(qty * rate).toFixed(2);
+    // Prefer item.basic (taxable base after discount), then item.amount, then qty×rate
+    const basic  = +(item.basic  || 0);
+    const amount = +(item.amount || 0);
+    const qty    = +(item.qty    || 1);
+    const rate   = +(item.rate   || 0);
+    const computed = +(qty * rate).toFixed(2);
+    // Use whichever nonzero value is available in priority order
+    return +((basic > 0 ? basic : amount > 0 ? amount : computed) || computed).toFixed(2);
   });
 
-  // ── Compute CGST/SGST/IGST per item using each item's own tax rate ─────────
-  // Rate resolution priority per item:
-  //   1. item.taxRate (stored from Excel) — most reliable
-  //   2. Back-calculate from item's own cgst+sgst amounts vs item amount — catches
-  //      invoices where taxRate was never stored but cgst/sgst values are present
-  //   3. Invoice-level fallback gstRateFull — last resort
+  // ── CGST/SGST/IGST totals — use Excel values directly, no recomputation ──────
+  // The invoice already has the correct cgst/sgst/igst per item from the Excel upload.
+  // Use them directly. Only back-calculate from taxRate when Excel values are absent.
   let totalCGST = 0, totalSGST = 0, totalIGST = 0;
   const itemTaxRates = validItems.map((item, i) => {
-    // Interstate only if this specific item has igst > 0 in Excel
     const itemIsInterstate = (+(item.igst || 0)) > 0;
-    const itemAmt = itemAmounts[i];
+    const excelCGST = +(item.cgst || 0);
+    const excelSGST = +(item.sgst || 0);
+    const excelIGST = +(item.igst || 0);
 
-    // Step 1: try item.taxRate directly
-    let itemTaxRateFull = snapToSlab(+(item.taxRate || 0));
-
-    // Step 2: if still 0, back-calculate from the item's own cgst/sgst/igst amounts
-    if (!itemTaxRateFull) {
-      const itemCgst = +(item.cgst || 0);
-      const itemSgst = +(item.sgst || 0);
-      const itemIgst = +(item.igst || 0);
-      const itemTax  = itemCgst + itemSgst + itemIgst;
-      const itemBase = +(item.basic || 0) || itemAmt;
-      // DIAGNOSTIC — log every item so we can see exactly what values arrive
-      console.log(`[normalizeToTallyVoucher] item="${(item.description||item.name||'')}": taxRate=${item.taxRate} cgst=${item.cgst} sgst=${item.sgst} igst=${item.igst} basic=${item.basic} itemAmt=${itemAmt} itemTax=${itemTax} itemBase=${itemBase}`);
-      if (itemTax > 0 && itemBase > 0) {
-        itemTaxRateFull = snapToSlab(+((itemTax / itemBase) * 100).toFixed(4));
-        console.log(`[normalizeToTallyVoucher]  → back-calculated rate: ${itemTaxRateFull}%`);
-      }
+    // If Excel provides the tax amounts directly, derive the rate from them
+    // so rateDetails in the inventory entry reflects the actual applied rate.
+    const itemBase = itemAmounts[i];
+    if (excelCGST > 0 || excelIGST > 0) {
+      const appliedCgst = itemBase > 0 ? snapToSlab(+((excelCGST / itemBase) * 100).toFixed(4)) : 0;
+      const appliedSgst = itemBase > 0 ? snapToSlab(+((excelSGST / itemBase) * 100).toFixed(4)) : 0;
+      const appliedIgst = itemBase > 0 ? snapToSlab(+((excelIGST / itemBase) * 100).toFixed(4)) : 0;
+      return { cgst: appliedCgst, sgst: appliedSgst, igst: appliedIgst };
     }
 
-    // Step 3: fall back to invoice-level rate
+    // No Excel tax amounts — fall back to taxRate field
+    let itemTaxRateFull = snapToSlab(+(item.taxRate || 0));
     if (!itemTaxRateFull) itemTaxRateFull = gstRateFull;
-
     return {
       cgst: itemIsInterstate ? 0 : snapToSlab(itemTaxRateFull / 2),
       sgst: itemIsInterstate ? 0 : snapToSlab(itemTaxRateFull / 2),
       igst: itemIsInterstate ? itemTaxRateFull : (isInterstate ? igstFullRate : 0),
     };
   });
+
   for (let i = 0; i < itemAmounts.length; i++) {
     const item = validItems[i];
-    const r    = itemTaxRates[i];
-    // ── Use Excel-provided tax amounts directly when available ────────────────
-    // Per Tally docs, Tally auto-fills tax amounts from the rate on manual entry.
-    // When importing via XML we must send the EXACT same amount Tally would compute
-    // OR the exact value from Excel — using the Excel value is most reliable because
-    // it is what the business confirmed and avoids recompute rounding differences.
+    // Always use Excel-provided tax amounts — they match what Tally expects
     const excelCGST = +(item.cgst || 0);
     const excelSGST = +(item.sgst || 0);
     const excelIGST = +(item.igst || 0);
-    const amt = itemAmounts[i];
+    const r = itemTaxRates[i];
 
-    if (r.igst > 0) {
-      // Use Excel IGST if available, else compute
-      totalIGST = +(totalIGST + (excelIGST > 0 ? excelIGST : +((amt * r.igst) / 100).toFixed(2))).toFixed(2);
+    if (excelIGST > 0) {
+      totalIGST = +(totalIGST + excelIGST).toFixed(2);
+    } else if (excelCGST > 0) {
+      totalCGST = +(totalCGST + excelCGST).toFixed(2);
+      totalSGST = +(totalSGST + excelSGST).toFixed(2);
+    } else if (r.igst > 0) {
+      totalIGST = +(totalIGST + +((itemAmounts[i] * r.igst) / 100).toFixed(2)).toFixed(2);
     } else if (r.cgst > 0) {
-      // Use Excel CGST/SGST if available, else compute
-      totalCGST = +(totalCGST + (excelCGST > 0 ? excelCGST : +((amt * r.cgst) / 100).toFixed(2))).toFixed(2);
-      totalSGST = +(totalSGST + (excelSGST > 0 ? excelSGST : +((amt * r.sgst) / 100).toFixed(2))).toFixed(2);
+      totalCGST = +(totalCGST + +((itemAmounts[i] * r.cgst) / 100).toFixed(2)).toFixed(2);
+      totalSGST = +(totalSGST + +((itemAmounts[i] * r.sgst) / 100).toFixed(2)).toFixed(2);
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
@@ -281,7 +279,7 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const itemRate  = +(item.rate || 0);
     const itemUnit  = tallyUnit(item.unit || 'Nos');
     const itemHSN   = (item.hsn   || '').toString().trim();
-    const itemAmount = itemAmounts[i];  // = qty × rate, rounded to 2dp
+    const itemAmount = itemAmounts[i];  // = item.basic (taxable base after discount), or qty×rate
 
     // GST rate for this item — use this item's own taxRate, fall back to invoice-level
     const cgstRate = itemTaxRates[i].cgst;

@@ -2401,16 +2401,50 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             : [];
           const masterMap = new Map(masters.map(m => [m.name, m]));
 
-          // Enrich invoice items with latest ItemMaster values
-          const enrichedItems = (inv.items || []).map(item => {
+          // Enrich invoice items with latest ItemMaster values.
+          // ── AUTO-RESOLVE tallySalesLedger from live Tally ledger list ─────────
+          // When tallySalesLedger is empty on the item AND in ItemMaster, use
+          // resolveSalesLedger() to find the best-matching ledger from the live
+          // Tally sales ledger list (fetched at the start of this function).
+          // Then save the resolved name back to ItemMaster so it is remembered
+          // on all future exports — no manual setup required.
+          const GENERIC = new Set(['', 'sales', 'sales accounts', 'sales accounts (group)']);
+          const enrichedItems = await Promise.all((inv.items || []).map(async item => {
             const n  = (item.description || item.name || '').trim();
             const im = masterMap.get(n);
-            return {
-              ...item,
-              hsn:              (item.hsn || '').trim()              || (im?.hsn              || '').trim(),
-              tallySalesLedger: (item.tallySalesLedger || '').trim() || (im?.tallySalesLedger || '').trim(),
-            };
-          });
+            const hsn = (item.hsn || '').trim() || (im?.hsn || '').trim();
+
+            // Determine current tallySalesLedger: item → ItemMaster → resolve
+            let tallySalesLedger = (item.tallySalesLedger || '').trim()
+                                || (im?.tallySalesLedger  || '').trim();
+
+            if (GENERIC.has(tallySalesLedger.toLowerCase()) && tallySalesLedgers.length > 0) {
+              // No ledger set — auto-resolve from live Tally list
+              const itemCgst = +(item.cgst || 0);
+              const itemIgst = +(item.igst || 0);
+              const taxBase  = +(item.basic || 0) || +(item.amount || 0);
+              const gstRate  = taxBase > 0
+                ? ((itemCgst + itemIgst) > 0
+                    ? Math.round(((itemCgst + itemIgst) / taxBase) * 100 * 2) / 2
+                    : +(item.taxRate || 0))
+                : +(item.taxRate || 0);
+              const isInterstate = itemIgst > 0;
+
+              const resolved = resolveSalesLedger(
+                tallySalesLedgers, n, gstRate, null, isInterstate
+              );
+              const GENERIC_RESOLVED = new Set(['sales accounts', 'sales accounts (group)']);
+              if (resolved && !GENERIC_RESOLVED.has(resolved.toLowerCase())) {
+                tallySalesLedger = resolved;
+                LOG(`Auto-resolved tallySalesLedger for "${n}": "${resolved}" — saving to ItemMaster`);
+                // Save back to ItemMaster so future exports skip this resolution step
+                ItemMaster.updateOne({ name: n }, { $set: { tallySalesLedger: resolved } })
+                  .catch(e => ERR(`Failed to save tallySalesLedger for "${n}":`, e.message));
+              }
+            }
+
+            return { ...item, hsn, tallySalesLedger };
+          }));
 
           // Re-normalize with fresh data + current periodEnd + correct voucher type
           let tv;
