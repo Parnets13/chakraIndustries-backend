@@ -752,13 +752,22 @@ export async function exportStockItems(cfg, triggeredBy) {
       // ERP-only items have no tallyGuid — use Create so they are added as new.
       const action = item.tallyGuid ? 'Alter' : 'Create';
 
-      // SAFETY GUARD: if this item already exists in Tally (ACTION="Alter") and
-      // our ERP has gst=0, do NOT send <GSTRATE> — it would overwrite a correctly
-      // configured nonzero rate in Tally with 0%.  Omitting the tag leaves Tally's
-      // existing value untouched.  New items (ACTION="Create") are sent as-is.
-      const gstRateTag = (gstRate === 0 && action === 'Alter')
-        ? (() => { console.warn(`Skipped updating ledger rate to 0% for ${item.name} — refusing to overwrite existing nonzero rate.`); return ''; })()
-        : `<GSTRATE>${gstRate}</GSTRATE>`;
+      // SAFETY GUARD: Never overwrite an existing nonzero GST rate in Tally.
+      // Doing so changes Tally's expected-tax calculation for ALL vouchers referencing
+      // this item — retroactively breaking manually-created invoices posted at the
+      // original rate. Only send GSTDETAILS when creating a new item (no tallyGuid)
+      // or when the ERP rate is being explicitly corrected (handled separately).
+      // For ACTION="Alter" items, omit GSTRATE and GSTDETAILS entirely so Tally
+      // keeps whatever rate is already configured on the item master.
+      const gstRateTag = action === 'Create' ? `<GSTRATE>${gstRate}</GSTRATE>` : '';
+      const gstDetailsTag = (action === 'Create' && gstRate > 0) ? `<GSTDETAILS.LIST ACTION="Replace">
+    <APPLICABLEFROM>20230401</APPLICABLEFROM>
+    <TAXABILITY>Taxable</TAXABILITY>
+    <GSTRATEINPERCENT>${gstRate}</GSTRATEINPERCENT>
+    <ISREVERSECHARGE>No</ISREVERSECHARGE>
+    <ISINELIGIBLEITC>No</ISINELIGIBLEITC>
+    <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
+  </GSTDETAILS.LIST>` : '';
 
       return `
 <STOCKITEM NAME="${esc(item.name)}" ACTION="${action}">
@@ -774,14 +783,7 @@ export async function exportStockItems(cfg, triggeredBy) {
   <STANDARDCOST>${costPrice.toFixed(2)}</STANDARDCOST>
   <STANDARDPRICE>${sellingPrice.toFixed(2)}</STANDARDPRICE>
   ${item.tallyGuid ? `<GUID>${esc(item.tallyGuid)}</GUID>` : ''}
-  ${gstRate > 0 ? `<GSTDETAILS.LIST ACTION="Replace">
-    <APPLICABLEFROM>20230401</APPLICABLEFROM>
-    <TAXABILITY>Taxable</TAXABILITY>
-    <GSTRATEINPERCENT>${gstRate}</GSTRATEINPERCENT>
-    <ISREVERSECHARGE>No</ISREVERSECHARGE>
-    <ISINELIGIBLEITC>No</ISINELIGIBLEITC>
-    <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
-  </GSTDETAILS.LIST>` : ''}
+  ${gstDetailsTag}
   ${openQty > 0 ? `
   <OPENINGBALANCE>${openQty} ${unit}</OPENINGBALANCE>
   <OPENINGRATE>${openRate.toFixed(2)} /1 ${unit}</OPENINGRATE>
@@ -2254,17 +2256,22 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
       const tallyCurrentRate = tallyStockGstMap.get(name.toLowerCase());
       const existsInTally = tallyCurrentRate !== undefined;
-      const rateIsCorrect = existsInTally && Math.abs(tallyCurrentRate - gstRate) < 0.1;
+      // SAFETY: only alter a stock item's GST rate when Tally has it at 0 (unset).
+      // If Tally already has ANY nonzero rate, leave it untouched — altering it
+      // would change the rate used by Tally's e-invoice validator for ALL existing
+      // vouchers referencing that item, retroactively breaking manually-created
+      // invoices that were correctly posted at a different GST rate.
+      const tallyRateIsMissing = existsInTally && tallyCurrentRate === 0;
 
       if (!existsInTally) {
         // Item doesn't exist → CREATE with full GST setup
         return `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
-      } else if (!rateIsCorrect && gstRate > 0) {
-        // Item exists but has wrong/missing GST rate → ALTER only GST details
-        LOG(`exportSalesInvoices: stock item "${name}" has Tally GST rate=${tallyCurrentRate}, expected=${gstRate} → altering GST only`);
+      } else if (tallyRateIsMissing && gstRate > 0) {
+        // Item exists but GST rate is 0/unset in Tally → ALTER to set the correct rate
+        LOG(`exportSalesInvoices: stock item "${name}" has no GST rate in Tally (rate=0) → setting to ${gstRate}%`);
         return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
       } else {
-        // Item exists with correct rate → skip entirely
+        // Item exists with a nonzero rate already set → skip entirely (never overwrite)
         return '';
       }
     }).filter(Boolean).join('');
