@@ -155,12 +155,10 @@ router.get('/finance/summary', protectDealer, async (req, res) => {
       }
     });
 
-    // Use dealer's stored outstandingAmount as fallback if invoices give 0
     if (totalOutstanding === 0 && dealer.outstandingAmount > 0) {
       totalOutstanding = dealer.outstandingAmount;
     }
 
-    // Credit notes for this dealer
     let creditNotesAmount = 0;
     try {
       const creditNotes = await CreditNote.find({
@@ -171,7 +169,7 @@ router.get('/finance/summary', protectDealer, async (req, res) => {
         status: { $in: ['Approved', 'Issued', 'Active'] },
       }).lean();
       creditNotesAmount = creditNotes.reduce((s, cn) => s + (cn.amount || cn.totalAmount || 0), 0);
-    } catch (_) { /* credit notes are optional */ }
+    } catch (_) {}
 
     const daysLeft = nextDueDate
       ? Math.ceil((nextDueDate - today) / (1000 * 60 * 60 * 24))
@@ -180,8 +178,6 @@ router.get('/finance/summary', protectDealer, async (req, res) => {
     const progressPct = totalPurchases > 0
       ? Math.min(100, Math.round((totalOutstanding / totalPurchases) * 100))
       : 0;
-
-    console.log(`[finance/summary] dealer=${dealer.businessName || dealer.name}, invoices=${invoices.length}, outstanding=${totalOutstanding}, purchases=${totalPurchases}`);
 
     res.json({
       success: true,
@@ -202,6 +198,121 @@ router.get('/finance/summary', protectDealer, async (req, res) => {
     });
   } catch (err) {
     console.error('finance/summary error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Finance ledger — chronological list of all transactions for this dealer
+router.get('/finance/ledger', protectDealer, async (req, res) => {
+  try {
+    const Invoice    = (await import('../models/Invoice.js')).default;
+    const CreditNote = (await import('../models/CreditNote.js')).default;
+    const dealer     = req.dealer;
+
+    const matchOr = [{ dealerId: dealer._id }];
+    if (dealer.businessName) matchOr.push({ partyName: { $regex: dealer.businessName, $options: 'i' } });
+    if (dealer.name)         matchOr.push({ partyName: { $regex: dealer.name, $options: 'i' } });
+
+    const invoices = await Invoice.find({ $or: matchOr }).sort({ invoiceDate: 1, createdAt: 1 }).lean();
+
+    let runningBalance = 0;
+    const entries = invoices.map(inv => {
+      const grand     = inv.grandTotal || 0;
+      const paid      = inv.paidAmount || 0;
+      const remaining = inv.remainingAmount != null ? inv.remainingAmount : Math.max(0, grand - paid);
+
+      // Invoice increases balance (amount owed)
+      runningBalance += grand;
+      // Payment reduces balance
+      runningBalance -= paid;
+
+      return {
+        id:        String(inv._id),
+        date:      inv.invoiceDate || inv.createdAt,
+        type:      'Invoice',
+        reference: inv.invoiceNo   || inv.invoiceNumber || String(inv._id).slice(-6).toUpperCase(),
+        party:     inv.partyName   || dealer.businessName || dealer.name || '—',
+        debit:     grand,
+        credit:    paid,
+        balance:   runningBalance,
+        source:    inv.dataSource  || (inv.tallyGuid ? 'Tally' : 'ERP'),
+        status:    inv.paymentStatus || 'Pending',
+      };
+    });
+
+    // Add credit notes as credit entries
+    try {
+      const creditNotes = await CreditNote.find({
+        $or: [
+          { dealerId: dealer._id },
+          ...(dealer.businessName ? [{ partyName: { $regex: dealer.businessName, $options: 'i' } }] : []),
+        ],
+      }).sort({ createdAt: 1 }).lean();
+
+      creditNotes.forEach(cn => {
+        const amt = cn.amount || cn.totalAmount || 0;
+        runningBalance -= amt;
+        entries.push({
+          id:        String(cn._id),
+          date:      cn.createdAt,
+          type:      'Credit Note',
+          reference: cn.creditNoteNo || cn.noteNumber || String(cn._id).slice(-6).toUpperCase(),
+          party:     cn.partyName    || dealer.businessName || dealer.name || '—',
+          debit:     0,
+          credit:    amt,
+          balance:   runningBalance,
+          source:    'ERP',
+          status:    cn.status || 'Issued',
+        });
+      });
+    } catch (_) {}
+
+    // Sort all entries by date
+    entries.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    const summary = {
+      openingBalance:  0,
+      currentBalance:  runningBalance,
+      totalEntries:    entries.length,
+      tallyInvoices:   entries.filter(e => e.source === 'Tally').length,
+      tallyReceipts:   0,
+    };
+
+    res.json({ success: true, data: entries, summary });
+  } catch (err) {
+    console.error('finance/ledger error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Finance receipts — payments received
+router.get('/finance/receipts', protectDealer, async (req, res) => {
+  try {
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const dealer  = req.dealer;
+
+    const matchOr = [{ dealerId: dealer._id }];
+    if (dealer.businessName) matchOr.push({ partyName: { $regex: dealer.businessName, $options: 'i' } });
+    if (dealer.name)         matchOr.push({ partyName: { $regex: dealer.name, $options: 'i' } });
+
+    const invoices = await Invoice.find({
+      $or: matchOr,
+      paidAmount: { $gt: 0 },
+    }).sort({ updatedAt: -1 }).lean();
+
+    const receipts = invoices.map(inv => ({
+      id:          String(inv._id),
+      date:        inv.paymentDate || inv.updatedAt || inv.createdAt,
+      invoiceNo:   inv.invoiceNo   || String(inv._id).slice(-6).toUpperCase(),
+      amount:      inv.paidAmount  || 0,
+      grandTotal:  inv.grandTotal  || 0,
+      paymentMode: inv.paymentMode || '—',
+      status:      inv.paymentStatus || 'Paid',
+    }));
+
+    res.json({ success: true, data: receipts });
+  } catch (err) {
+    console.error('finance/receipts error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 });
