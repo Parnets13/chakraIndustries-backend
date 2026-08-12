@@ -1,6 +1,8 @@
 import express from 'express';
 import {
   getAllDealers,
+  adminUpdateDealer,
+  adminDeleteDealer,
   getDealerDashboard,
   getDealerMe,
   getDealerProfile,
@@ -212,5 +214,7 @@ router.get('/finance/summary', protectDealer, async (req, res) => {
 
 // ERP web can fetch app-registered dealers from same database
 router.get('/erp/dealers', protect, getAllDealers);
+router.put('/erp/dealers/:id', protect, adminUpdateDealer);
+router.delete('/erp/dealers/:id', protect, adminDeleteDealer);
 
 export default router;

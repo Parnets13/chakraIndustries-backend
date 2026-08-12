@@ -119,100 +119,89 @@ export const getDealerWarehouseItems = async (req, res) => {
   }
 };
 
-// Get full inventory stock for the Dealer App InventoryPage
-// Returns items with name, sku, qty, warehouse, category, status
+// Get full inventory stock for the Dealer App
+// PRIMARY source: ItemMaster (real Tally-imported items with proper names)
+// STOCK qty:      aggregated from InventoryItem by SKU
 export const getDealerInventoryStock = async (req, res) => {
   try {
     const search = String(req.query.search || '').trim();
 
-    const match = {};
+    console.log('=== getDealerInventoryStock called (ItemMaster primary) ===');
+
+    // ── 1. Fetch from ItemMaster — the real Tally-imported catalog ────────────
+    const masterFilter = { isActive: true };
     if (search) {
-      match.$or = [
-        { sku:  { $regex: search, $options: 'i' } },
-        { name: { $regex: search, $options: 'i' } },
+      masterFilter.$or = [
+        { name:   { $regex: search, $options: 'i' } },
+        { sku:    { $regex: search, $options: 'i' } },
+        { itemId: { $regex: search, $options: 'i' } },
       ];
     }
 
-    console.log('=== getDealerInventoryStock called ===');
-
-    const items = await InventoryItem.find(match)
+    const masters = await ItemMaster.find(masterFilter)
       .populate('category', 'name')
       .lean();
 
-    console.log(`Found ${items.length} InventoryItem records`);
+    console.log(`Found ${masters.length} ItemMaster records`);
 
-    // Enrich with ItemMaster data where possible
-    const skus = [...new Set(items.map(i => normalizeSku(i.sku)).filter(Boolean))];
-    const masters = await ItemMaster.find({ sku: { $in: skus } })
-      .populate('category', 'name')
-      .lean();
-    const masterBySku = {};
-    masters.forEach(m => { masterBySku[normalizeSku(m.sku)] = m; });
+    // ── 2. Get stock quantities from InventoryItem aggregated by SKU ──────────
+    const skus = masters.map(m => String(m.sku || '').toUpperCase()).filter(Boolean);
+    const stockAgg = await InventoryItem.aggregate([
+      { $match: { sku: { $in: skus } } },
+      { $group: { _id: '$sku', qty: { $sum: { $ifNull: ['$qty', 0] } }, unit: { $first: '$unit' } } },
+    ]);
+    const stockMap = {};
+    stockAgg.forEach(r => { stockMap[String(r._id).toUpperCase()] = r.qty || 0; });
 
-    const mappedItems = items.map((item, index) => {
-      const master = masterBySku[normalizeSku(item.sku)] || {};
+    // ── 3. Map to unified shape ───────────────────────────────────────────────
+    const mappedItems = masters.map(master => {
+      const sku = String(master.sku || master.itemId || '').toUpperCase();
+      const qty = stockMap[sku] || 0;
 
-      const name = item.name || master.name || item.sku || `Item-${index}`;
-      const sku  = item.sku  || master.sku  || master.itemId || `ITEM-${index}`;
-      const qty  = getQty(item);
+      const categoryName = master.category?.name || null;
 
-      // Category
-      let categoryName = null;
-      if (item.category?.name)        categoryName = item.category.name;
-      else if (master.category?.name) categoryName = master.category.name;
-      else if (typeof item.category === 'string' && item.category) categoryName = item.category;
-
-      // Status
-      const rawStatus = item.status || 'Active';
+      // Status from stock level
       let status = 'Active';
-      if (rawStatus === 'Dead'     || rawStatus === 'Inactive') status = 'Dead';
-      else if (rawStatus === 'Critical' || rawStatus === 'Low Stock') status = 'Critical';
-      else status = 'Active';
-
-      // Warehouse — keep null/empty as null so the stats count is accurate
-      const warehouseRaw = String(item.warehouse || '').trim();
-      const warehouse = warehouseRaw || null;
+      if (qty <= 0) status = 'Dead';
+      else if (master.reorderPoint > 0 && qty <= master.reorderPoint) status = 'Critical';
 
       return {
-        _id:             item._id,
-        name,
-        itemName:        name,
-        sku,
-        itemCode:        sku,
+        _id:          master._id,
+        id:           master._id,
+        name:         master.name,
+        itemName:     master.name,
+        sku:          sku,
+        itemCode:     sku,
         qty,
         currentQuantity: qty,
-        available:       qty,
-        warehouse:       warehouse || 'Main Warehouse', // display fallback only
-        warehouseRaw:    warehouse,                     // null when truly unset
-        category:        categoryName,
+        available:    qty,
+        stock:        qty,
+        category:     categoryName,
         categoryName,
         status,
-        unit:            item.unit || master.unit || 'Nos',
-        unitPrice:       master.unitPrice || master.sellingPrice || 0,
+        unit:         master.unit || 'Nos',
+        unitPrice:    master.unitPrice    || master.sellingPrice || 0,
+        sellingPrice: master.sellingPrice || master.unitPrice    || 0,
+        price:        master.unitPrice    || master.sellingPrice || 0,
+        gst:          master.gst          || 0,
+        gstPercent:   master.gst          || 0,
+        hsn:          master.hsn          || '',
+        moq:          master.minQuantity  || 1,
+        dataSource:   master.dataSource   || 'ERP',
       };
     });
 
-    // Stats — count only items that have a real warehouse value
     const totalSKU      = mappedItems.length;
     const criticalItems = mappedItems.filter(i => i.status === 'Critical').length;
     const deadItems     = mappedItems.filter(i => i.status === 'Dead').length;
     const totalUnits    = mappedItems.reduce((s, i) => s + i.qty, 0);
-    // Only count warehouses that actually exist in data (not the 'Main Warehouse' fallback)
-    const warehouseSet  = new Set(mappedItems.map(i => i.warehouseRaw).filter(Boolean));
-    const warehouses    = warehouseSet.size || 1; // at least 1 if any items exist
 
-    console.log(`=== Stock response: ${totalSKU} items, ${warehouses} warehouses ===`);
+    console.log(`=== Stock response: ${totalSKU} items from ItemMaster ===`);
 
     res.json({
       success: true,
       data: mappedItems,
-      statistics: {
-        totalSKU,
-        criticalItems,
-        deadItems,
-        totalUnits,
-        warehouses,
-      },
+      statistics: { totalSKU, criticalItems, deadItems, totalUnits },
     });
   } catch (error) {
     console.error('getDealerInventoryStock error:', error);

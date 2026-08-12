@@ -566,3 +566,71 @@ export const getAllDealers = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Failed to fetch dealers' });
   }
 };
+
+// ── Admin: Update dealer ──────────────────────────────────────────────────────
+export const adminUpdateDealer = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      name, email, mobile, businessName, contactPerson, zone,
+      address, city, state, pincode, gstin, panNumber,
+      creditLimit, isActive,
+    } = req.body;
+
+    const dealer = await Dealer.findById(id);
+    if (!dealer) return res.status(404).json({ success: false, message: 'Dealer not found' });
+
+    // Email uniqueness check
+    if (email && email.toLowerCase() !== (dealer.email || '').toLowerCase()) {
+      const exists = await Dealer.findOne({ email: email.toLowerCase(), _id: { $ne: id } });
+      if (exists) return res.status(400).json({ success: false, message: 'Email is already in use' });
+      dealer.email = email.toLowerCase().trim();
+    }
+
+    // Mobile uniqueness check
+    const normMobile = mobile ? normalizeMobile(mobile) : null;
+    if (normMobile && normMobile !== normalizeMobile(dealer.mobile || '')) {
+      const exists = await Dealer.findOne({ mobile: normMobile, _id: { $ne: id } });
+      if (exists) return res.status(400).json({ success: false, message: 'Mobile number is already in use' });
+      dealer.mobile       = normMobile;
+      dealer.mobileNumber = normMobile;
+    }
+
+    if (name          !== undefined) dealer.name          = name.trim();
+    if (businessName  !== undefined) dealer.businessName  = businessName.trim();
+    if (contactPerson !== undefined) dealer.contactPerson = contactPerson.trim();
+    if (zone          !== undefined) dealer.zone          = zone.trim();
+    if (address       !== undefined) dealer.address       = address.trim();
+    if (city          !== undefined) dealer.city          = city.trim();
+    if (state         !== undefined) dealer.state         = state.trim();
+    if (pincode       !== undefined) dealer.pincode       = pincode.trim();
+    if (gstin         !== undefined) dealer.gstin         = normalizeGstin(gstin);
+    if (panNumber     !== undefined) dealer.panNumber     = panNumber.toUpperCase().trim();
+    if (creditLimit   !== undefined) dealer.creditLimit   = Number(creditLimit) || 0;
+    if (isActive      !== undefined) dealer.isActive      = Boolean(isActive);
+
+    await dealer.save();
+    res.json({ success: true, message: 'Dealer updated successfully', data: publicDealer(dealer) });
+  } catch (error) {
+    console.error('adminUpdateDealer error:', error);
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(400).json({ success: false, message: `${field} is already in use` });
+    }
+    res.status(500).json({ success: false, message: error.message || 'Failed to update dealer' });
+  }
+};
+
+// ── Admin: Delete dealer ──────────────────────────────────────────────────────
+export const adminDeleteDealer = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const dealer = await Dealer.findById(id);
+    if (!dealer) return res.status(404).json({ success: false, message: 'Dealer not found' });
+    await Dealer.findByIdAndDelete(id);
+    res.json({ success: true, message: 'Dealer deleted successfully' });
+  } catch (error) {
+    console.error('adminDeleteDealer error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to delete dealer' });
+  }
+};
