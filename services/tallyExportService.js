@@ -2548,12 +2548,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       }
     }
 
-    // ── Send ONE voucher per request ─────────────────────────────────────
-    // Sending individually ensures:
-    //  1. No Tally payload size limit issues (was causing "Voucher date missing")
-    //  2. Each invoice appears clearly in Tally Sales Register
-    //  3. One failure doesn't block other invoices
-    const BATCH_SIZE  = 1;
+    // ── Send vouchers in small batches to avoid overwhelming Tally ─────────
+    // Previously BATCH_SIZE=1 caused 27K+ individual HTTP requests which
+    // corrupts Tally's data file (triggers "Repair Company Data").
+    // Per Tally XML docs, multiple VOUCHERs in one TALLYMESSAGE is supported.
+    // Using batch of 10 balances reliability vs performance:
+    //  - Reduces HTTP requests by 10x (less file I/O stress on Tally)
+    //  - Still isolates failures to small groups
+    //  - Avoids payload size limits (10 invoices ~50KB, well under Tally's limit)
+    const BATCH_SIZE  = 10;
     let   totalCreated = 0, totalAltered = 0;
     const batchErrors  = [...preflightErrors];
     const successIds   = [];
@@ -2572,6 +2575,11 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         LOG(`Sales DEBUG — first batch full XML (company=${cfg.companyName || 'EMPTY'}):\n${singleEnvelope}`);
       }
       const result = await sendImportWithFallbackDebug(cfg, 'Vouchers', singleXml, `Sales Invoices batch ${batchNo}/${batchTot}`, 60000);
+
+      // Small delay between batches to let Tally commit data safely
+      if (b + BATCH_SIZE < vouchersXml.length) {
+        await new Promise(r => setTimeout(r, 200));
+      }
 
       // If this batch gets EXCEPTIONS=1 and it's not the first (already logged), log the XML too
       // so we can diagnose which invoice is different. Only log on first failure to avoid log spam.

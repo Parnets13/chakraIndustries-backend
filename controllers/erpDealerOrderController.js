@@ -4,7 +4,9 @@ import PickingList from '../models/PickingList.js';
 import SortingJob from '../models/SortingJob.js';
 import PackingJob from '../models/PackingJob.js';
 import Invoice from '../models/Invoice.js';
+import Dealer from '../models/Dealer.js';
 import { genOrderId } from '../utils/orderIdGenerator.js';
+import { sendOrderApprovalEmail } from '../utils/orderEmailService.js';
 
 // Get all dealer orders grouped by status
 export const getDealerOrders = async (req, res) => {
@@ -171,6 +173,16 @@ export const approveOrder = async (req, res) => {
     
     // Auto generate picking list
     await generatePickingList(order);
+
+    // Send order approval email to dealer
+    if (order.dealerId) {
+      const dealer = await Dealer.findById(order.dealerId);
+      if (dealer) {
+        sendOrderApprovalEmail(order, dealer).catch(err => {
+          console.error('[approveOrder] Email send background error:', err.message);
+        });
+      }
+    }
 
     res.status(200).json({ success: true, data: order, message: 'Order approved successfully' });
   } catch (error) {

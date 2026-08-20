@@ -10,10 +10,12 @@ function safeDate(val) {
 }
 export const formatEmployeeProduct = (product, baseUrl = '') => {
   const imagePath = product.productImage || '';
+  // Ensure HTTPS in production (behind reverse proxy, req.protocol may be 'http')
+  const safeBaseUrl = baseUrl.replace(/^http:\/\//, 'https://');
   const productImageUrl = imagePath.startsWith('http')
     ? imagePath
     : imagePath
-      ? `${baseUrl}${imagePath}`
+      ? `${safeBaseUrl}${imagePath}`
       : '';
 
   return {

@@ -98,6 +98,45 @@ router.post('/products',         protectEmployee, handleUpload(productUpload.sin
 router.put('/products/:id',      protectEmployee, handleUpload(productUpload.single('productImage')), updateProduct);
 router.delete('/products/:id',   protectEmployee, deleteProduct);
 
+// ── Stock item lookup (search existing items from ItemMaster) ─────────────────
+import ItemMaster from '../models/ItemMaster.js';
+
+router.get('/stock-items/search', protectEmployee, async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || q.length < 2) {
+      return res.status(400).json({ success: false, message: 'Search query must be at least 2 characters' });
+    }
+    const items = await ItemMaster.find({
+      $or: [
+        { name: { $regex: q, $options: 'i' } },
+        { sku: { $regex: q, $options: 'i' } },
+        { itemId: { $regex: q, $options: 'i' } },
+      ]
+    })
+      .select('_id itemId sku name unit costPrice sellingPrice unitPrice gst category')
+      .populate('category', 'name')
+      .limit(15)
+      .lean();
+
+    const data = items.map(item => ({
+      _id: item._id,
+      name: item.name,
+      sku: item.sku || item.itemId || '',
+      category: item.category?.name || '',
+      brand: '', // brand field not in ItemMaster — will be filled from other sources if available
+      unit: item.unit || '',
+      mrp: item.sellingPrice || item.unitPrice || item.costPrice || 0,
+      gst: item.gst || 0,
+    }));
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('stock-items search error:', err);
+    res.status(500).json({ success: false, message: err.message || 'Search failed' });
+  }
+});
+
 // ── Admin product routes ──────────────────────────────────────────────────────
 const ADMIN_ROLES = ['super_admin', 'management', 'purchase_manager', 'production_manager'];
 
