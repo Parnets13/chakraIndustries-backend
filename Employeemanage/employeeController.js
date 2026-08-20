@@ -381,3 +381,125 @@ export const getAllRegisteredEmployees = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Failed to fetch employees' });
   }
 };
+
+// ── Admin: Update employee ────────────────────────────────────────────────────
+export const adminUpdateEmployee = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      name, email, mobile, department, designation, joiningDate,
+      gender, gstNumber, panNumber, industry, address, role, isActive,
+    } = req.body;
+
+    const user = await User.findOne({
+      _id: id,
+      role: { $in: ['employee', 'delivery_logistics'] },
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+
+    // Check email uniqueness if changed
+    if (email && email.toLowerCase() !== user.email) {
+      const exists = await User.findOne({ email: email.toLowerCase(), _id: { $ne: id } });
+      if (exists) return res.status(400).json({ success: false, message: 'Email is already in use' });
+      user.email = email.toLowerCase().trim();
+    }
+
+    // Check mobile uniqueness if changed
+    if (mobile && mobile !== (user.mobileNumber || user.mobile)) {
+      const exists = await User.findOne({
+        $or: [{ mobile }, { mobileNumber: mobile }],
+        _id: { $ne: id },
+      });
+      if (exists) return res.status(400).json({ success: false, message: 'Mobile number is already in use' });
+      user.mobile = mobile.trim();
+      user.mobileNumber = mobile.trim();
+    }
+
+    if (name        !== undefined) user.name        = name.trim();
+    if (department  !== undefined) user.department  = department.trim();
+    if (designation !== undefined) user.designation = designation.trim();
+    if (joiningDate !== undefined) user.joiningDate = joiningDate ? new Date(joiningDate) : null;
+    if (gender      !== undefined) user.gender      = gender;
+    if (gstNumber   !== undefined) user.gstNumber   = gstNumber?.toUpperCase().trim();
+    if (panNumber   !== undefined) user.panNumber   = panNumber?.toUpperCase().trim();
+    if (industry    !== undefined) user.industry    = industry?.trim();
+    if (address     !== undefined) user.address     = address?.trim();
+    if (role && ['employee', 'delivery_logistics'].includes(role)) user.role = role;
+    if (isActive    !== undefined) user.isActive    = Boolean(isActive);
+
+    await user.save();
+
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const photo   = user.photo || user.profilePhoto;
+
+    res.json({
+      success: true,
+      message: 'Employee updated successfully',
+      data: {
+        id:           user._id,
+        employeeId:   `EMP-${String(user._id).slice(-6).toUpperCase()}`,
+        name:         user.name,
+        email:        user.email,
+        mobile:       user.mobileNumber || user.mobile || '',
+        role:         user.role,
+        department:   user.department || '',
+        designation:  user.designation || '',
+        gender:       user.gender || '',
+        joiningDate:  user.joiningDate || null,
+        address:      user.address || '',
+        gstNumber:    user.gstNumber || '',
+        panNumber:    user.panNumber || '',
+        industry:     user.industry || '',
+        isActive:     user.isActive,
+        isVerified:   user.isVerified,
+        profilePhoto: photo
+          ? photo.startsWith('http') ? photo : `${baseUrl}${photo}`
+          : '',
+        createdAt:    user.createdAt,
+        updatedAt:    user.updatedAt,
+      },
+    });
+  } catch (error) {
+    console.error('adminUpdateEmployee error:', error);
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(400).json({ success: false, message: `${field} is already in use` });
+    }
+    res.status(500).json({ success: false, message: error.message || 'Failed to update employee' });
+  }
+};
+
+// ── Admin: Delete employee ────────────────────────────────────────────────────
+export const adminDeleteEmployee = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const user = await User.findOne({
+      _id: id,
+      role: { $in: ['employee', 'delivery_logistics'] },
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+
+    // Remove profile photo from disk if stored locally
+    const photo = user.photo || user.profilePhoto;
+    if (photo && !photo.startsWith('http')) {
+      const filePath = path.join(__dirname, '../', photo);
+      if (fs.existsSync(filePath)) {
+        try { fs.unlinkSync(filePath); } catch (e) { /* non-fatal */ }
+      }
+    }
+
+    await User.findByIdAndDelete(id);
+
+    res.json({ success: true, message: 'Employee deleted successfully' });
+  } catch (error) {
+    console.error('adminDeleteEmployee error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to delete employee' });
+  }
+};

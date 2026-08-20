@@ -1,14 +1,3 @@
-/**
- * normalizeToTallyVoucher.js
- * ─────────────────────────────────────────────────────────────────────────────
- * Pure function: converts a raw Invoice object into a fully-resolved
- * TallyVoucher sub-document that mirrors Tally's Sales Voucher structure.
- *
- * No DB calls, no network calls — input in, validated sub-document out.
- * Called at write time (bulkUpload, create, update) and by the migration script.
- *
- * Export path then becomes: read stored tallyVoucher → wrap in XML tags → done.
- */
 
 // ─── Unit map ─────────────────────────────────────────────────────────────────
 const UNIT_MAP = {
@@ -186,7 +175,6 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
   // item.basic  = taxable amount after discount (authoritative — set from Excel)
   // item.amount = same as basic for non-discounted items
   // item.total  = basic + CGST + SGST + IGST
-  //
   // We use item.basic as the Tally AMOUNT for the inventory entry, because that is
   // the assessable value Tally uses to compute expected tax in Tax Analysis.
   // If we use qty×rate instead, discounted invoices get a different base from what

@@ -27,6 +27,9 @@ import {
   getSalesInvoices,
   // GST fields migration
   migrateGstFields,
+  // PO Invoice export (separate from Sales export)
+  poExportToTallyStream,
+  getPOExportCount,
 } from '../controllers/tallyController.js';
 import { tallyWebhook } from '../controllers/tallyWebhookController.js';
 import { protect } from '../middleware/authMiddleware.js';
@@ -98,6 +101,12 @@ router.get('/guid-status',           protect, getGuidStatus);
 router.post('/import-sales-register',protect, importSalesRegister);
 // GET  /api/tally/sales-invoices?fromDate=2025-04-01&toDate=2025-06-30
 router.get('/sales-invoices',        protect, getSalesInvoices);
+
+// ── PO Invoice Export (separate from Sales Export) ────────────────────────────
+// GET /api/tally/po-export-stream?token=<jwt>  — SSE stream
+router.get('/po-export-stream',      poExportToTallyStream);  // auth via ?token=
+// GET /api/tally/po-export-count   — pending invoice count
+router.get('/po-export-count',       protect, getPOExportCount);
 
 // ── Voucher export diagnostics — shows why Sales/Purchase are rejected ────────
 router.get('/diagnose-vouchers', protect, async (req, res) => {

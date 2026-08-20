@@ -1,21 +1,4 @@
-﻿/**
- * tallyExportService.js
- * ─────────────────────────────────────────────────────────────────────────────
- * Dedicated ERP → Tally export engine for Sri Chakra Industries.
- *
- * Covers ALL required entity types:
- *   Masters  : Stock Groups, Stock Categories, Units of Measure, Godowns,
- *              Stock Items (with Opening Stock + GST), Ledger Masters,
- *              Customer Masters, Supplier/Vendor Masters
- *   Vouchers : Sales Invoices, Purchase Invoices, Credit Notes, Debit Notes,
- *              Payment Vouchers, Receipt Vouchers, Journal Vouchers
- *
- * Design principles:
- *   • Uses GUID + name as dedup key → no duplicates on re-export
- *   • Per-entity error isolation — one failure does not abort the rest
- *   • Returns structured results consumed by the SSE streaming endpoint
- *   • importFromTally() / exportToTally() method stubs for future-readiness
- */
+﻿
 
 import fs             from 'fs';
 import path           from 'path';
@@ -1727,19 +1710,21 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   // a ship-to was present. The consignee pincode is written separately via CONSIGNEEPINCODE.
   const rootPincode      = billToPincode;
 
-  const billToXml = rootName || rootAddressLines.length || rootPincode
+  // ── e-Invoice Place fields — official Tally schema (help.tallysolutions.com/schema-changes-e-invoice/)
+  // BillToPlace and ShipToPlace are dedicated e-Invoice storage fields on the Voucher object.
+  // These must be city/town names (3–100 chars). State name goes in separate StateName tags.
+  const billToPlace    = (v.billToCity  || v.partyCity  || v.billToState  || v.partyState  || '').toString().trim();
+
+  const billToXml = rootName || rootAddressLines.length || rootPincode || billToPlace
     ? `
   <BASICBUYERNAME>${esc(rootName)}</BASICBUYERNAME>
   <PARTYMAILINGNAME>${esc(rootMailingName)}</PARTYMAILINGNAME>
   <BASICBUYERADDRESS.LIST TYPE="String">
     ${rootAddressLines.map(line => `<BASICBUYERADDRESS>${esc(line)}</BASICBUYERADDRESS>`).join('\n    ')}
   </BASICBUYERADDRESS.LIST>
-  ${rootPincode ? `<PARTYPINCODE>${esc(rootPincode)}</PARTYPINCODE>` : ''}`
+  ${rootPincode ? `<PARTYPINCODE>${esc(rootPincode)}</PARTYPINCODE>` : ''}
+  ${billToPlace ? `<BILLTOPLACE>${esc(billToPlace)}</BILLTOPLACE>` : ''}`
     : '';
-  // ── e-Invoice Place fields — official Tally schema (help.tallysolutions.com/schema-changes-e-invoice/)
-  // BillToPlace and ShipToPlace are dedicated e-Invoice storage fields on the Voucher object.
-  // These must be city/town names (3–100 chars). State name goes in separate StateName tags.
-  const billToPlace    = (v.billToCity  || v.partyCity  || v.billToState  || v.partyState  || '').toString().trim();
   const consigneePlace = (v.shipToCity  || resolvedShipToState || '').toString().trim();
 
   // ── Consignor (Dispatch From) — official Tally e-Invoice XML tag names ───────────────

@@ -1,5 +1,6 @@
 import { Server } from 'socket.io';
 import TallyConfig from '../models/TallyConfig.js';
+import ConnectorRegistration from '../models/ConnectorRegistration.js';
 // HTTP-poll job queue — actual Tally data requests go through this, not Socket.IO.
 // Socket.IO is kept only for connector online/offline status tracking.
 import { enqueueConnectorJob } from '../routes/connectorRoutes.js';
@@ -34,10 +35,16 @@ export function initConnectorServer(httpServer) {
         return next(new Error('Authentication required'));
       }
 
-      // Verify against TallyConfig
-      const cfg = await TallyConfig.findOne({ connectorId });
-      if (!cfg || cfg.connectorSecret !== connectorSecret) {
+      // Verify against ConnectorRegistration — secrets are stored per-device there,
+      // not in TallyConfig (which only holds the default connector's id reference).
+      const registration = await ConnectorRegistration.findOne({ connectorId });
+      if (!registration || registration.connectorSecret !== connectorSecret) {
+        console.warn(`[Connector] Socket.IO auth failed for ${connectorId} — registration found: ${!!registration}`);
         return next(new Error('Invalid credentials'));
+      }
+      if (!registration.isActive) {
+        console.warn(`[Connector] Socket.IO auth rejected — connector ${connectorId} is inactive`);
+        return next(new Error('Connector is inactive'));
       }
 
       socket.connectorId = connectorId;
@@ -147,16 +154,38 @@ export async function waitForConnector(connectorId, waitMs = 30000) {
 // The connector polls GET /api/connector/poll-job and POSTs the result back.
 // This is completely immune to Socket.IO disconnects on large payloads.
 export async function sendTallyRequest(connectorId, xml, timeoutMs = 60000) {
-  // Verify the connector is registered and online before queuing
-  const connector = connectedConnectors.get(connectorId);
-  if (!connector || !connector.online) {
-    // Wait up to 60s for it to come online (handles Render cold-start)
+  // ── Liveness check ────────────────────────────────────────────────────────
+  // Primary check: Socket.IO in-memory map (instantaneous).
+  // Fallback check: DB lastSeenAt — connector is alive if it polled within
+  // the last 90s (3 × 30s poll interval).  Socket.IO ping/pong gaps (~25s) can
+  // cause isConnectorOnline() to flip false even when the connector is running
+  // and actively picking up HTTP jobs.  The DB timestamp bridges that gap.
+  let connectorAlive = isConnectorOnline(connectorId);
+
+  if (!connectorAlive) {
+    try {
+      const reg = await ConnectorRegistration.findOne({ connectorId }).lean();
+      if (reg && reg.lastSeenAt) {
+        const ageMs = Date.now() - new Date(reg.lastSeenAt).getTime();
+        if (ageMs < 90000) {  // seen within last 90s → treat as alive
+          console.log(`[Connector] ${connectorId} — Socket.IO gap but lastSeenAt ${Math.round(ageMs/1000)}s ago → treating as alive, enqueuing job directly`);
+          connectorAlive = true;
+        }
+      }
+    } catch (dbErr) {
+      console.warn(`[Connector] lastSeenAt DB check failed (non-fatal): ${dbErr.message}`);
+    }
+  }
+
+  if (!connectorAlive) {
+    // Neither Socket.IO nor recent HTTP poll — wait up to 60s for reconnect
     console.warn(`[Connector] ${connectorId} not online — waiting up to 60s for reconnect...`);
     const c = await waitForConnector(connectorId, 60000);
     if (!c || !c.online) {
       throw new Error(`Connector ${connectorId} is not online`);
     }
   }
+
   // Enqueue the job — connector will pick it up via HTTP poll and POST result back
   return enqueueConnectorJob(connectorId, xml, timeoutMs);
 }

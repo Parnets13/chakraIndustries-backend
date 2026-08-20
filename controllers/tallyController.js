@@ -30,6 +30,7 @@ import {
 } from '../services/tallyExportService.js';
 import { importFromFiles } from '../services/tallyFileImporter.js';
 import { normalizeToTallyVoucher } from '../services/normalizeToTallyVoucher.js';
+import { exportPOInvoicesToTally, getPOInvoiceExportCount } from '../services/poTallyExportService.js';
 
 // ── SSE helper ────────────────────────────────────────────────────────────────
 function sseSetup(res) {
@@ -1898,5 +1899,108 @@ export const migrateGstFields = async (req, res) => {
   } catch (err) {
     console.error('[migrateGstFields]', err.message);
     res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── PO INVOICE EXPORT TO TALLY (SSE stream) ─────────────────────────────────
+/**
+ * GET /api/tally/po-export-stream?token=<jwt>
+ * Streams the PO Invoice export to Tally.
+ * Separate from the Sales Export stream — does NOT touch tallyExportService.js.
+ */
+export const poExportToTallyStream = async (req, res) => {
+  const send = sseSetup(res);
+  const start = Date.now();
+
+  const user = await authenticateSseRequest(req);
+  if (!user) {
+    send({ event: 'error', message: 'Unauthorized — invalid or missing token' });
+    return res.end();
+  }
+
+  send({ event: 'start', message: 'PO Invoice Export to Tally started', direction: 'ERP → Tally' });
+
+  try {
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
+    if (!cfg || !hasConnection) {
+      send({ event: 'error', message: 'Tally is not configured. Go to Tally Settings first.' });
+      return res.end();
+    }
+
+    // Validate connection — retry once if connector is offline (handles Render cold-start / ping gap)
+    send({ event: 'log', level: 'info', entity: 'Connection', message: 'Validating Tally connection…' });
+    let validation = await validateTallyConnection(cfg);
+    if (!validation.reachable && cfg.useConnector && cfg.connectorId) {
+      send({ event: 'log', level: 'info', entity: 'Connection', message: 'Connector not yet online — waiting 15s and retrying…' });
+      await new Promise(r => setTimeout(r, 15000));
+      validation = await validateTallyConnection(cfg);
+    }
+    if (!validation.reachable) {
+      send({ event: 'error', message: `Cannot connect to Tally: ${validation.error}` });
+      return res.end();
+    }
+
+    // Auto-correct company name
+    if (validation.openCompany) {
+      const saved = (cfg.companyName || '').trim();
+      if (!saved || saved.toUpperCase() !== validation.openCompany.toUpperCase()) {
+        cfg.companyName = validation.openCompany;
+        await TallyConfig.findOneAndUpdate({}, { companyName: validation.openCompany }, { sort: { _id: 1 } }).catch(() => {});
+      }
+    }
+
+    send({ event: 'log', level: 'success', entity: 'Connection', message: `✅ Connected — Company: ${validation.openCompany || cfg.companyName || 'detected'}` });
+    send({ event: 'phase_start', index: 1, total: 1, entity: 'PO Invoices', message: 'Exporting PO Invoices…' });
+
+    const result = await exportPOInvoicesToTally(cfg, user._id);
+
+    const duration = `${((Date.now() - start) / 1000).toFixed(1)}s`;
+
+    if (result.ok) {
+      send({
+        event: 'phase_done', ok: true, entity: 'PO Invoices',
+        records: result.records, created: result.created, altered: result.altered,
+        message: `✅ PO Invoices: ${result.records} records exported (created: ${result.created}, updated: ${result.altered})`,
+      });
+    } else {
+      send({
+        event: 'phase_done', ok: false, entity: 'PO Invoices',
+        records: result.records, error: result.error,
+        message: `❌ PO Invoices: ${result.error || 'Export failed'}`,
+      });
+    }
+
+    send({
+      event: 'done',
+      ok: result.ok,
+      direction: 'ERP → Tally',
+      duration,
+      records: result.records,
+      message: result.ok
+        ? `✅ PO Export completed in ${duration} — ${result.records} invoices processed`
+        : `❌ PO Export failed: ${result.error}`,
+    });
+
+    await TallyConfig.findOneAndUpdate({}, { lastExportAt: new Date() }, { sort: { _id: 1 } }).catch(() => {});
+
+  } catch (err) {
+    send({ event: 'error', message: `PO Export failed: ${err.message}` });
+  }
+
+  res.end();
+};
+
+// ─── PO INVOICE EXPORT COUNT ──────────────────────────────────────────────────
+/**
+ * GET /api/tally/po-export-count
+ * Returns the number of PO Invoices pending Tally export.
+ */
+export const getPOExportCount = async (req, res) => {
+  try {
+    const count = await getPOInvoiceExportCount();
+    res.json({ success: true, data: { poInvoices: { label: 'PO Invoices (pending)', count } } });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
   }
 };

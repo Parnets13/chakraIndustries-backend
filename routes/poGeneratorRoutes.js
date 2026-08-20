@@ -10,6 +10,9 @@ import {
   getInvoiceById,
   updateInvoiceStatus,
   updateDelivery,
+  updateItemDispatch,
+  getCompanyItems,
+  getCompaniesSummary,
   listPendingOrders,
   updatePendingOrder,
   getStats,
@@ -53,7 +56,12 @@ router.get('/invoices', listInvoices);
 router.get('/invoices/:id', getInvoiceById);
 router.patch('/invoices/:id/status', updateInvoiceStatus);
 router.patch('/invoices/:id/delivery', updateDelivery);
+router.patch('/invoices/:id/items/:itemId', updateItemDispatch);
 router.delete('/invoices/:id', deleteInvoice);
+
+// Company-wise item tracking
+router.get('/company-items/:companyId', getCompanyItems);
+router.get('/companies-summary',        getCompaniesSummary);
 
 // Pending / backorders
 router.get('/pending-orders', listPendingOrders);

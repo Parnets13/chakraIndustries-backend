@@ -418,21 +418,31 @@ export const updateInvoiceStatus = async (req, res) => {
         let vendorId = invoice.poId?.vendor || null;
         // If we don't have a vendor from poId, try to find by vendorName
         if (!vendorId && invoice.vendorName) {
-          const vendor = await Vendor.findOne({ companyName: invoice.vendorName });
+          const vendor = await Vendor.findOne({
+            $or: [
+              { companyName: { $regex: `^${invoice.vendorName.trim()}$`, $options: 'i' } },
+              { name:        { $regex: `^${invoice.vendorName.trim()}$`, $options: 'i' } },
+            ],
+          });
           vendorId = vendor?._id || null;
         }
-        await AccountsPayable.create({
-          supplier: vendorId,
-          purchaseOrder: invoice.poId?._id || null,
-          poInvoice: invoice._id,
-          invoiceNumber: invoice.invoiceNo,
-          invoiceDate: invoice.createdAt,
-          dueDate: invoice.poId?.deliveryDate || null,
-          invoiceAmount: invoice.grandTotal,
-          paidAmount: 0,
-          balanceAmount: invoice.grandTotal,
-          paymentStatus: 'Unpaid'
-        });
+
+        // supplier is required — only create the AP entry if we resolved a vendor
+        if (vendorId) {
+          await AccountsPayable.create({
+            supplier:      vendorId,
+            purchaseOrder: invoice.poId?._id || null,
+            poInvoice:     invoice._id,
+            invoiceNumber: invoice.invoiceNo,
+            invoiceDate:   invoice.createdAt,
+            dueDate:       invoice.poId?.deliveryDate || null,
+            invoiceAmount: invoice.grandTotal,
+            paidAmount:    0,
+            balanceAmount: invoice.grandTotal,
+            paymentStatus: 'Unpaid',
+          });
+        }
+        // If vendor not found, approval still succeeds — AP entry can be linked manually later
       }
     }
 
@@ -479,7 +489,141 @@ export const updatePendingOrder = async (req, res) => {
   }
 };
 
-// ── PATCH /api/po-generator/invoices/:id/delivery ────────────────────────────
+// ── GET /api/po-generator/companies-summary ──────────────────────────────────
+// Returns all companies with their aggregated PO item stats (no date filter)
+export const getCompaniesSummary = async (req, res) => {
+  try {
+    const companies = await Company.find().sort({ companyName: 1 }).lean();
+
+    const summary = await Promise.all(companies.map(async (co) => {
+      const invoices = await POInvoice.find({ companyId: co._id }).lean();
+      const allItems = invoices.flatMap(inv => (inv.items || []).map(it => ({
+        ...it,
+        invoiceId:        inv._id,
+        invoiceNo:        inv.invoiceNo,
+        poRef:            inv.poRef,
+        vendorName:       inv.vendorName,
+        invoiceStatus:    inv.status,
+        invoiceCreatedAt: inv.createdAt,
+      })));
+
+      const totalItems    = allItems.length;
+      const sentItems     = allItems.filter(i => i.dispatchStatus === 'Sent').length;
+      const notSentItems  = allItems.filter(i => i.dispatchStatus === 'Not Sent').length;
+      const pendingItems  = allItems.filter(i => !i.dispatchStatus || i.dispatchStatus === 'Pending' || i.dispatchStatus === 'Partially Sent').length;
+      const totalValue    = allItems.reduce((s, i) => s + (i.lineTotal || 0), 0);
+      const invoiceCount  = invoices.length;
+      const lastUpload    = invoices.length
+        ? invoices.reduce((a, b) => new Date(a.createdAt) > new Date(b.createdAt) ? a : b).createdAt
+        : null;
+
+      return {
+        _id:           co._id,
+        companyName:   co.companyName,
+        gstNumber:     co.gstNumber || '',
+        totalItems,
+        sentItems,
+        notSentItems,
+        pendingItems,
+        totalValue,
+        invoiceCount,
+        lastUpload,
+      };
+    }));
+
+    // Only return companies that have at least one invoice/item
+    const active = summary.filter(c => c.invoiceCount > 0);
+    res.json({ success: true, data: active });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// Returns ALL items across ALL invoices for a company, flattened, for item-wise tracking
+export const getCompanyItems = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const invoices = await POInvoice.find({ companyId })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Flatten all items with parent invoice context
+    const items = [];
+    for (const inv of invoices) {
+      for (const item of (inv.items || [])) {
+        items.push({
+          _id:              item._id,
+          invoiceId:        inv._id,
+          invoiceNo:        inv.invoiceNo,
+          poRef:            inv.poRef,
+          vendorName:       inv.vendorName,
+          invoiceCreatedAt: inv.createdAt,
+          invoiceStatus:    inv.status,
+          // item fields
+          itemName:         item.itemName,
+          invoicedQty:      item.invoicedQty,
+          unit:             item.unit,
+          basePrice:        item.basePrice,
+          hsn:              item.hsn,
+          lineTotal:        item.lineTotal,
+          // dispatch tracking
+          dispatchStatus:   item.dispatchStatus   || 'Pending',
+          notSentReason:    item.notSentReason     || '',
+          expectedSendDate: item.expectedSendDate  || null,
+          dispatchRemarks:  item.dispatchRemarks   || '',
+        });
+      }
+    }
+
+    res.json({ success: true, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── PATCH /api/po-generator/invoices/:id/items/:itemId ───────────────────────
+// Update dispatch tracking fields for a single item
+export const updateItemDispatch = async (req, res) => {
+  try {
+    const { id, itemId } = req.params;
+    const { dispatchStatus, notSentReason, expectedSendDate, dispatchRemarks } = req.body;
+
+    const invoice = await POInvoice.findById(id);
+    if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+    const item = invoice.items.id(itemId);
+    if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
+
+    if (dispatchStatus  !== undefined) item.dispatchStatus   = dispatchStatus;
+    if (notSentReason   !== undefined) item.notSentReason    = notSentReason;
+    if (expectedSendDate !== undefined) item.expectedSendDate = expectedSendDate ? new Date(expectedSendDate) : null;
+    if (dispatchRemarks !== undefined) item.dispatchRemarks  = dispatchRemarks;
+
+    await invoice.save();
+
+    // Return the updated flat item for easy frontend update
+    const updated = {
+      _id:              item._id,
+      invoiceId:        invoice._id,
+      invoiceNo:        invoice.invoiceNo,
+      itemName:         item.itemName,
+      invoicedQty:      item.invoicedQty,
+      unit:             item.unit,
+      basePrice:        item.basePrice,
+      lineTotal:        item.lineTotal,
+      dispatchStatus:   item.dispatchStatus,
+      notSentReason:    item.notSentReason,
+      expectedSendDate: item.expectedSendDate,
+      dispatchRemarks:  item.dispatchRemarks,
+    };
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
 // Update delivery status for each item in the invoice
 // Body: { items: [{ itemId, deliveryStatus, deliveredQty, deliveryDate, deliveryNotes }] }
 export const updateDelivery = async (req, res) => {

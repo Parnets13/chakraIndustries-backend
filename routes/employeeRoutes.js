@@ -10,6 +10,8 @@ import {
   updateEmployeeProfile,
   logoutEmployee,
   getAllRegisteredEmployees,
+  adminUpdateEmployee,
+  adminDeleteEmployee,
   upload as profileUpload,
 } from '../Employeemanage/employeeController.js';
 import {
@@ -105,6 +107,22 @@ router.get(
   protect,
   authorize(...ADMIN_ROLES),
   getAllRegisteredEmployees,
+);
+
+// ── Admin: update employee ────────────────────────────────────────────────────
+router.put(
+  '/admin/registered-employees/:id',
+  protect,
+  authorize(...ADMIN_ROLES),
+  adminUpdateEmployee,
+);
+
+// ── Admin: delete employee ────────────────────────────────────────────────────
+router.delete(
+  '/admin/registered-employees/:id',
+  protect,
+  authorize(...ADMIN_ROLES),
+  adminDeleteEmployee,
 );
 
 router.get(

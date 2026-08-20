@@ -349,14 +349,28 @@ export async function testTallyConnection() {
 // === HTTP POST WITH RETRIES AND TIMEOUT ===
 async function postXml(cfg, xml, timeoutMs) {
   const connectorMode = cfg.useConnector && cfg.connectorId;
-  const connectorOnline = connectorMode ? isConnectorOnline(cfg.connectorId) : false;
   const hasLocalUrl = !!(cfg.tallyLocalUrl || '').trim();
 
   // ── Routing decision ────────────────────────────────────────────────────────
   // 1. Connector mode + connector online  → use connector (production path)
-  // 2. Connector mode + connector OFFLINE + tallyLocalUrl set → fallback to direct (local dev)
-  // 3. Connector mode + connector OFFLINE + no local URL → error
-  // 4. Direct mode → use tallyLocalUrl directly
+  // 2. Connector mode + connector OFFLINE but will reconnect → wait up to 30s then retry
+  // 3. Connector mode + connector OFFLINE + tallyLocalUrl set → fallback to direct (local dev)
+  // 4. Connector mode + connector OFFLINE + no local URL → error
+  // 5. Direct mode → use tallyLocalUrl directly
+
+  let connectorOnline = connectorMode ? isConnectorOnline(cfg.connectorId) : false;
+
+  // ── Wait for connector if it's not yet online (handles brief Socket.IO ping gaps) ──
+  // isConnectorOnline() is a synchronous in-memory check — it returns false during the
+  // ~25s Socket.IO ping/pong cycle gap even when the connector PC is running normally.
+  // waitForConnector waits up to 30s for the socket to re-register, same as sendTallyRequest.
+  if (connectorMode && !connectorOnline && !hasLocalUrl) {
+    LOG(`postXml: connector ${cfg.connectorId} not in online map — waiting up to 30s…`);
+    const { waitForConnector } = await import('./tallyConnectorServer.js');
+    const c = await waitForConnector(cfg.connectorId, 30000);
+    connectorOnline = !!(c && c.online);
+    LOG(`postXml: after wait, connectorOnline=${connectorOnline}`);
+  }
 
   const useConnectorPath = connectorMode && connectorOnline;
   const useDirectFallback = connectorMode && !connectorOnline && hasLocalUrl;

@@ -30,6 +30,16 @@ const poInvoiceItemSchema = new mongoose.Schema({
   deliveredQty:   { type: Number, default: 0 },
   deliveryDate:   { type: Date, default: null },
   deliveryNotes:  { type: String, default: '' },
+
+  // ── Dispatch tracking (company-wise item management) ─────────────────────
+  dispatchStatus: {
+    type: String,
+    enum: ['Pending', 'Sent', 'Not Sent', 'Partially Sent'],
+    default: 'Pending',
+  },
+  notSentReason:    { type: String, default: '' },   // reason why item was not sent
+  expectedSendDate: { type: Date,   default: null },  // when it will be sent
+  dispatchRemarks:  { type: String, default: '' },   // any additional notes
 }, { _id: true });   // _id: true so we can update individual items by _id
 
 const poInvoiceSchema = new mongoose.Schema({
@@ -72,6 +82,14 @@ const poInvoiceSchema = new mongoose.Schema({
   deliveryCompletedAt: { type: Date, default: null },
 
   notes: { type: String, default: '' },
+
+  // ── Tally export tracking (mirrors Invoice model) ──────────────────────────
+  tallySync:   { type: Boolean, default: false },
+  tallySyncAt: { type: Date, default: null },
+  tallyGuid:   { type: String, trim: true, default: '' },
+  retryCount:  { type: Number, default: 0 },
+  lastError:   { type: String, default: '' },
+  lastTriedAt: { type: Date, default: null },
 }, { timestamps: true });
 
 poInvoiceSchema.index({ poId: 1 }, { sparse: true });

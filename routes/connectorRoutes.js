@@ -296,6 +296,11 @@ router.get('/poll-job', protectConnector, async (req, res) => {
   const connectorId    = req.connector.connectorId;
   const LONG_POLL_MS   = 25000;  // server holds connection 25s — matches connector poll timeout
   const CHECK_INTERVAL = 300;
+
+  // Update lastSeenAt on every poll so sendTallyRequest can use it as a
+  // reliable liveness signal even when Socket.IO is in its ping/pong gap.
+  req.connector.lastSeenAt = new Date();
+  req.connector.save().catch(() => {});
   let waited = 0;
   let done   = false;
 
