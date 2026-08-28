@@ -3,6 +3,7 @@ import SalesOrder from '../models/SalesOrder.js';
 import Dealer from '../models/Dealer.js';
 import AccountsReceivable from '../models/AccountsReceivable.js';
 import ItemMaster from '../models/ItemMaster.js';
+import StockInvoiceArchive from '../models/StockInvoiceArchive.js';
 import { sendInvoiceEmail } from '../utils/emailService.js';
 import { pushSingleInvoiceToTally } from '../services/tallyService.js';
 import { normalizeToTallyVoucher } from '../services/normalizeToTallyVoucher.js';
@@ -182,6 +183,70 @@ export const getById = async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 
+// ── Archive helper: build a StockInvoiceArchive doc from an invoice ────────────
+// Non-fatal — if archiving fails, the main operation still succeeds.
+function buildArchiveDoc(inv) {
+  const obj = typeof inv.toObject === 'function' ? inv.toObject() : { ...inv };
+  return {
+    originalInvoiceId: obj._id,
+    invoiceNo:         obj.invoiceNo,
+    invoiceDate:       obj.invoiceDate,
+    dueDate:           obj.dueDate,
+    partyName:         obj.partyName || '',
+    partyAddress:      obj.partyAddress || '',
+    partyGST:          obj.partyGST || '',
+    partyEmail:        obj.partyEmail || '',
+    partyPhone:        obj.partyPhone || '',
+    partyCity:         obj.partyCity || '',
+    partyState:        obj.partyState || '',
+    billToName:        obj.billToName || '',
+    billToAddress:     obj.billToAddress || '',
+    billToGST:         obj.billToGST || '',
+    shipToName:        obj.shipToName || '',
+    shipToAddress:     obj.shipToAddress || '',
+    shipToState:       obj.shipToState || '',
+    shipToCity:        obj.shipToCity || '',
+    companyName:       obj.companyName || 'Sri Chakra Industries',
+    companyAddress:    obj.companyAddress || '',
+    companyGST:        obj.companyGST || '',
+    items:             (obj.items || []).map(it => ({
+      description:      it.description || '',
+      hsn:              it.hsn || '',
+      qty:              it.qty || 0,
+      unit:             it.unit || 'Nos',
+      rate:             it.rate || 0,
+      discount:         it.discount || 0,
+      taxRate:          it.taxRate || 0,
+      basic:            it.basic || 0,
+      amount:           it.amount || 0,
+      taxAmount:        it.taxAmount || 0,
+      total:            it.total || 0,
+      cgst:             it.cgst || 0,
+      sgst:             it.sgst || 0,
+      igst:             it.igst || 0,
+      tallySalesLedger: it.tallySalesLedger || '',
+    })),
+    subtotal:          obj.subtotal || 0,
+    totalDiscount:     obj.totalDiscount || 0,
+    totalTax:          obj.totalTax || 0,
+    grandTotal:        obj.grandTotal || 0,
+    notes:             obj.notes || '',
+    terms:             obj.terms || '',
+    status:            obj.status || 'Draft',
+    source:            obj.source || 'manual',
+    invoiceType:       obj.invoiceType || 'single',
+    uploadBatch:       obj.uploadBatch || '',
+    purchaseOrderRef:  obj.purchaseOrderRef || '',
+    poDate:            obj.poDate || '',
+    uniqueId:          obj.uniqueId || '',
+    vendorCode:        obj.vendorCode || '',
+    brandName:         obj.brandName || '',
+    orderStatus:       obj.orderStatus || '',
+    originalCreatedAt: obj.createdAt,
+    originalUpdatedAt: obj.updatedAt,
+  };
+}
+
 // ── POST /api/invoices ────────────────────────────────────────────────────────
 export const create = async (req, res) => {
   try {
@@ -201,6 +266,14 @@ export const create = async (req, res) => {
       dueDate: inv.dueDate,
       invoiceAmount: inv.grandTotal
     });
+
+    // Archive to StockInvoiceArchive (non-fatal)
+    try {
+      await StockInvoiceArchive.create(buildArchiveDoc(inv));
+    } catch (archiveErr) {
+      console.warn('[create] StockInvoiceArchive save failed (non-fatal):', archiveErr.message);
+    }
+
     res.status(201).json({ success: true, data: inv });
   } catch (err) { res.status(400).json({ success: false, message: err.message }); }
 };
@@ -413,6 +486,17 @@ export const bulkUpload = async (req, res) => {
         inserted = await Invoice.find({ uploadBatch: batchId });
       }
       errors.push({ row: 'multiple', error: bulkErr.message });
+    }
+
+    // Archive all successfully inserted invoices to StockInvoiceArchive (non-fatal)
+    if (inserted.length > 0) {
+      try {
+        const archiveDocs = inserted.map(inv => buildArchiveDoc(inv));
+        await StockInvoiceArchive.insertMany(archiveDocs, { ordered: false });
+        console.log(`[bulkUpload] Archived ${archiveDocs.length} invoices to StockInvoiceArchive`);
+      } catch (archiveErr) {
+        console.warn('[bulkUpload] StockInvoiceArchive bulk save failed (non-fatal):', archiveErr.message);
+      }
     }
 
     res.status(201).json({

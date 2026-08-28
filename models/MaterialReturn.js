@@ -128,6 +128,28 @@ const materialReturnSchema = new mongoose.Schema({
   // Dealer app link — set when return is raised from dealer portal
   dealerId:           { type: mongoose.Schema.Types.ObjectId, ref: 'Dealer', default: null },
 
+  // ── Delivery Agent Material Return fields ───────────────────────────────────
+  // When a return is created from the ChakraDeliver app against a delivered schedule
+  returnGroupId:      { type: String, default: '' },   // Groups multiple items from same return submission
+  deliveryScheduleId: { type: String, default: '' },   // ref to DeliverySchedule.scheduleId
+  originalDeliveredQty: { type: Number, default: 0 },  // qty originally delivered
+  previouslyReturnedQty:{ type: Number, default: 0 },  // snapshot of already-returned qty at creation time
+  returnReason: {
+    type: String,
+    enum: ['Damaged', 'Wrong Material', 'Excess Material', 'Customer Rejection', 'Defective', 'Replacement', 'Warranty Return', 'Other', ''],
+    default: ''
+  },
+  // Condition breakdown — must sum to returnQty
+  conditionBreakdown: {
+    good:       { type: Number, default: 0 },  // Good / Resalable
+    damaged:    { type: Number, default: 0 },  // Damaged
+    repairable: { type: Number, default: 0 },  // Repairable
+    scrap:      { type: Number, default: 0 },  // Scrap
+  },
+  itemRemarks:        { type: String, default: '' },
+  createdByAgentId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  sourceApp:          { type: String, enum: ['erp', 'dealer_app', 'delivery_app', ''], default: '' },
+
   // Idempotency key — prevents duplicate submissions from network retries / double-tap
   // Sparse + unique: only enforced when a key is present; absent/undefined allowed multiple times.
   // IMPORTANT: no `default` here — when the frontend sends no key the field must be
