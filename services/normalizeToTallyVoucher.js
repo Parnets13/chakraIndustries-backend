@@ -263,11 +263,33 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
 
   const allInventoryEntries = validItems.map((item, i) => {
     const itemName  = (item.description || item.name || '').toString().trim();
-    const itemQty   = +(item.qty  || 1);
-    const itemRate  = +(item.rate || 0);
     const itemUnit  = tallyUnit(item.unit || 'Nos');
     const itemHSN   = (item.hsn   || '').toString().trim();
     const itemAmount = itemAmounts[i];  // = item.basic (taxable base after discount), or qty×rate
+
+    // ── Reconcile qty & rate so that qty × rate === amount ────────────────────
+    // Excel uploads often carry only a line AMOUNT (or basic) with no qty/rate.
+    // If we emit qty=1, rate=0 while AMOUNT=951.43, the inventory entry is
+    // inconsistent (1 × 0 ≠ 951.43) and Tally SILENTLY hides the Qty/Rate columns,
+    // showing only the amount. To avoid that, derive the missing value:
+    //   - qty present, rate missing → rate = amount / qty
+    //   - rate present, qty missing → qty  = amount / rate
+    //   - both missing              → qty = 1, rate = amount (so 1 × amount = amount)
+    let itemQty  = +(item.qty  || 0);
+    let itemRate = +(item.rate || 0);
+    if (itemQty > 0 && itemRate <= 0 && itemAmount > 0) {
+      // Derive rate from qty & amount. Use 4dp so qty × rate stays as close to
+      // amount as possible (Tally recomputes qty × rate for the Amount column).
+      itemRate = +(itemAmount / itemQty).toFixed(4);
+    } else if (itemRate > 0 && itemQty <= 0 && itemAmount > 0) {
+      itemQty = +(itemAmount / itemRate).toFixed(4);
+    } else if (itemQty <= 0 && itemRate <= 0) {
+      // No qty and no rate — treat the whole line as 1 unit priced at the amount.
+      itemQty  = 1;
+      itemRate = +itemAmount.toFixed(2);
+    } else if (itemQty <= 0) {
+      itemQty = 1;
+    }
 
     // GST rate for this item — use this item's own taxRate, fall back to invoice-level
     const cgstRate = itemTaxRates[i].cgst;
@@ -319,7 +341,8 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       stockItemName: itemName,
       isDeemedPositive: false,
       isLastDeemedPositive: false,
-      rate:     `${itemRate.toFixed(2)}/${itemUnit}`,
+      // Rate: keep up to 4dp when a fractional rate was derived, else 2dp.
+      rate:     `${(Number.isInteger(itemRate * 100) ? itemRate.toFixed(2) : itemRate.toFixed(4))}/${itemUnit}`,
       amount:   itemAmount,   // MUST match RATE tag: qty × rate
       actualQty: `${itemQty} ${itemUnit}`,
       billedQty:  `${itemQty} ${itemUnit}`,
