@@ -1532,6 +1532,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
     <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
     <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
+    <ISGSTASSESSABLEVALUEOVERRIDDEN>No</ISGSTASSESSABLEVALUEOVERRIDDEN>
     ${gstSourceXml ? gstSourceXml + '\n    ' : ''}<GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
     ${hsnSourceXml ? hsnSourceXml + '\n    ' : ''}<GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
     ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>\n    ` : ''}<RATE>${esc(item.rate || '')}</RATE>

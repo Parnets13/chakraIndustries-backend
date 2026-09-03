@@ -268,18 +268,21 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const itemAmount = itemAmounts[i];  // = item.basic (taxable base after discount), or qty×rate
 
     // ── Reconcile qty & rate so that qty × rate === amount ────────────────────
-    // Excel uploads often carry only a line AMOUNT (or basic) with no qty/rate.
-    // If we emit qty=1, rate=0 while AMOUNT=951.43, the inventory entry is
-    // inconsistent (1 × 0 ≠ 951.43) and Tally SILENTLY hides the Qty/Rate columns,
-    // showing only the amount. To avoid that, derive the missing value:
-    //   - qty present, rate missing → rate = amount / qty
-    //   - rate present, qty missing → qty  = amount / rate
-    //   - both missing              → qty = 1, rate = amount (so 1 × amount = amount)
+    // Tally SILENTLY hides the Qty and Rate columns of an inventory line whenever
+    // qty × rate does not equal the line AMOUNT. Because AMOUNT here is item.basic
+    // (the taxable value after discount), it will NOT equal the raw Excel qty × rate
+    // on any discounted or rounded line — so we must recompute rate from the amount
+    // we are actually emitting, keeping the original qty.
+    //
+    // Rules:
+    //   - qty present            → keep qty, derive rate = amount / qty
+    //   - qty missing, rate given → derive qty = amount / rate
+    //   - both missing            → qty = 1, rate = amount (1 × amount = amount)
     let itemQty  = +(item.qty  || 0);
     let itemRate = +(item.rate || 0);
-    if (itemQty > 0 && itemRate <= 0 && itemAmount > 0) {
-      // Derive rate from qty & amount. Use 4dp so qty × rate stays as close to
-      // amount as possible (Tally recomputes qty × rate for the Amount column).
+    if (itemQty > 0 && itemAmount > 0) {
+      // Always re-derive rate from the emitted amount so qty × rate === amount.
+      // 4dp keeps qty × rate as close to amount as Tally allows.
       itemRate = +(itemAmount / itemQty).toFixed(4);
     } else if (itemRate > 0 && itemQty <= 0 && itemAmount > 0) {
       itemQty = +(itemAmount / itemRate).toFixed(4);
