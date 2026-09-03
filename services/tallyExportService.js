@@ -1822,6 +1822,8 @@ ${addressListXml}
   <VOUCHERTYPENAME>${esc(voucherTypeName)}</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(v.voucherNumber || '')}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
+  <VCHGSTCLASS>&#4; Not Applicable</VCHGSTCLASS>
+  <VCHENTRYMODE>Item Invoice</VCHENTRYMODE>
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
   ${poOrderRefXml}
