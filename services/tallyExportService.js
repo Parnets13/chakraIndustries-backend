@@ -18,7 +18,7 @@ import DebitNote      from '../models/DebitNote.js';
 import TallyVoucher   from '../models/TallyVoucher.js';
 import Category       from '../models/Category.js';
 import { postXmlWithRetry } from './tallyFetchEngine.js';
-import { normalizeToTallyVoucher } from './normalizeToTallyVoucher.js';
+import { normalizeToTallyVoucher, tallyUnitSymbol } from './normalizeToTallyVoucher.js';
 
 const LOG = (...a) => console.log('[TallyExport]', ...a);
 const ERR = (...a) => console.error('[TallyExport ERROR]', ...a);
@@ -2197,6 +2197,22 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     }
     const stockHsnMap = new Map(stockItemMasters.map(im => [im.name, im.hsn || '']));
 
+    // ── Build stock item name → unit map from invoice items ─────────────────
+    // The voucher inventory line stamps its qty/rate with the item's unit
+    // (mapped via tallyUnit in normalizeToTallyVoucher). If the stock item MASTER
+    // in Tally is created with a DIFFERENT base unit than the voucher sends,
+    // Tally cannot reconcile the quantity to a unit and SILENTLY hides the
+    // Qty and Rate columns (showing only the amount). We therefore create the
+    // master with the SAME unit the voucher uses, so the two always agree.
+    const stockUnitMap = new Map(); // name → Tally unit symbol (e.g. Nos, Pcs, Kg)
+    for (const inv of invoices) {
+      for (const item of (inv.items || [])) {
+        const name = (item.description || item.name || '').trim();
+        if (!name || stockUnitMap.has(name)) continue;
+        stockUnitMap.set(name, tallyUnitSymbol(item.unit));
+      }
+    }
+
     // ── Fetch current GST rates from Tally for these stock items ─────────────
     // Per Tally official docs: tax validation priority is Stock Item GST rate FIRST.
     // If the stock item has no GST rate set in Tally, Expected Tax = 0.
@@ -2250,8 +2266,11 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       const tallyRateIsMissing = existsInTally && tallyCurrentRate === 0;
 
       if (!existsInTally) {
-        // Item doesn't exist → CREATE with full GST setup
-        return `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>Nos</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
+        // Item doesn't exist → CREATE with full GST setup.
+        // Use the SAME unit the voucher line will send (see stockUnitMap) so the
+        // master's base unit matches the voucher — otherwise Tally hides Qty/Rate.
+        const unit = stockUnitMap.get(name) || 'Nos';
+        return `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>${esc(unit)}</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
       } else if (tallyRateIsMissing && gstRate > 0) {
         // Item exists but GST rate is 0/unset in Tally → ALTER to set the correct rate
         LOG(`exportSalesInvoices: stock item "${name}" has no GST rate in Tally (rate=0) → setting to ${gstRate}%`);
@@ -2262,11 +2281,20 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       }
     }).filter(Boolean).join('');
 
+    // ── Ensure every unit referenced by an auto-created stock item exists ─────
+    // A STOCKITEM whose <UNITS> references a UoM that does not exist in Tally is
+    // rejected. Create the needed units (Tally silently skips ones that already
+    // exist) in the SAME masters import, before the stock items.
+    const neededUnits = new Set([...stockUnitMap.values(), 'Nos']);
+    const autoUnitXml = [...neededUnits].map(u =>
+      `<UNIT NAME="${esc(u)}" ACTION="Create"><NAME>${esc(u)}</NAME><ISSIMPLEUNIT>Yes</ISSIMPLEUNIT><FORMALNAME>${esc(u)}</FORMALNAME></UNIT>`
+    ).join('');
+
     LOG(`Sales: auto-creating ${partyNames.length} party ledgers + ${stockNames.length} stock items before vouchers`);
     LOG(`Sales: party names to create: ${partyNames.slice(0, 5).join(', ')}${partyNames.length > 5 ? ` ... (${partyNames.length - 5} more)` : ''}`);
     const mastersEnvelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
-<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${autoLedgerXml}${autoStockXml}</TALLYMESSAGE></REQUESTDATA>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${autoUnitXml}${autoLedgerXml}${autoStockXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
     const mastersResp = await postXml(cfg, mastersEnvelope, 60000);
     parseResponse(mastersResp, 'Sales Auto-Masters'); // log result, don't abort

@@ -14,6 +14,14 @@ const UNIT_MAP = {
 };
 const tallyUnit = (u) => UNIT_MAP[(u || '').toLowerCase().trim()] || 'Nos';
 
+/**
+ * Public helper — maps a raw item unit string to the exact Tally unit symbol
+ * used on voucher inventory lines. Exported so the export service can create
+ * the stock item master with the SAME unit the voucher will send (preventing
+ * the "Qty/Rate hidden in Tally" UOM mismatch).
+ */
+export const tallyUnitSymbol = (u) => tallyUnit(u);
+
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 /** Format any date value → YYYYMMDD string. Returns null on failure. */
 function toTallyDate(d) {
