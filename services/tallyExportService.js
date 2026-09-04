@@ -1522,20 +1522,38 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
       <VOUCHERCOMPONENTLIST.LIST></VOUCHERCOMPONENTLIST.LIST>
     </BATCHALLOCATIONS.LIST>`;
 
-    // ── Tag order matches REVTEST01.xml exactly ───────────────────────────────
-    // GSTOVRDNTAXABILITY + GSTOVRDNTYPEOFSUPPLY are required — without them Tally
-    // cannot classify the supply for GST and Tax Analysis shows a blank Tax Rate.
-    // They appear in every confirmed working e-invoice (REVTEST01, BIW20_test_fixed).
-    // RATEDETAILS.LIST must come AFTER ACCOUNTINGALLOCATIONS.LIST per reference XML.
+    // ── Structure replicated field-for-field from BIW20_EXACT_COPY.xml ─────────
+    // (a confirmed-working e-invoice where Tally DISPLAYS Qty and Rate).
+    // The critical ordering: all GST classification + the No/No flag block come
+    // FIRST, THEN <RATE>/<AMOUNT>/<ACTUALQTY>/<BILLEDQTY>. Tally only shows the
+    // Qty/Rate columns when the inventory entry carries this full classification
+    // block; a trimmed entry is treated as accounting-only and the columns hide.
+    const gstLedgerName = gstLedgerSrc; // real sales ledger driving GST rate + HSN
+    const invGstSourceXml = hasRealLedger
+      ? `\n    <GSTSOURCETYPE>Ledger</GSTSOURCETYPE>\n    <GSTLEDGERSOURCE>${esc(gstLedgerName)}</GSTLEDGERSOURCE>\n    <HSNSOURCETYPE>Ledger</HSNSOURCETYPE>\n    <HSNLEDGERSOURCE>${esc(gstLedgerName)}</HSNLEDGERSOURCE>`
+      : '';
+    const invHsnNameXml = gstHsnName ? `\n    <GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : '';
     return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
+    <GSTOVRDNISREVCHARGEAPPL>&#4; Not Applicable</GSTOVRDNISREVCHARGEAPPL>
+    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>${invGstSourceXml}
+    <GSTOVRDNSTOREDNATURE>Local Sales - Taxable</GSTOVRDNSTOREDNATURE>
+    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
+    <GSTRATEINFERAPPLICABILITY>As per Masters/Company</GSTRATEINFERAPPLICABILITY>${invHsnNameXml}
+    <GSTHSNINFERAPPLICABILITY>As per Masters/Company</GSTHSNINFERAPPLICABILITY>
     <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
-    <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <ISGSTASSESSABLEVALUEOVERRIDDEN>No</ISGSTASSESSABLEVALUEOVERRIDDEN>
-    ${gstSourceXml ? gstSourceXml + '\n    ' : ''}<GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
-    ${hsnSourceXml ? hsnSourceXml + '\n    ' : ''}<GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
-    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>\n    ` : ''}<RATE>${esc(item.rate || '')}</RATE>
+    <STRDISGSTAPPLICABLE>No</STRDISGSTAPPLICABLE>
+    <CONTENTNEGISPOS>No</CONTENTNEGISPOS>
+    <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
+    <ISAUTONEGATE>No</ISAUTONEGATE>
+    <ISCUSTOMSCLEARANCE>No</ISCUSTOMSCLEARANCE>
+    <ISTRACKCOMPONENT>No</ISTRACKCOMPONENT>
+    <ISTRACKPRODUCTION>No</ISTRACKPRODUCTION>
+    <ISPRIMARYITEM>No</ISPRIMARYITEM>
+    <ISSCRAP>No</ISSCRAP>
+    <RATE>${esc(item.rate || '')}</RATE>
     <AMOUNT>${itemAmountTag.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${esc(formatQty(item.actualQty || ''))}</ACTUALQTY>
     <BILLEDQTY>${esc(formatQty(item.billedQty || ''))}</BILLEDQTY>${batchAllocXml}${acctAllocsXml}${rateDetailsXml}
