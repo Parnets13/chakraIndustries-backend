@@ -14,6 +14,7 @@ import {
   exportSalesInvoices,
   exportPurchaseInvoices,
 } from './tallyExportService.js';
+import { isManualExportActive } from './tallyExportLock.js';
 
 const LOG = (msg) => console.log(`[TallyScheduler] ${msg}`);
 const ERR = (msg, err) => console.error(`[TallyScheduler Error] ${msg}`, err ? err.message || err : '');
@@ -37,6 +38,13 @@ let _schedulerLock = false;
 async function syncTransactions() {
   if (_schedulerLock) {
     LOG('Skipping transaction sync — previous sync still running');
+    return;
+  }
+  // A manual export (from the Tally page) uses the same connector → same Tally.
+  // Skip this scheduled run so the two never collide on the connector queue.
+  // The next interval will run normally once the manual export has finished.
+  if (isManualExportActive()) {
+    LOG('Skipping transaction sync — a manual export is currently in progress');
     return;
   }
   _schedulerLock = true;

@@ -28,6 +28,7 @@ import {
   runFullExportToTally,
   runSelectiveExport,
 } from '../services/tallyExportService.js';
+import { beginManualExport, endManualExport } from '../services/tallyExportLock.js';
 import { importFromFiles } from '../services/tallyFileImporter.js';
 import { normalizeToTallyVoucher } from '../services/normalizeToTallyVoucher.js';
 import { exportPOInvoicesToTally, getPOInvoiceExportCount } from '../services/poTallyExportService.js';
@@ -1133,6 +1134,11 @@ export const exportToTallyStream = async (req, res) => {
   const type = req.query.type || 'Full';
   send({ event: 'start', message: `Export started (ERP → Tally) — type: ${type}`, syncId, direction: 'ERP → Tally' });
 
+  // Mark a manual export as active so the background scheduler pauses its own
+  // Tally sync while this runs — they share one connector/Tally and must not
+  // collide (concurrent requests caused batches to time out and skip invoices).
+  beginManualExport();
+
   const stats = { total: 0, created: 0, updated: 0, skipped: 0, failed: 0 };
   const detailedLogs = [];
 
@@ -1291,6 +1297,10 @@ export const exportToTallyStream = async (req, res) => {
       status: 'Failed', duration, error: err.message, records: 0, triggeredBy: user._id,
     }).catch(() => {});
     send({ event: 'error', message: `Export failed: ${err.message}`, error: err.message });
+  } finally {
+    // Always release the manual-export flag so the scheduler can resume,
+    // whether the export succeeded or failed.
+    endManualExport();
   }
 
   res.end();
@@ -1393,6 +1403,9 @@ export const fullExportToTallyStream = async (req, res) => {
 
   send({ event: 'start', message: 'Full Export to Tally started (ERP → Tally)', syncId, direction: 'ERP → Tally' });
 
+  // Pause the background scheduler while this manual export runs (shared connector).
+  beginManualExport();
+
   try {
     const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
     const hasConnection = cfg?.useConnector && cfg?.connectorId ? true : !!(cfg?.tallyLocalUrl);
@@ -1455,6 +1468,8 @@ export const fullExportToTallyStream = async (req, res) => {
       status: 'Failed', duration, error: err.message, records: 0, triggeredBy: user._id,
     }).catch(() => {});
     send({ event: 'error', message: `Export failed: ${err.message}`, error: err.message });
+  } finally {
+    endManualExport();
   }
 
   res.end();
@@ -1480,6 +1495,9 @@ export const selectiveExportStream = async (req, res) => {
     return res.end();
   }
   key = key.replace(/;$/, '');
+
+  // Pause the background scheduler while this manual export runs (shared connector).
+  beginManualExport();
 
   try {
     const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
@@ -1508,6 +1526,8 @@ export const selectiveExportStream = async (req, res) => {
     send({ event: 'done', ok: result.ok, records: result.records, error: result.error, warning: result.warning, message: result.ok ? `✅ ${key}: ${result.records} records exported` : `❌ ${key}: ${result.error}` });
   } catch (err) {
     send({ event: 'error', message: err.message });
+  } finally {
+    endManualExport();
   }
 
   res.end();
