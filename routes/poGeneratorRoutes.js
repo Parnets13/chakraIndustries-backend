@@ -1,5 +1,9 @@
 import express from 'express';
 import { protect } from '../middleware/authMiddleware.js';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import {
   listPOs,
   deletePO,
@@ -23,7 +27,31 @@ import {
   createCompany,
   updateCompany,
   deleteCompany,
+  // ── New PO Upload flow ──
+  createPOUpload,
+  listPOUploads,
+  getPOUploadById,
+  deletePOUpload,
+  updatePOUploadItem,
+  getPOCompaniesSummary,
+  getPOCompanyDetail,
 } from '../controllers/poGeneratorController.js';
+
+// ── Multer setup for uploaded PO PDFs ─────────────────────────────────────────
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+const poStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = path.join(__dirname, '../uploads/po-uploads');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname || '') || '.pdf';
+    cb(null, `po-${Date.now()}-${Math.round(Math.random() * 1e6)}${ext}`);
+  },
+});
+const poUpload = multer({ storage: poStorage, limits: { fileSize: 25 * 1024 * 1024 } });
 
 const router = express.Router();
 router.use(protect);
@@ -62,6 +90,16 @@ router.delete('/invoices/:id', deleteInvoice);
 // Company-wise item tracking
 router.get('/company-items/:companyId', getCompanyItems);
 router.get('/companies-summary',        getCompaniesSummary);
+
+// ── New PO Upload flow (records ordered vs sent, no invoice) ──────────────────
+// Specific routes before parameterized ones
+router.get('/po-companies-summary',        getPOCompaniesSummary);
+router.get('/po-company/:companyId',       getPOCompanyDetail);
+router.post('/po-uploads',                 poUpload.single('file'), createPOUpload);
+router.get('/po-uploads',                  listPOUploads);
+router.get('/po-uploads/:id',              getPOUploadById);
+router.delete('/po-uploads/:id',           deletePOUpload);
+router.patch('/po-uploads/:id/items/:itemId', updatePOUploadItem);
 
 // Pending / backorders
 router.get('/pending-orders', listPendingOrders);

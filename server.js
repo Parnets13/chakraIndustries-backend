@@ -109,6 +109,7 @@ import './models/AccountsLedger.js';
 import './models/DispatchClient.js';
 import './models/LossTracking.js';
 import './models/POInvoice.js';
+import './models/POUpload.js';
 import './models/PendingOrder.js';
 import './models/DebitNote.js';
 import './models/TallyVoucher.js';

@@ -1141,6 +1141,9 @@ export const exportToTallyStream = async (req, res) => {
 
   const stats = { total: 0, created: 0, updated: 0, skipped: 0, failed: 0 };
   const detailedLogs = [];
+  // Collect every invoice that was NOT exported, with its exact reason, so the
+  // export screen can list them (invoice no + why it was skipped/failed).
+  const allFailedInvoices = [];
 
   const log = (level, entity, msg, extra = {}) => {
     const entry = { ts: new Date().toISOString(), level, entity, msg, ...extra };
@@ -1237,8 +1240,17 @@ export const exportToTallyStream = async (req, res) => {
           log('success', task.label, `✅ ${task.label}: ${taskRecords} records exported`, {
             records: taskRecords, created, altered,
           });
+          // Even on an "ok" task, some individual invoices may have been skipped/failed
+          // silently (validation / dedup / missing master). Surface each one with its reason.
+          const okFailed = Array.isArray(result.failedItems) ? result.failedItems : [];
+          if (okFailed.length) {
+            allFailedInvoices.push(...okFailed.map(f => ({ ...f, task: task.label })));
+            for (const f of okFailed) {
+              log('error', task.label, `⚠️ Invoice ${f.id} NOT exported — ${f.error}`, { invoiceNo: f.id, reason: f.error });
+            }
+          }
           send({ event: 'phase_done', entity: task.label, records: taskRecords, ok: true,
-            created, altered, message: `${task.label} exported — ${taskRecords} records` });
+            created, altered, failedItems: okFailed, message: `${task.label} exported — ${taskRecords} records` });
         } else if (result.offline) {
           log('error', task.label, `❌ Tally is offline: ${result.error}`);
           stats.failed += 1;
@@ -1250,8 +1262,16 @@ export const exportToTallyStream = async (req, res) => {
         } else {
           log('error', task.label, `❌ ${task.label} export failed: ${result.error}`, { error: result.error });
           stats.failed += 1;
+          // Surface each individual invoice that could not be exported, with its exact reason.
+          const failed = Array.isArray(result.failedItems) ? result.failedItems : [];
+          if (failed.length) {
+            allFailedInvoices.push(...failed.map(f => ({ ...f, task: task.label })));
+            for (const f of failed) {
+              log('error', task.label, `⚠️ Invoice ${f.id} NOT exported — ${f.error}`, { invoiceNo: f.id, reason: f.error });
+            }
+          }
           send({ event: 'phase_done', entity: task.label, records: 0, ok: false, error: result.error,
-            message: `${task.label} export failed: ${result.error}` });
+            failedItems: failed, message: `${task.label} export failed: ${result.error}` });
         }
 
         if (result.warning) {
@@ -1287,6 +1307,8 @@ export const exportToTallyStream = async (req, res) => {
       message: `Export complete — ${stats.total} records exported to Tally in ${duration}`,
       stats: { ...stats, duration },
       logs: detailedLogs.slice(-50),
+      // Per-invoice failures with exact reasons (invoice no + why not exported)
+      failedInvoices: allFailedInvoices,
     });
     send({ event: 'done', stats, duration });
 

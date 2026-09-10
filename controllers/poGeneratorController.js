@@ -5,6 +5,7 @@ import PendingOrder from '../models/PendingOrder.js';
 import AccountsPayable from '../models/AccountsPayable.js';
 import Vendor from '../models/Vendor.js';
 import Company from '../models/Company.js';
+import POUpload from '../models/POUpload.js';
 
 // ── Find or create a Company by buyer name ────────────────────────────────────
 // Matches by exact name OR any stored alias (case-insensitive)
@@ -963,6 +964,261 @@ export const deleteCompany = async (req, res) => {
     const company = await Company.findByIdAndDelete(req.params.id);
     if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
     res.json({ success: true, message: 'Company deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PO UPLOAD (new flow) — a PO upload only records what was ORDERED.
+// It does NOT create an invoice and does NOT assume fulfillment.
+// The user later updates sentQty per item; remaining = requiredQty - sentQty.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Normalize incoming items into the POUpload item shape.
+const normalizePOUploadItems = (rawItems = []) =>
+  rawItems
+    .map(it => {
+      const name = String(it.name || it.itemName || it.description || '').trim();
+      if (!name) return null;
+      return {
+        name,
+        hsn:         String(it.hsn || '').trim(),
+        requiredQty: Number(it.requiredQty ?? it.qty ?? 0) || 0,
+        sentQty:     Number(it.sentQty ?? 0) || 0,
+        unit:        String(it.unit || 'Nos').trim() || 'Nos',
+        rate:        Number(it.rate ?? it.basePrice ?? 0) || 0,
+      };
+    })
+    .filter(Boolean);
+
+// ── POST /api/po-generator/po-uploads ─────────────────────────────────────────
+// multipart/form-data:
+//   file        — the PO PDF (optional but recommended)
+//   payload     — JSON string: { poNumber, vendorName, buyerName, buyerAddress,
+//                                buyerGSTIN, companyId, items:[{name,hsn,requiredQty,sentQty,unit,rate}], source, notes }
+export const createPOUpload = async (req, res) => {
+  try {
+    let payload = req.body || {};
+    // When sent as multipart, the JSON is inside the "payload" field
+    if (typeof payload.payload === 'string') {
+      try { payload = JSON.parse(payload.payload); }
+      catch { return res.status(400).json({ success: false, message: 'Invalid payload JSON' }); }
+    }
+
+    const {
+      poNumber = '', vendorName = '', buyerName = '', buyerAddress = '',
+      buyerGSTIN = '', companyId: explicitCompanyId, items = [], source = 'pdf', notes = '',
+    } = payload;
+
+    const normItems = normalizePOUploadItems(items);
+    if (!normItems.length)
+      return res.status(400).json({ success: false, message: 'At least one item with a name is required' });
+
+    // Resolve company: explicit selection wins, else find/create from buyer name
+    let company = null;
+    if (explicitCompanyId) company = await Company.findById(explicitCompanyId);
+    if (!company) company = await findOrCreateCompany(buyerName, buyerGSTIN);
+
+    // Stored PDF path (served under /uploads by server.js static handler)
+    const pdfFile     = req.file ? `/uploads/po-uploads/${req.file.filename}` : '';
+    const pdfFileName = req.file ? (req.file.originalname || req.file.filename) : '';
+
+    const po = await POUpload.create({
+      poNumber:    poNumber || '',
+      companyId:   company?._id || null,
+      companyName: company?.companyName || buyerName || '',
+      vendorName, buyerName, buyerAddress, buyerGSTIN,
+      items:       normItems,
+      pdfFile, pdfFileName,
+      source:      ['pdf', 'excel', 'manual'].includes(source) ? source : 'pdf',
+      notes,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `PO uploaded — ${normItems.length} item(s) recorded`,
+      data: po,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── GET /api/po-generator/po-uploads ──────────────────────────────────────────
+// List uploaded POs. Optional filters: companyId, search (poNumber/company/buyer).
+export const listPOUploads = async (req, res) => {
+  try {
+    const { companyId, search } = req.query;
+    // Upload page list hides POs that were deleted from the Upload page only.
+    // (Those POs still appear in Company Details.)
+    const filter = { hiddenFromUpload: { $ne: true } };
+    if (companyId) filter.companyId = companyId;
+    if (search) {
+      filter.$or = [
+        { poNumber:    { $regex: search, $options: 'i' } },
+        { companyName: { $regex: search, $options: 'i' } },
+        { buyerName:   { $regex: search, $options: 'i' } },
+        { vendorName:  { $regex: search, $options: 'i' } },
+      ];
+    }
+    const pos = await POUpload.find(filter).sort({ createdAt: -1 }).lean();
+
+    // Attach computed per-PO totals (required / sent / remaining)
+    const withTotals = pos.map(po => {
+      const totalRequired  = (po.items || []).reduce((s, i) => s + (i.requiredQty || 0), 0);
+      const totalSent      = (po.items || []).reduce((s, i) => s + (i.sentQty || 0), 0);
+      const totalRemaining = Math.max(0, totalRequired - totalSent);
+      const status = totalRemaining === 0 && totalRequired > 0 ? 'Completed'
+        : totalSent > 0 ? 'Partial' : 'Pending';
+      return { ...po, totalRequired, totalSent, totalRemaining, status };
+    });
+
+    res.json({ success: true, data: withTotals });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── GET /api/po-generator/po-uploads/:id ──────────────────────────────────────
+export const getPOUploadById = async (req, res) => {
+  try {
+    const po = await POUpload.findById(req.params.id).lean();
+    if (!po) return res.status(404).json({ success: false, message: 'PO not found' });
+    res.json({ success: true, data: po });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── DELETE /api/po-generator/po-uploads/:id ───────────────────────────────────
+// Soft-delete: removes the PO from the Upload page's list ONLY. The PO record is
+// kept so it STILL appears in Company Details (delete here must not affect that).
+export const deletePOUpload = async (req, res) => {
+  try {
+    const po = await POUpload.findByIdAndUpdate(
+      req.params.id,
+      { hiddenFromUpload: true },
+      { new: true }
+    );
+    if (!po) return res.status(404).json({ success: false, message: 'PO not found' });
+    res.json({ success: true, message: 'PO removed from upload list (still visible in Company Details)' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── PATCH /api/po-generator/po-uploads/:id/items/:itemId ──────────────────────
+// Manually update the sent quantity (or other item fields) for a single PO item.
+// Remaining is always computed on read as requiredQty - sentQty.
+export const updatePOUploadItem = async (req, res) => {
+  try {
+    const { id, itemId } = req.params;
+    const { sentQty, requiredQty, rate, unit, hsn } = req.body;
+
+    const po = await POUpload.findById(id);
+    if (!po) return res.status(404).json({ success: false, message: 'PO not found' });
+
+    const item = po.items.id(itemId);
+    if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
+
+    if (sentQty     !== undefined) item.sentQty     = Math.max(0, Number(sentQty) || 0);
+    if (requiredQty !== undefined) item.requiredQty = Math.max(0, Number(requiredQty) || 0);
+    if (rate        !== undefined) item.rate        = Number(rate) || 0;
+    if (unit        !== undefined) item.unit        = String(unit) || 'Nos';
+    if (hsn         !== undefined) item.hsn         = String(hsn);
+
+    // Never let sent exceed required
+    if (item.sentQty > item.requiredQty) item.sentQty = item.requiredQty;
+
+    await po.save();
+
+    const remaining = Math.max(0, (item.requiredQty || 0) - (item.sentQty || 0));
+    res.json({ success: true, data: { ...item.toObject(), remaining } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── GET /api/po-generator/po-companies-summary ────────────────────────────────
+// One row per company that has at least one uploaded PO, with rolled-up totals.
+export const getPOCompaniesSummary = async (req, res) => {
+  try {
+    const rows = await POUpload.aggregate([
+      { $unwind: { path: '$items', preserveNullAndEmptyArrays: true } },
+      { $group: {
+          _id: { companyId: '$companyId', companyName: '$companyName' },
+          poIds:          { $addToSet: '$_id' },
+          totalRequired:  { $sum: { $ifNull: ['$items.requiredQty', 0] } },
+          totalSent:      { $sum: { $ifNull: ['$items.sentQty', 0] } },
+          lastUpload:     { $max: '$createdAt' },
+      }},
+      { $project: {
+          _id: 0,
+          companyId:   '$_id.companyId',
+          companyName: '$_id.companyName',
+          poCount:     { $size: '$poIds' },
+          totalRequired: 1,
+          totalSent: 1,
+          totalRemaining: { $max: [0, { $subtract: ['$totalRequired', '$totalSent'] }] },
+          lastUpload: 1,
+      }},
+      { $sort: { companyName: 1 } },
+    ]);
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── GET /api/po-generator/po-company/:companyId ───────────────────────────────
+// All uploaded POs for a company, each with items + required/sent/remaining, plus
+// company-level totals. companyId may be a real ObjectId or the literal 'none'
+// (for POs uploaded without a resolved company).
+export const getPOCompanyDetail = async (req, res) => {
+  try {
+    const { companyId } = req.params;
+    const filter = companyId === 'none' ? { companyId: null } : { companyId };
+
+    const pos = await POUpload.find(filter).sort({ createdAt: -1 }).lean();
+
+    let totalRequired = 0, totalSent = 0;
+    const posWithTotals = pos.map(po => {
+      const items = (po.items || []).map(i => ({
+        ...i,
+        remaining: Math.max(0, (i.requiredQty || 0) - (i.sentQty || 0)),
+      }));
+      const req_ = items.reduce((s, i) => s + (i.requiredQty || 0), 0);
+      const sent = items.reduce((s, i) => s + (i.sentQty || 0), 0);
+      totalRequired += req_; totalSent += sent;
+      const remaining = Math.max(0, req_ - sent);
+      return {
+        ...po,
+        items,
+        totalRequired: req_,
+        totalSent: sent,
+        totalRemaining: remaining,
+        status: remaining === 0 && req_ > 0 ? 'Completed' : sent > 0 ? 'Partial' : 'Pending',
+      };
+    });
+
+    const company = companyId !== 'none'
+      ? await Company.findById(companyId).lean().catch(() => null)
+      : null;
+
+    res.json({
+      success: true,
+      data: {
+        company: company || { _id: null, companyName: pos[0]?.companyName || 'Unassigned' },
+        totals: {
+          poCount: pos.length,
+          totalRequired,
+          totalSent,
+          totalRemaining: Math.max(0, totalRequired - totalSent),
+        },
+        pos: posWithTotals,
+      },
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
