@@ -639,7 +639,7 @@ export const resetInvoiceSyncFlags = async (req, res) => {
       filter = { invoiceNo: { $in: invoiceNos } };
     }
     const result = await Invoice.updateMany(filter, {
-      $set: { tallySync: false },
+      $set: { tallySync: false, retryCount: 0, lastError: '' },
       $unset: { tallySyncAt: '' },
     });
     const count = result.modifiedCount || 0;

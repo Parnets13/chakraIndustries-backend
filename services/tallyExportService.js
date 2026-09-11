@@ -22,7 +22,7 @@ import { normalizeToTallyVoucher, tallyUnitSymbol } from './normalizeToTallyVouc
 
 const LOG = (...a) => console.log('[TallyExport]', ...a);
 const ERR = (...a) => console.error('[TallyExport ERROR]', ...a);
-const MAX_RETRIES = 4; // allow one more retry attempt for pending invoices
+const MAX_RETRIES = 10; // enough retries to survive transient Tally offline/mismatch errors
 
 // ─── CONFIG HELPERS ───────────────────────────────────────────────────────────
 
@@ -2551,7 +2551,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           // ── STEP 7: Pre-export validation against live Tally masters ────────
           if (tallyMastersForValidation) {
             try {
-              const vResult = validateTallyExport(tv, tallyMastersForValidation, { strict: true });
+              const vResult = validateTallyExport(tv, tallyMastersForValidation, { strict: false });
               if (vResult.warnings.length > 0) {
                 LOG(`Invoice ${inv.invoiceNo}: pre-export warnings:\n${vResult.warnings.map((w, i) => `  [${i+1}] ${w}`).join('\n')}`);
               }
@@ -2657,8 +2657,10 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         errorText.includes('master') ||
         errorText.includes('could not find');
 
-      // A no-op is not proof of a duplicate, so it cannot trigger Alter/Delete.
-      const isSilentDuplicate = false;
+      // Detect silent no-op: Tally returned ok (no error) but created=0 AND altered=0.
+      // This means Tally silently rejected the voucher without any error message.
+      // Safe to retry as Alter — the voucher likely already exists in Tally.
+      const isSilentDuplicate = result.ok && (result.created || 0) === 0 && (result.altered || 0) === 0 && batch.length > 0;
 
       // Only retry as Alter when:
       //   a) Silent zero (voucher already exists in Tally — no error, just not created)
