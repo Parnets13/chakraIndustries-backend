@@ -1195,14 +1195,16 @@ async function fetchTallySalesLedgerNames(cfg) {
       const block  = m[1];
       const name   = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
       const parent = (block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim().toLowerCase();
-      const nameLow = name.toLowerCase();
-      // Include if parent is Sales OR name contains sales (resilient to missing Parent tag)
+      // STRICT: only include ledgers whose PARENT group contains "sales".
+      // Never use the ledger name itself as a filter — customer/vendor ledger names
+      // can contain product-related words that accidentally match item keywords in
+      // resolveSalesLedger(), causing them to be picked as the sales credit ledger
+      // and producing Tally EXCEPTIONS=10 on every invoice that uses that item.
       const isSalesParent = parent.includes('sales');
-      const isSalesName = nameLow.includes('sales') || nameLow.includes('sale');
-      if (!isSalesParent && !isSalesName) continue;
+      if (!isSalesParent) continue;
       if (name) salesLedgers.push(name);
     }
-    LOG(`fetchTallySalesLedgerNames: found ${salesLedgers.length} sales ledgers: [${salesLedgers.slice(0, 10).join(', ')}${salesLedgers.length > 10 ? '...' : ''}]`);
+    LOG(`fetchTallySalesLedgerNames: found ${salesLedgers.length} sales ledgers (parent-only filter): [${salesLedgers.slice(0, 10).join(', ')}${salesLedgers.length > 10 ? '...' : ''}]`);
     return salesLedgers;
   } catch (e) {
     ERR('fetchTallySalesLedgerNames failed (non-fatal):', e.message);
@@ -2459,8 +2461,31 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             let tallySalesLedger = (item.tallySalesLedger || '').trim()
                                 || (im?.tallySalesLedger  || '').trim();
 
+            // ── GUARD: validate the stored ledger against the live Tally list ──
+            // If tallySalesLedgers is available (direct mode) AND the stored ledger
+            // is NOT in that list, the stored value is wrong (e.g. came from Excel
+            // upload with a customer name, or from a previous bad auto-resolve).
+            // Clear it so we fall through to auto-resolve with the correct list.
+            // This is the single most important guard — without it, any bad value
+            // stored on the invoice item or in ItemMaster will reach Tally XML
+            // unchanged and cause EXCEPTIONS=10 on every single invoice.
+            if (
+              tallySalesLedger &&
+              !GENERIC.has(tallySalesLedger.toLowerCase()) &&
+              tallySalesLedgers.length > 0 &&
+              !tallySalesLedgers.includes(tallySalesLedger)
+            ) {
+              ERR(`Invoice ${inv.invoiceNo} item "${n}": tallySalesLedger "${tallySalesLedger}" NOT in Tally live list — clearing and re-resolving`);
+              // Also clear the poisoned value from ItemMaster so future exports don't re-use it
+              if (im?.tallySalesLedger === tallySalesLedger) {
+                ItemMaster.updateOne({ name: n }, { $unset: { tallySalesLedger: 1 } })
+                  .catch(e => ERR(`Failed to clear bad tallySalesLedger for "${n}":`, e.message));
+              }
+              tallySalesLedger = ''; // force re-resolve below
+            }
+
             if (GENERIC.has(tallySalesLedger.toLowerCase()) && tallySalesLedgers.length > 0) {
-              // No ledger set — auto-resolve from live Tally list
+              // No ledger set (or just cleared) — auto-resolve from live Tally list
               const itemCgst = +(item.cgst || 0);
               const itemIgst = +(item.igst || 0);
               const taxBase  = +(item.basic || 0) || +(item.amount || 0);
@@ -2475,12 +2500,19 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
                 tallySalesLedgers, n, gstRate, null, isInterstate
               );
               const GENERIC_RESOLVED = new Set(['sales accounts', 'sales accounts (group)']);
-              if (resolved && !GENERIC_RESOLVED.has(resolved.toLowerCase())) {
+              // ── GUARD: only save back to ItemMaster if resolved ledger is
+              // verified to exist in the live Tally sales ledger list.
+              // Never save a guessed/fallback name — it may not exist in Tally.
+              if (resolved && !GENERIC_RESOLVED.has(resolved.toLowerCase()) && tallySalesLedgers.includes(resolved)) {
                 tallySalesLedger = resolved;
                 LOG(`Auto-resolved tallySalesLedger for "${n}": "${resolved}" — saving to ItemMaster`);
-                // Save back to ItemMaster so future exports skip this resolution step
+                // Safe to persist: confirmed in live Tally ledger list
                 ItemMaster.updateOne({ name: n }, { $set: { tallySalesLedger: resolved } })
                   .catch(e => ERR(`Failed to save tallySalesLedger for "${n}":`, e.message));
+              } else if (resolved && !GENERIC_RESOLVED.has(resolved.toLowerCase())) {
+                // Resolved but NOT confirmed in live list — use for this export only, don't persist
+                tallySalesLedger = resolved;
+                LOG(`Auto-resolved tallySalesLedger for "${n}": "${resolved}" (not persisted — not in live Tally list)`);
               }
             }
 
@@ -2779,9 +2811,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         const errMsg = result.error || 'Tally rejected';
         batchErrors.push(`Batch ${batchNo}: ${errMsg}`);
         // ── SAFEGUARD 3: Per-invoice export log (failed) ───────────────────
+        // Also add each invoice individually to failedItems so the Export UI
+        // can display EXACTLY which invoice numbers failed and why.
         for (const v of batch) {
           failedInvoiceIds.push(v.id);
           invoiceErrorMap[String(v.id)] = errMsg;
+          failedItems.push({ id: v.invoiceNo, partyName: v.partyName, error: errMsg });
           await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', errMsg);
         }
       }
