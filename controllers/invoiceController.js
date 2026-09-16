@@ -9,6 +9,39 @@ import { pushSingleInvoiceToTally } from '../services/tallyService.js';
 import { normalizeToTallyVoucher } from '../services/normalizeToTallyVoucher.js';
 import TallyConfig from '../models/TallyConfig.js';
 
+// ── Sales ledger safety guard ─────────────────────────────────────────────────
+// A tallySalesLedger value from Excel is ONLY safe to store if it looks like a
+// real Tally Sales Accounts ledger. The word "sales" (case-insensitive) must
+// appear in the value. Anything else — customer names, product names, blanks —
+// is rejected and replaced with '' so the export auto-resolves from the live
+// Tally ledger list at export time.
+//
+// This is the PERMANENT fix for the "EXCEPTIONS=10" silent miss bug:
+//   Excel uploads can contain any garbage in the tallySalesLedger column.
+//   Without this guard, wrong values (e.g. "AVR SWARNA MAHAL JEWELRY",
+//   "Electric Fan Heater Glint Sales Local" for a Chopper, etc.) get stored
+//   in ItemMaster and invoice items, then sent to Tally XML, causing every
+//   invoice with that item to silently fail forever.
+//
+// The guard is intentionally simple and loose — it only requires "sales" to
+// be present. That's enough to block customer names, product names, and other
+// obviously wrong values while allowing any legitimate sales ledger name.
+function isSafeSalesLedger(value) {
+  if (!value || typeof value !== 'string') return false;
+  const v = value.trim().toLowerCase();
+  if (!v) return false;
+  // Must contain the word "sales" — every real Tally sales ledger does
+  return v.includes('sales');
+}
+
+// Sanitise a tallySalesLedger value: return it as-is if safe, '' otherwise.
+function sanitiseSalesLedger(value) {
+  const v = (value || '').trim();
+  if (isSafeSalesLedger(v)) return v;
+  if (v) console.warn(`[invoiceController] Rejected unsafe tallySalesLedger "${v}" — does not contain "sales". Will be auto-resolved at export time.`);
+  return '';
+}
+
 // ── ItemMaster lookup: attach tallySalesLedger + hsn to each invoice item ─────
 // Runs one DB query for all item names in the invoice, then stamps each item
 // with ItemMaster.tallySalesLedger and ItemMaster.hsn so normalizeToTallyVoucher
@@ -338,12 +371,13 @@ export const bulkUpload = async (req, res) => {
         // Generate a stable SKU from the name
         const sku = 'AUTO-' + cleanName.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 25) + '-' + Date.now().toString(36).slice(-4).toUpperCase();
         // Collect the first tallySalesLedger seen for this item name across all uploaded rows.
-        // This seeds ItemMaster so future uploads and re-exports immediately use the correct ledger.
+        // GUARD: only seed if the value actually looks like a sales ledger (contains "sales").
+        // Reject customer names, product names, or other garbage from the Excel column.
         const firstItemWithLedger = invoices.flatMap(inv => inv.items || []).find(i => {
           const n = (i.description || i.name || '').trim();
-          return n === cleanName && (i.tallySalesLedger || '').trim();
+          return n === cleanName && isSafeSalesLedger(i.tallySalesLedger);
         });
-        const seedLedger = (firstItemWithLedger?.tallySalesLedger || '').trim();
+        const seedLedger = sanitiseSalesLedger(firstItemWithLedger?.tallySalesLedger || '');
         return {
           updateOne: {
             filter: { name: cleanName },
@@ -386,12 +420,16 @@ export const bulkUpload = async (req, res) => {
       const im = itemMasterMap.get(name);
       if (!im) continue; // will be handled by $setOnInsert path above
       if (im.tallySalesLedger) continue; // already has a value — don't overwrite
-      // Find the first uploaded row for this item that carries a Sales Ledger value
+      // Find the first uploaded row for this item that carries a SAFE Sales Ledger value
+      // GUARD: only backfill if the ledger value actually contains "sales".
+      // This prevents customer names and wrong product categories from being
+      // permanently stored in ItemMaster and poisoning all future exports.
       const firstWithLedger = invoices
         .flatMap(inv => inv.items || [])
-        .find(i => (i.description || i.name || '').trim() === name && (i.tallySalesLedger || '').trim());
+        .find(i => (i.description || i.name || '').trim() === name && isSafeSalesLedger(i.tallySalesLedger));
       if (!firstWithLedger) continue;
-      const newLedger = firstWithLedger.tallySalesLedger.trim();
+      const newLedger = sanitiseSalesLedger(firstWithLedger.tallySalesLedger);
+      if (!newLedger) continue; // sanitise returned '' — skip
       im.tallySalesLedger = newLedger; // update in-memory map immediately
       backfillOps.push({
         updateOne: {
@@ -440,12 +478,12 @@ export const bulkUpload = async (req, res) => {
           const im   = itemMasterMap.get(name);
           // tallySalesLedger priority:
           // 1. What's on this specific item row from the Excel (parsed Sales Ledger column)
-          // 2. What's stored in ItemMaster (manually set via Item Master UI or previous upload)
-          // 3. Empty string — do NOT fall back to the item description/name.
-          //    Using the item name as tallySalesLedger causes it to be sent as
-          //    GSTLEDGERSOURCE in Tally XML, but stock item names are NOT ledgers.
-          //    Tally silently returns EXCEPTIONS=1 when a non-ledger is used there.
-          const tallySalesLedger = (item.tallySalesLedger || '').trim() || (im?.tallySalesLedger || '').trim();
+          //    — BUT only if it's a valid sales ledger name (contains "sales").
+          //    Invalid values (customer names, product names, wrong categories) are
+          //    silently dropped so the export auto-resolves from Tally's live list.
+          // 2. What's stored in ItemMaster (verified safe on a previous upload)
+          // 3. Empty string — export will auto-resolve at export time.
+          const tallySalesLedger = sanitiseSalesLedger(item.tallySalesLedger) || sanitiseSalesLedger(im?.tallySalesLedger);
           return {
             ...item,
             hsn:             (item.hsn || '').trim() || (im?.hsn || '').trim(),
