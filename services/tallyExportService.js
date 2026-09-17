@@ -253,6 +253,24 @@ ${innerXml}
 </ENVELOPE>`;
 }
 
+// ── DIAGNOSTIC: send a SINGLE voucher and capture Tally's full raw response ──
+// Tally hides errors in multi-voucher batch imports (EXCEPTIONS=N, no LINEERROR).
+// When we send ONE voucher at a time with SVSHOWERRORLIST=Yes, Tally is far more
+// likely to return the actual LINEERROR/LASTERROR text describing WHY it failed.
+// This is called once (first failing voucher) to surface the real reason in logs.
+async function diagnoseSingleVoucher(cfg, singleVoucherXml, label) {
+  try {
+    ERR(`${label} DIAGNOSE: sending ONE voucher alone to force Tally's real error message...`);
+    const envelope = importEnvelope(cfg, 'Vouchers', singleVoucherXml);
+    const body = await postXml(cfg, envelope, 60000);
+    ERR(`${label} DIAGNOSE RAW RESPONSE (full):\n${String(body || '(empty)')}`);
+    // parseResponse logs every diagnostic tag it can find
+    parseResponse(body, `${label} DIAGNOSE`);
+  } catch (e) {
+    ERR(`${label} DIAGNOSE failed: ${e.message}`);
+  }
+}
+
 async function sendImportWithFallbackDebug(cfg, reportName, innerXml, label, timeoutMs = 40000) {
   const envelope = importEnvelope(cfg, reportName, innerXml);
   const body = await postXml(cfg, envelope, timeoutMs);
@@ -2687,6 +2705,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     let   totalCreated = 0, totalAltered = 0;
     const batchErrors  = [...preflightErrors];
     const successIds   = [];
+    let   diagnosedOnce = false; // send one voucher alone once to force Tally's real error
 
     for (let b = 0; b < vouchersXml.length; b += BATCH_SIZE) {
       const batch    = vouchersXml.slice(b, b + BATCH_SIZE);
@@ -2712,6 +2731,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // so we can diagnose which invoice is different. Only log on first failure to avoid log spam.
       if (!result.ok && b > 0 && batchErrors.length === 0) {
         LOG(`Sales DEBUG — first FAILING batch (${batchNo}/${batchTot}) full XML:\n${singleEnvelope}`);
+      }
+
+      // ── FORCE REAL ERROR: on the FIRST failing batch with no diagnostics,
+      // send just ONE voucher alone. Tally surfaces the actual LINEERROR/LASTERROR
+      // for a single-voucher import that it hides in a multi-voucher batch.
+      // This runs only once per export (guarded by _diagnosedOnce) to avoid spam.
+      if (!result.ok && result.exceptions > 0 && !result.diagnosticsFound && !diagnosedOnce && batch.length > 0) {
+        diagnosedOnce = true;
+        await diagnoseSingleVoucher(cfg, batch[0].xml, `Sales batch ${batchNo}/${batchTot} invoice ${batch[0].invoiceNo}`);
       }
 
       // ── SAFEGUARD: Smart retry — only attempt Alter/Delete when appropriate ──
