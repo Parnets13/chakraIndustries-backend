@@ -232,6 +232,70 @@ router.get('/diagnose-vouchers', protect, async (req, res) => {
 // ── Tally-pushed webhook (no auth — secured by optional shared secret) ────────
 router.post('/webhook',              tallyWebhook);
 
+// ── DIAGNOSTIC: send ONE real failing invoice's exact XML to Tally and return
+// the raw response + any LINEERROR. This uses the SAME serializer/normalizer as
+// the real export so it reproduces the EXACTLY failing voucher, but sends it
+// ALONE (single voucher) — which forces Tally to reveal the real error that it
+// hides in a multi-voucher batch. Open in browser: /api/tally/diagnose-one?invoiceNo=BIW2522
+// No auth required (read-only diagnostic that deletes any test voucher it creates).
+router.get('/diagnose-one', async (req, res) => {
+  try {
+    const invoiceNo = req.query.invoiceNo || '';
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    if (!cfg) return res.json({ success: false, error: 'No TallyConfig' });
+
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+    const { normalizeToTallyVoucher } = await import('../services/normalizeToTallyVoucher.js');
+    const { serializeTallyVoucher } = await import('../services/tallyExportService.js');
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+
+    const inv = invoiceNo
+      ? await Invoice.findOne({ invoiceNo }).lean()
+      : await Invoice.findOne({ partyName: 'BI Worldwide India PVT LTD', tallySync: { $ne: true } }).lean();
+    if (!inv) return res.json({ success: false, error: `Invoice ${invoiceNo} not found` });
+
+    // Enrich items with ItemMaster hsn/ledger (same as export)
+    const names = [...new Set((inv.items||[]).map(i => (i.description||i.name||'').trim()).filter(Boolean))];
+    const masters = await ItemMaster.find({ name: { $in: names } }, 'name hsn tallySalesLedger').lean();
+    const mMap = new Map(masters.map(m => [m.name, m]));
+    const items = (inv.items||[]).map(it => {
+      const im = mMap.get((it.description||it.name||'').trim());
+      return { ...it, hsn: (it.hsn||'').trim()||(im?.hsn||'').trim(), tallySalesLedger: (it.tallySalesLedger||'').trim()||(im?.tallySalesLedger||'').trim() };
+    });
+
+    const tv = normalizeToTallyVoucher({ ...inv, items }, { salesVoucherTypeName: 'Sales' });
+    const voucherXml = serializeTallyVoucher(tv, cfg, 'Create', '');
+
+    const co = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    // Send this ONE voucher alone with SVSHOWERRORLIST=Yes
+    const envelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${voucherXml}</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const resp = await postXmlWithRetry(cfg, envelope, ct);
+
+    const lineErrors = [...String(resp||'').matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m => m[1].trim());
+    const lastErrors = [...String(resp||'').matchAll(/<LASTERROR>([\s\S]*?)<\/LASTERROR>/gi)].map(m => m[1].trim());
+    const exceptions = parseInt(String(resp||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1] || '0');
+    const created    = parseInt(String(resp||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
+
+    res.json({
+      success: true,
+      invoiceNo: inv.invoiceNo,
+      created, exceptions,
+      lineErrors: lineErrors.length ? lineErrors : '(none returned by Tally)',
+      lastErrors: lastErrors.length ? lastErrors : '(none returned by Tally)',
+      rawResponse: String(resp||'').slice(0, 3000),
+      sentXml: voucherXml.slice(0, 6000),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message, stack: e.stack });
+  }
+});
+
 // ── Connector endpoints ───────────────────────────────────────────────────────
 router.get('/connectors/status',     protect, async (req, res) => {
   try {
