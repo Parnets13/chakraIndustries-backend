@@ -1957,9 +1957,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // The auto-masters step creates these ledgers if they don't exist anyway.
     let tallyGstLedgers = null;
     let tallySalesLedgers = [];
-    const isConnectorOnlineMode = cfg.useConnector && cfg.connectorId && cfg.connectorOnline;
-    if (!isConnectorOnlineMode) {
-      // Only fetch live ledger names in direct (local) mode or when connector is offline — fast enough
+    // ── ALWAYS fetch live ledger names — even in connector mode ──────────────
+    // Previously this was skipped when the connector was ONLINE because the
+    // TDL Collection query was assumed to be slow over the relay. In practice
+    // the connector handles it fine, and skipping it means tallySalesLedgers
+    // is always empty in production (connector mode), which disables the
+    // validation guard that prevents wrong ledger names from reaching Tally XML.
+    // Result: every invoice fails with EXCEPTIONS=10 and no diagnostic message.
+    // Fix: always fetch, use a generous timeout so the connector relay has time.
+    try {
       [tallyGstLedgers, tallySalesLedgers] = await Promise.all([
         fetchTallyGstLedgerNames(cfg),
         fetchTallySalesLedgerNames(cfg),
@@ -1970,8 +1976,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         LOG(`exportSalesInvoices: using Tally GST ledgers — cgst:[${tallyGstLedgers.cgstNames.join(', ')}] sgst:[${tallyGstLedgers.sgstNames.join(', ')}]`);
       }
       LOG(`exportSalesInvoices: found ${tallySalesLedgers.length} sales ledgers in Tally`);
-    } else {
-      LOG('exportSalesInvoices: connector mode (ONLINE) — skipping live GST/sales ledger name fetch (using fallback names)');
+    } catch (ledgerFetchErr) {
+      LOG(`exportSalesInvoices: ledger name fetch failed (non-fatal): ${ledgerFetchErr.message} — guard will not run this export`);
     }
 
     // Fetch all ERP invoices that haven't been successfully synced.
