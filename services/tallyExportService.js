@@ -1503,9 +1503,18 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     </RATEDETAILS.LIST>`;
     }).join('');
 
-    // Godown: use item-level batchAllocations if present, else build from item/voucher fields
+    // Godown: prefer the VOUCHER-LEVEL resolved godown (v.godownName) which the
+    // export service sets to the ACTUAL Tally godown name fetched live from Tally.
+    // The batch.godownName baked into normalizeToTallyVoucher is a hardcoded
+    // "Srichakra Industries" placeholder — if the real Tally godown is named
+    // differently (or the company uses no godowns), that placeholder does NOT
+    // exist in Tally and every voucher fails with EXCEPTIONS and NO diagnostic
+    // (Tally rejects a non-existent godown before line-level validation runs).
+    // Priority: resolved voucher godown → item/batch → last-resort "Main Location".
     const batch = item.batchAllocations?.[0];
-    const godownName = esc((batch?.godownName || item.godownName || v._godownName || 'Main Location').trim());
+    const godownName = esc((
+      v.godownName || v._godownName || item.godownName || batch?.godownName || 'Main Location'
+    ).trim());
     // Add leading space to QTY fields to match known-good XML
     const formatQty = (qty) => qty ? ` ${qty.trim()}` : '';
     const batchAllocXml = `
@@ -2581,10 +2590,21 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             : (tv.allLedgerEntries?.find(e => !e.isDeemedPositive && !e.ledgerName?.toLowerCase().includes('cgst') && !e.ledgerName?.toLowerCase().includes('sgst') && !e.ledgerName?.toLowerCase().includes('igst'))?.ledgerName || 'Sales');
           LOG(`Invoice ${inv.invoiceNo}: action=${action} date=${tv.date} inventoryEntries=${hasInventory ? tv.allInventoryEntries.length : 0} salesLedger="${salesLedgerUsed}" voucherType="${tv.voucherType || 'Sales'}" company="${cfg.companyName}"`);
 
-          // Inject real Tally godown names so serializer uses the correct godown
-          // resolvedDefaultGodown = first matching Tally godown (e.g. "Srichakra Industries")
-          tv.warehouseNames      = tallyGodownNames;   // full list for validation
-          tv.godownName          = tv.godownName || resolvedDefaultGodown; // override blank godown
+          // Inject real Tally godown names so serializer uses the correct godown.
+          // resolvedDefaultGodown = the ACTUAL godown name fetched live from Tally.
+          // FORCE it onto the voucher AND every inventory entry's batch allocation —
+          // overriding the hardcoded "Srichakra Industries" placeholder baked in by
+          // normalizeToTallyVoucher. If that placeholder does not exactly match a
+          // real Tally godown, every voucher fails with EXCEPTIONS and no diagnostic.
+          tv.warehouseNames = tallyGodownNames;   // full list for validation
+          tv.godownName     = resolvedDefaultGodown; // always use the resolved real godown
+          tv._godownName    = resolvedDefaultGodown;
+          // Overwrite the hardcoded godown on each inventory entry's batch allocation
+          for (const ie of (tv.allInventoryEntries || [])) {
+            for (const ba of (ie.batchAllocations || [])) {
+              ba.godownName = resolvedDefaultGodown;
+            }
+          }
 
           // ── STEP 7: Pre-export validation against live Tally masters ────────
           if (tallyMastersForValidation) {
