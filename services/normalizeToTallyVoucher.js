@@ -321,16 +321,23 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     // this before reaching here.
     const rawLedger = (item.tallySalesLedger || '').toString().trim();
     const GENERIC_LEDGERS = new Set(['', 'sales', 'sales accounts', 'sales accounts (group)']);
-    const salesLedger = (rawLedger && !GENERIC_LEDGERS.has(rawLedger.toLowerCase()))
-      ? rawLedger
-      : 'Sales';
+    const hasSpecificLedger = rawLedger && !GENERIC_LEDGERS.has(rawLedger.toLowerCase());
+    // ── CRITICAL: only use a specific sales ledger in ACCOUNTINGALLOCATIONS ──
+    // Using the generic "Sales" ledger (no GST rate configured) as GSTLEDGERSOURCE
+    // causes Tally to find no GST rate on the ledger master → Tax Analysis blank
+    // → EXCEPTIONS=10 on every invoice. If no specific ledger is available,
+    // fall back to "Sales" ONLY in ACCOUNTINGALLOCATIONS (for the accounting entry)
+    // but suppress GSTLEDGERSOURCE (set to empty) so Tally uses the stock item's
+    // own GST rate instead — which IS configured correctly by the auto-masters step.
+    const salesLedger = hasSpecificLedger ? rawLedger : 'Sales';
 
     // ── GSTLEDGERSOURCE = sales ledger for this item ─────────────────────────
-    // Per REVTEST01.xml + BIW20_test_fixed.xml (both confirmed working e-invoices):
-    // GSTSOURCETYPE=Ledger and GSTLEDGERSOURCE=<sales ledger name> must be present.
-    // Without it Tally's Tax Analysis shows Tax Rate = blank and "As per Transaction = 0".
-    // HSNLEDGERSOURCE also uses the same ledger — Tally reads HSN from the ledger master.
-    const gstLedgerSource = salesLedger;  // same as accountingAllocations ledger name
+    // Only set GSTLEDGERSOURCE when we have a SPECIFIC sales ledger (one that has
+    // GST rate configured in Tally). When using the generic "Sales" fallback,
+    // leave gstLedgerSource empty — Tally will then read the GST rate from the
+    // stock item master (set by the auto-masters step), which is correct.
+    // Setting GSTLEDGERSOURCE to "Sales" (no GST rate) causes EXCEPTIONS=10.
+    const gstLedgerSource = hasSpecificLedger ? rawLedger : '';
 
     // ── RATEDETAILS: explicit CGST/SGST/IGST rates for this item ────────────
     // Per BIW20_EXACT_COPY.xml lines 293-315, RATEDETAILS.LIST inside
