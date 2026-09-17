@@ -1512,16 +1512,30 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     // (Tally rejects a non-existent godown before line-level validation runs).
     // Priority: resolved voucher godown → item/batch → last-resort "Main Location".
     const batch = item.batchAllocations?.[0];
+    // Add leading space to QTY fields to match known-good XML
+    const formatQty = (qty) => qty ? ` ${qty.trim()}` : '';
+
+    // ── GODOWN HANDLING ───────────────────────────────────────────────────────
+    // CRITICAL: If the Tally company has NO godowns (inventory location feature
+    // is turned OFF — <GODOWN>0</GODOWN> in company info), then sending ANY
+    // <GODOWNNAME> causes the voucher to be rejected with EXCEPTIONS and no
+    // diagnostic — Tally rejects a non-existent godown before line validation.
+    // v._noGodowns is set true by the export service when the live godown fetch
+    // returns zero godowns. In that case, emit the batch allocation WITHOUT any
+    // GODOWNNAME/DESTINATIONGODOWNNAME — Tally accepts stock movement without a
+    // godown when the feature is off.
+    const noGodowns = v._noGodowns === true;
     const godownName = esc((
       v.godownName || v._godownName || item.godownName || batch?.godownName || 'Main Location'
     ).trim());
-    // Add leading space to QTY fields to match known-good XML
-    const formatQty = (qty) => qty ? ` ${qty.trim()}` : '';
-    const batchAllocXml = `
-    <BATCHALLOCATIONS.LIST>
+    const godownTags = noGodowns
+      ? ''  // godowns disabled in Tally — omit godown tags entirely
+      : `
       <GODOWNNAME>${godownName}</GODOWNNAME>
+      <DESTINATIONGODOWNNAME>${godownName}</DESTINATIONGODOWNNAME>`;
+    const batchAllocXml = `
+    <BATCHALLOCATIONS.LIST>${godownTags}
       <BATCHNAME>${esc(batch?.batchName || 'Primary Batch')}</BATCHNAME>
-      <DESTINATIONGODOWNNAME>${godownName}</DESTINATIONGODOWNNAME>
       <INDENTNO>&#4; Not Applicable</INDENTNO>
       <ORDERNO>&#4; Not Applicable</ORDERNO>
       <TRACKINGNUMBER>&#4; Not Applicable</TRACKINGNUMBER>
@@ -2031,6 +2045,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // Fetch the live list now, pick the best default, and use it for every invoice.
     let tallyGodownNames = [];
     let resolvedDefaultGodown = 'Main Location'; // last resort only
+    let noGodownsInTally = false; // true when the company has godowns feature OFF
     try {
       const godownXml = `<ENVELOPE>
 <HEADER>
@@ -2061,7 +2076,11 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         resolvedDefaultGodown = preferred;
         LOG(`exportSalesInvoices: resolved default godown = "${resolvedDefaultGodown}"`);
       } else {
-        LOG('exportSalesInvoices: ⚠ no godowns returned from Tally — using "Main Location" fallback');
+        // ── NO GODOWNS: the company has the inventory-location feature turned OFF.
+        // Sending ANY <GODOWNNAME> in this case causes EXCEPTIONS=10 with no
+        // diagnostic. Flag it so the serializer omits godown tags entirely.
+        noGodownsInTally = true;
+        LOG('exportSalesInvoices: ⚠ Tally has NO godowns (inventory-location feature OFF) — will OMIT all GODOWNNAME tags to avoid EXCEPTIONS');
       }
     } catch (gErr) {
       LOG(`exportSalesInvoices: godown fetch failed (non-fatal): ${gErr.message} — using "Main Location"`);
@@ -2599,6 +2618,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           tv.warehouseNames = tallyGodownNames;   // full list for validation
           tv.godownName     = resolvedDefaultGodown; // always use the resolved real godown
           tv._godownName    = resolvedDefaultGodown;
+          tv._noGodowns     = noGodownsInTally;      // serializer omits GODOWNNAME when true
           // Overwrite the hardcoded godown on each inventory entry's batch allocation
           for (const ie of (tv.allInventoryEntries || [])) {
             for (const ba of (ie.batchAllocations || [])) {
