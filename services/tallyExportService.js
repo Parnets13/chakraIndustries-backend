@@ -1213,16 +1213,14 @@ async function fetchTallySalesLedgerNames(cfg) {
       const block  = m[1];
       const name   = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
       const parent = (block.match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim().toLowerCase();
-      // STRICT: only include ledgers whose PARENT group contains "sales".
-      // Never use the ledger name itself as a filter — customer/vendor ledger names
-      // can contain product-related words that accidentally match item keywords in
-      // resolveSalesLedger(), causing them to be picked as the sales credit ledger
-      // and producing Tally EXCEPTIONS=10 on every invoice that uses that item.
+      const nameLow = name.toLowerCase();
+      // Include if parent is Sales OR name contains sales (resilient to missing Parent tag)
       const isSalesParent = parent.includes('sales');
-      if (!isSalesParent) continue;
+      const isSalesName = nameLow.includes('sales') || nameLow.includes('sale');
+      if (!isSalesParent && !isSalesName) continue;
       if (name) salesLedgers.push(name);
     }
-    LOG(`fetchTallySalesLedgerNames: found ${salesLedgers.length} sales ledgers (parent-only filter): [${salesLedgers.slice(0, 10).join(', ')}${salesLedgers.length > 10 ? '...' : ''}]`);
+    LOG(`fetchTallySalesLedgerNames: found ${salesLedgers.length} sales ledgers: [${salesLedgers.slice(0, 10).join(', ')}${salesLedgers.length > 10 ? '...' : ''}]`);
     return salesLedgers;
   } catch (e) {
     ERR('fetchTallySalesLedgerNames failed (non-fatal):', e.message);
@@ -2513,29 +2511,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             let tallySalesLedger = (item.tallySalesLedger || '').trim()
                                 || (im?.tallySalesLedger  || '').trim();
 
-            // ── GUARD: validate the stored ledger against the live Tally list ──
-            // If tallySalesLedgers is available (direct mode) AND the stored ledger
-            // is NOT in that list, the stored value is wrong (e.g. came from Excel
-            // upload with a customer name, or from a previous bad auto-resolve).
-            // Clear it so we fall through to auto-resolve with the correct list.
-            // This is the single most important guard — without it, any bad value
-            // stored on the invoice item or in ItemMaster will reach Tally XML
-            // unchanged and cause EXCEPTIONS=10 on every single invoice.
-            if (
-              tallySalesLedger &&
-              !GENERIC.has(tallySalesLedger.toLowerCase()) &&
-              tallySalesLedgers.length > 0 &&
-              !tallySalesLedgers.includes(tallySalesLedger)
-            ) {
-              ERR(`Invoice ${inv.invoiceNo} item "${n}": tallySalesLedger "${tallySalesLedger}" NOT in Tally live list — clearing and re-resolving`);
-              // Also clear the poisoned value from ItemMaster so future exports don't re-use it
-              if (im?.tallySalesLedger === tallySalesLedger) {
-                ItemMaster.updateOne({ name: n }, { $unset: { tallySalesLedger: 1 } })
-                  .catch(e => ERR(`Failed to clear bad tallySalesLedger for "${n}":`, e.message));
-              }
-              tallySalesLedger = ''; // force re-resolve below
-            }
-
             if (GENERIC.has(tallySalesLedger.toLowerCase()) && tallySalesLedgers.length > 0) {
               // No ledger set (or just cleared) — auto-resolve from live Tally list
               const itemCgst = +(item.cgst || 0);
@@ -2763,10 +2738,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         errorText.includes('master') ||
         errorText.includes('could not find');
 
-      // Detect silent no-op: Tally returned ok (no error) but created=0 AND altered=0.
-      // This means Tally silently rejected the voucher without any error message.
-      // Safe to retry as Alter — the voucher likely already exists in Tally.
-      const isSilentDuplicate = result.ok && (result.created || 0) === 0 && (result.altered || 0) === 0 && batch.length > 0;
+      // A no-op is not proof of a duplicate, so it cannot trigger Alter/Delete.
+      const isSilentDuplicate = false;
 
       // Only retry as Alter when:
       //   a) Silent zero (voucher already exists in Tally — no error, just not created)
