@@ -1260,6 +1260,21 @@ function resolveSalesLedger(salesLedgers, itemName, itemGSTRate, tallySalesLedge
   // Build keywords from item name (split by space, take meaningful words)
   const itemWords = (itemName || '').toLowerCase().split(/\s+/).filter(w => w.length > 2);
 
+  // ── RATE SAFETY GUARD ───────────────────────────────────────────────────────
+  // A ledger whose name states a GST rate (e.g. "... Local 5%") must NOT be used
+  // for an item of a different rate. Using a 5% sales ledger for an 18% item makes
+  // Tally reject the whole batch with EXCEPTIONS and no diagnostic (rate mismatch).
+  // This returns false when the ledger name declares a rate that conflicts with the
+  // item's actual GST rate. Ledgers with no rate in the name are considered safe.
+  const rateConflicts = (low) => {
+    // Find a rate number in the ledger name, e.g. "5%", "12 %", "18%"
+    const m = low.match(/(\d+(?:\.\d+)?)\s*%/);
+    if (!m) return false;                    // no rate in name → no conflict
+    const ledgerRate = Math.round(parseFloat(m[1]));
+    if (!itemGSTRate || itemGSTRate <= 0) return false; // unknown item rate → don't block
+    return ledgerRate !== Math.round(itemGSTRate);
+  };
+
   // Priority 2: ledger contains item keyword AND gst rate
   for (const ledger of salesLedgers) {
     const low = ledger.toLowerCase();
@@ -1270,8 +1285,10 @@ function resolveSalesLedger(salesLedgers, itemName, itemGSTRate, tallySalesLedge
   }
 
   // Priority 3: ledger contains item keyword (no rate match)
+  // GUARD: skip ledgers whose stated rate conflicts with the item's GST rate.
   for (const ledger of salesLedgers) {
     const low = ledger.toLowerCase();
+    if (rateConflicts(low)) continue;
     const hasKeyword = itemWords.some(w => low.includes(w));
     const hasSupplyType = isInterstate ? low.includes('interstate') : (low.includes('local') || !low.includes('interstate'));
     if (hasKeyword && hasSupplyType) return ledger;
@@ -1283,8 +1300,11 @@ function resolveSalesLedger(salesLedgers, itemName, itemGSTRate, tallySalesLedge
     if (low.includes(gstStr + '%') || low.includes(gstStr)) return ledger;
   }
 
-  // Priority 5: first non-generic sales ledger
-  const nonGeneric = salesLedgers.find(l => l.toLowerCase() !== 'sales accounts');
+  // Priority 5: first non-generic sales ledger — but never one whose stated rate
+  // conflicts with the item's GST rate (that guarantees a Tally rate-mismatch reject).
+  const nonGeneric = salesLedgers.find(l =>
+    l.toLowerCase() !== 'sales accounts' && !rateConflicts(l.toLowerCase())
+  );
   if (nonGeneric) return nonGeneric;
 
   return 'Sales Accounts';
