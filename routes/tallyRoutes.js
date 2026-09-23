@@ -845,6 +845,79 @@ router.get('/fix-chopper-veg', async (req, res) => {
   }
 });
 
+// ── FIX: for every ItemMaster item with blank HSN, copy the HSN from its
+// sales ledger (fetched live from Tally). DB only for the write; reads Tally
+// once for ledger HSNs. Open:
+//   /api/tally/backfill-hsn           -> report (no change)
+//   /api/tally/backfill-hsn?apply=1    -> apply
+router.get('/backfill-hsn', async (req, res) => {
+  try {
+    const apply = req.query.apply === '1';
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+
+    // 1) Fetch ledger -> HSN map from Tally (ledgers carry GSTDetails.HSNCode)
+    const co = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedHsn</ID></HEADER>
+<BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+<TDL><TDLMESSAGE><COLLECTION NAME="LedHsn"><TYPE>Ledger</TYPE><FETCH>Name,HSNCode,GSTDetails</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const resp = await postXmlWithRetry(cfg, xml, ct, 3);
+
+    const ledgerHsn = new Map();
+    for (const m of String(resp||'').matchAll(/<LEDGER[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
+      const name = m[1].trim();
+      const block = m[2];
+      // HSN may be in <HSNCODE> at ledger level or inside <GSTDETAILS.LIST>
+      const hsn = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1] || '').trim();
+      if (name && hsn) ledgerHsn.set(name, hsn);
+    }
+
+    // 2) Items with blank HSN
+    const items = await ItemMaster.find(
+      { $or: [ { hsn: '' }, { hsn: { $exists: false } } ], tallySalesLedger: { $exists: true, $ne: '' } },
+      'name hsn tallySalesLedger'
+    ).lean();
+
+    const plan = [];
+    for (const it of items) {
+      const hsn = ledgerHsn.get((it.tallySalesLedger||'').trim());
+      if (hsn) plan.push({ item: it.name, ledger: it.tallySalesLedger, hsnFromLedger: hsn });
+    }
+
+    let updated = 0;
+    if (apply) {
+      const Invoice = (await import('../models/Invoice.js')).default;
+      let Arch = null; try { Arch = (await import('../models/StockInvoiceArchive.js')).default; } catch(_){}
+      for (const p of plan) {
+        await ItemMaster.updateOne({ name: p.item }, { $set: { hsn: p.hsnFromLedger } });
+        const setHsn = (coll) => coll.updateMany(
+          { $or: [ { 'items.description': p.item }, { 'items.name': p.item } ] },
+          { $set: { 'items.$[e].hsn': p.hsnFromLedger } },
+          { arrayFilters: [ { $or: [ { 'e.description': p.item }, { 'e.name': p.item } ] } ] }
+        ).catch(()=>{});
+        await setHsn(Invoice);
+        if (Arch) await setHsn(Arch);
+        updated++;
+      }
+    }
+
+    res.json({
+      success: true,
+      mode: apply ? 'APPLIED' : 'REPORT ONLY (add ?apply=1)',
+      ledgersWithHsn: ledgerHsn.size,
+      itemsToFix: plan.length,
+      plan,
+      itemsUpdated: apply ? updated : 0,
+      note: 'Copies each item HSN from its sales-ledger HSN. Note: already-exported vouchers in Tally are NOT changed; re-export or edit them in Tally to show HSN.',
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── DIAGNOSTIC: how many items (in exported + all invoices) have blank HSN?
 // And does ItemMaster have HSN for them? DB only.
 // Open: /api/tally/hsn-status
