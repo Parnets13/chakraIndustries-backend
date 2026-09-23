@@ -275,12 +275,26 @@ router.get('/diagnose-one', async (req, res) => {
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${voucherXml}</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
 
     const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
-    const resp = await postXmlWithRetry(cfg, envelope, ct);
+    let resp = await postXmlWithRetry(cfg, envelope, ct);
 
-    const lineErrors = [...String(resp||'').matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m => m[1].trim());
-    const lastErrors = [...String(resp||'').matchAll(/<LASTERROR>([\s\S]*?)<\/LASTERROR>/gi)].map(m => m[1].trim());
-    const exceptions = parseInt(String(resp||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1] || '0');
-    const created    = parseInt(String(resp||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
+    let lineErrors = [...String(resp||'').matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m => m[1].trim());
+    let lastErrors = [...String(resp||'').matchAll(/<LASTERROR>([\s\S]*?)<\/LASTERROR>/gi)].map(m => m[1].trim());
+    let exceptions = parseInt(String(resp||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1] || '0');
+    let created    = parseInt(String(resp||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '0');
+
+    // ── Debug fallback: if Tally rejected but gave NO diagnostic, resend in
+    // "XML (Data Interchange)" format which often forces the real LINEERROR out.
+    let debugResp = null;
+    if (exceptions > 0 && lineErrors.length === 0) {
+      const dbgEnvelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST><SVEXPORTFORMAT>XML (Data Interchange)</SVEXPORTFORMAT></STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${voucherXml}</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+      debugResp = await postXmlWithRetry(cfg, dbgEnvelope, ct);
+      const dbgLine = [...String(debugResp||'').matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m => m[1].trim());
+      const dbgLast = [...String(debugResp||'').matchAll(/<LASTERROR>([\s\S]*?)<\/LASTERROR>/gi)].map(m => m[1].trim());
+      if (dbgLine.length) lineErrors = dbgLine;
+      if (dbgLast.length) lastErrors = dbgLast;
+    }
 
     res.json({
       success: true,
@@ -289,7 +303,8 @@ router.get('/diagnose-one', async (req, res) => {
       lineErrors: lineErrors.length ? lineErrors : '(none returned by Tally)',
       lastErrors: lastErrors.length ? lastErrors : '(none returned by Tally)',
       rawResponse: String(resp||'').slice(0, 3000),
-      sentXml: voucherXml.slice(0, 6000),
+      debugResponse: debugResp ? String(debugResp).slice(0, 3000) : '(not needed)',
+      sentXml: voucherXml,
     });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message, stack: e.stack });
@@ -328,6 +343,92 @@ router.get('/list-sales-ledgers', async (req, res) => {
     salesLedgers.sort();
 
     res.json({ success: true, count: salesLedgers.length, salesLedgers });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── DIAGNOSTIC + AUTO-FIX: match every ItemMaster.tallySalesLedger against the
+// LIVE Tally sales-ledger list. If a stored ledger does not EXACTLY exist in
+// Tally but a case/space-insensitive equivalent does, fix it to the exact Tally
+// name. Reports items whose ledger has NO match at all (need manual mapping).
+// Open in browser:
+//   /api/tally/audit-ledgers            -> report only (no changes)
+//   /api/tally/audit-ledgers?apply=1    -> apply fixes + re-queue those invoices
+router.get('/audit-ledgers', async (req, res) => {
+  try {
+    const apply = req.query.apply === '1';
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    if (!cfg) return res.json({ success: false, error: 'No TallyConfig' });
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+
+    // 1) Live Tally ledgers (ALL, not just sales — a ledger might be under any group)
+    const company = (cfg.companyName || '').trim().toUpperCase();
+    const coTag = company ? `<SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>AllLed</ID></HEADER>
+<BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+<TDL><TDLMESSAGE><COLLECTION NAME="AllLed"><TYPE>Ledger</TYPE><FETCH>Name,Parent</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+    const ctMs = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const resp = await postXmlWithRetry(cfg, xml, ctMs, 3);
+
+    const liveNames = [];
+    for (const m of String(resp || '').matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
+      const name = (m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      if (name) liveNames.push(name);
+    }
+    const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').replace(/\s*@\s*/g, '@').trim();
+    const liveExact = new Set(liveNames);
+    const liveByNorm = new Map();
+    for (const n of liveNames) if (!liveByNorm.has(norm(n))) liveByNorm.set(norm(n), n);
+
+    // 2) Go through ItemMaster ledgers
+    const items = await ItemMaster.find(
+      { tallySalesLedger: { $exists: true, $ne: '' } }, 'name tallySalesLedger'
+    ).lean();
+
+    const fixes = [];     // { item, from, to }
+    const unmatched = []; // { item, ledger }
+    for (const it of items) {
+      const led = (it.tallySalesLedger || '').trim();
+      if (liveExact.has(led)) continue;                 // already exact — good
+      const eq = liveByNorm.get(norm(led));             // case/space-insensitive match
+      if (eq) fixes.push({ item: it.name, from: led, to: eq });
+      else unmatched.push({ item: it.name, ledger: led });
+    }
+
+    let applied = 0, requeued = 0;
+    if (apply && fixes.length) {
+      for (const f of fixes) {
+        await ItemMaster.updateOne({ name: f.item }, { $set: { tallySalesLedger: f.to } });
+        const affected = await Invoice.find(
+          { $or: [ { 'items.description': f.item }, { 'items.name': f.item } ] }, 'items'
+        ).lean();
+        for (const inv of affected) {
+          const newItems = (inv.items || []).map(x => {
+            const key = (x.description || x.name || '').trim();
+            return key === f.item ? { ...x, tallySalesLedger: f.to } : x;
+          });
+          await Invoice.updateOne(
+            { _id: inv._id },
+            { $set: { items: newItems, tallySync: false, tallyVoucher: null }, $unset: { tallySyncAt: '' } }
+          );
+          requeued++;
+        }
+        applied++;
+      }
+    }
+
+    res.json({
+      success: true,
+      mode: apply ? 'APPLIED' : 'REPORT ONLY (add ?apply=1 to fix)',
+      liveLedgerCount: liveNames.length,
+      autoFixable: fixes,
+      appliedCount: applied,
+      invoicesRequeued: requeued,
+      needManualMapping: unmatched,
+    });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
