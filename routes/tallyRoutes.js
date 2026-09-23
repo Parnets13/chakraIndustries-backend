@@ -791,7 +791,8 @@ router.get('/fetch-working-chopper', async (req, res) => {
       success: true,
       totalVouchersInDaybook: blocks.length,
       chopperVouchersFound: chopperVouchers.length,
-      firstChopperVoucherXml: chopperVouchers[0] ? chopperVouchers[0].slice(0, 6000) : '(none found — no manual chopper sale in this period)',
+      firstChopperVoucherXml: chopperVouchers[0] ? chopperVouchers[0] : '(none found — no manual chopper sale in this period)',
+      inventoryBlockOnly: chopperVouchers[0] ? (chopperVouchers[0].match(/<ALLINVENTORYENTRIES\.LIST>[\s\S]*?<\/ALLINVENTORYENTRIES\.LIST>/i)||['(no inventory block)'])[0] : '',
     });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
