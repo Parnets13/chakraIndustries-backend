@@ -608,6 +608,70 @@ router.get('/hsn-check', async (req, res) => {
   }
 });
 
+// ── FIX: set HSN on the 3 items whose HSN is blank, in ItemMaster + pending
+// invoices, and re-queue those invoices. DB only (no connector needed).
+// Open: /api/tally/fix-hsn            -> report what will change
+//       /api/tally/fix-hsn?apply=1    -> apply
+router.get('/fix-hsn', async (req, res) => {
+  try {
+    const apply = req.query.apply === '1';
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+
+    // itemName -> { hsn, ledger }  — EXACT Tally values confirmed by the client.
+    // NOTE the exact Tally ledger spellings ("Sale" not "Sales", "loacal" typo).
+    const FIX_MAP = {
+      'Rico 2509 Choper with Steel Bowl 3 Ltr': { hsn: '850940',  ledger: 'Hand Blenders and Chopper Sales Local' },
+      'Electric Fan Heater New Areva 2000W':     { hsn: '85162900', ledger: 'Fan Heater Sale Local' },
+      'Rico Sandwich Grill Toaster Blk SG2408':  { hsn: '85167200', ledger: 'Toasters sales loacal' },
+    };
+    const names = Object.keys(FIX_MAP);
+
+    // 1) ItemMaster — set hsn + tallySalesLedger
+    const imUpdates = [];
+    for (const [name, fix] of Object.entries(FIX_MAP)) {
+      const it = await ItemMaster.findOne({ name }, 'name hsn tallySalesLedger').lean();
+      imUpdates.push({
+        name, found: !!it,
+        currentHsn: it?.hsn || '(none)', newHsn: fix.hsn,
+        currentLedger: it?.tallySalesLedger || '(none)', newLedger: fix.ledger,
+      });
+      if (apply && it) await ItemMaster.updateOne({ name }, { $set: { hsn: fix.hsn, tallySalesLedger: fix.ledger } });
+    }
+
+    // 2) Pending invoices — set hsn + ledger on matching items, re-queue
+    let requeued = 0;
+    const affected = await Invoice.find(
+      { $or: [ { 'items.description': { $in: names } }, { 'items.name': { $in: names } } ] },
+      'invoiceNo items'
+    ).lean();
+    if (apply) {
+      for (const inv of affected) {
+        const newItems = (inv.items||[]).map(x => {
+          const key = (x.description||x.name||'').trim();
+          const fix = FIX_MAP[key];
+          return fix ? { ...x, hsn: fix.hsn, tallySalesLedger: fix.ledger } : x;
+        });
+        await Invoice.updateOne(
+          { _id: inv._id },
+          { $set: { items: newItems, tallySync: false, tallyVoucher: null }, $unset: { tallySyncAt: '' } }
+        );
+        requeued++;
+      }
+    }
+
+    res.json({
+      success: true,
+      mode: apply ? 'APPLIED' : 'REPORT ONLY (add ?apply=1 to fix)',
+      itemMasterUpdates: imUpdates,
+      invoicesAffected: affected.map(i => i.invoiceNo),
+      invoicesRequeued: apply ? requeued : 0,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── Connector endpoints ───────────────────────────────────────────────────────
 router.get('/connectors/status',     protect, async (req, res) => {
   try {
