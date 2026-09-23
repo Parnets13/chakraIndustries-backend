@@ -765,6 +765,39 @@ router.get('/diff-xml', async (req, res) => {
   }
 });
 
+// ── Fetch an EXISTING (manually-created) voucher from Tally that uses the chopper
+// item, so we can see EXACTLY how Tally stores a working chopper sale and compare
+// it to what we send. Open: /api/tally/fetch-working-chopper
+router.get('/fetch-working-chopper', async (req, res) => {
+  try {
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const co = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+
+    // Day Book export of ALL sales vouchers — then find one containing the chopper item
+    const xml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+<BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Day Book</REPORTNAME>
+<STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVFROMDATE>20260401</SVFROMDATE><SVTODATE>20260930</SVTODATE></STATICVARIABLES>
+</REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
+    const resp = await postXmlWithRetry(cfg, xml, ct, 2);
+
+    // find vouchers whose block contains "Choper" or "Chopper"
+    const blocks = [...String(resp||'').matchAll(/<VOUCHER[\s\S]*?<\/VOUCHER>/gi)].map(m=>m[0]);
+    const chopperVouchers = blocks.filter(b => /choper|chopper/i.test(b) && /VCHTYPE="Sales"/i.test(b));
+    // return the first one's full XML (trimmed)
+    res.json({
+      success: true,
+      totalVouchersInDaybook: blocks.length,
+      chopperVouchersFound: chopperVouchers.length,
+      firstChopperVoucherXml: chopperVouchers[0] ? chopperVouchers[0].slice(0, 6000) : '(none found — no manual chopper sale in this period)',
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── FINAL FIX: create a NEW clean stock item under a slightly different name,
 // test that a voucher with it succeeds, and if so repoint the 12 chopper
 // invoices (ItemMaster + invoices) to the new item. Nothing else changes.
