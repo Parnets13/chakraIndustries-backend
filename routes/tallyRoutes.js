@@ -836,6 +836,9 @@ router.get('/twin-test', async (req, res) => {
 router.get('/clear-chopper-ledger', async (req, res) => {
   try {
     const apply = req.query.apply === '1';
+    // Default: set the CORRECT sales ledger (blank caused a wrong auto-resolve to
+    // "AVR JEWELRY" customer ledger). Override with ?ledger=... if needed.
+    const NEW_LEDGER = req.query.ledger != null ? req.query.ledger : 'Hand Blenders and Chopper Sales Local';
     const Invoice = (await import('../models/Invoice.js')).default;
     const ItemMaster = (await import('../models/ItemMaster.js')).default;
     const ITEM = 'Rico 2509 Choper with Steel Bowl 3 Ltr';
@@ -846,11 +849,11 @@ router.get('/clear-chopper-ledger', async (req, res) => {
     ).lean();
 
     if (apply) {
-      await ItemMaster.updateOne({ name: ITEM }, { $set: { tallySalesLedger: '' } });
+      await ItemMaster.updateOne({ name: ITEM }, { $set: { tallySalesLedger: NEW_LEDGER } });
       for (const inv of affected) {
         const newItems = (inv.items||[]).map(x => {
           const key = (x.description||x.name||'').trim();
-          return key === ITEM ? { ...x, tallySalesLedger: '' } : x;
+          return key === ITEM ? { ...x, tallySalesLedger: NEW_LEDGER } : x;
         });
         await Invoice.updateOne(
           { _id: inv._id },
@@ -864,7 +867,7 @@ router.get('/clear-chopper-ledger', async (req, res) => {
       mode: apply ? 'APPLIED' : 'REPORT ONLY (add ?apply=1)',
       item: ITEM,
       itemMasterLedgerNow: im?.tallySalesLedger || '(none)',
-      willBecome: '',
+      willBecome: NEW_LEDGER,
       invoicesAffected: affected.map(i => i.invoiceNo),
       count: affected.length,
     });
