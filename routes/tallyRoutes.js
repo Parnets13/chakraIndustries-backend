@@ -434,6 +434,108 @@ router.get('/audit-ledgers', async (req, res) => {
   }
 });
 
+// ── DIAGNOSTIC: send a failing invoice as a MINIMAL voucher (strip extras) to
+// isolate which field Tally rejects. Sends 3 progressively simpler versions of
+// the SAME invoice and reports which one Tally accepts.
+// Open: /api/tally/isolate-fail?invoiceNo=BIW2485
+// It DELETES anything it creates so nothing pollutes Tally.
+router.get('/isolate-fail', async (req, res) => {
+  try {
+    const invoiceNo = req.query.invoiceNo || '';
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    if (!cfg) return res.json({ success: false, error: 'No TallyConfig' });
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+
+    const inv = await Invoice.findOne({ invoiceNo }).lean();
+    if (!inv) return res.json({ success: false, error: `Invoice ${invoiceNo} not found` });
+
+    const names = [...new Set((inv.items||[]).map(i => (i.description||i.name||'').trim()).filter(Boolean))];
+    const masters = await ItemMaster.find({ name: { $in: names } }, 'name hsn tallySalesLedger').lean();
+    const mMap = new Map(masters.map(m => [m.name, m]));
+
+    const co = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    const esc = (s) => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const today = (() => { const n=new Date(); return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`; })();
+
+    const party = inv.partyName || 'BI Worldwide India PVT LTD';
+    const it0 = (inv.items||[])[0] || {};
+    const itemName = (it0.description || it0.name || '').trim();
+    const im = mMap.get(itemName) || {};
+    const salesLed = (it0.tallySalesLedger || im.tallySalesLedger || 'Sales').trim();
+    const qty = +(it0.qty || it0.quantity || 1);
+    const base = +(it0.basic || 0) || +(it0.amount || 0) || (+(it0.rate||0)*qty);
+    const cgst = +(it0.cgst || 0), sgst = +(it0.sgst || 0);
+    const rate = qty ? +(base/qty).toFixed(2) : base;
+    const grand = +(base + cgst + sgst).toFixed(2);
+
+    // Minimal voucher: item invoice, sales ledger in accounting allocation,
+    // CGST/SGST ledgers, NO RATEDETAILS, NO GSTSOURCETYPE/HSNSOURCETYPE, NO godown.
+    const buildMinimal = (withGodown) => `
+<VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">
+  <DATE>${today}</DATE>
+  <EFFECTIVEDATE>${today}</EFFECTIVEDATE>
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>ISOLATE-TEST-${Date.now()}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(party)}</PARTYLEDGERNAME>
+  <ISINVOICE>Yes</ISINVOICE>
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(party)}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <AMOUNT>-${grand.toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>Output CGST @ 9%</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <AMOUNT>${cgst.toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>Output SGST @ 9%</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <AMOUNT>${sgst.toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <RATE>${rate}/Nos</RATE>
+    <AMOUNT>${base.toFixed(2)}</AMOUNT>
+    <ACTUALQTY> ${qty} Nos</ACTUALQTY>
+    <BILLEDQTY> ${qty} Nos</BILLEDQTY>
+    ${withGodown ? `<BATCHALLOCATIONS.LIST><GODOWNNAME>Srichakra Industries</GODOWNNAME><BATCHNAME>Primary Batch</BATCHNAME><AMOUNT>${base.toFixed(2)}</AMOUNT><ACTUALQTY> ${qty} Nos</ACTUALQTY><BILLEDQTY> ${qty} Nos</BILLEDQTY></BATCHALLOCATIONS.LIST>` : ''}
+    <ACCOUNTINGALLOCATIONS.LIST>
+      <LEDGERNAME>${esc(salesLed)}</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <AMOUNT>${base.toFixed(2)}</AMOUNT>
+    </ACCOUNTINGALLOCATIONS.LIST>
+  </ALLINVENTORYENTRIES.LIST>
+</VOUCHER>`;
+
+    const send = async (voucherXml) => {
+      const env = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${voucherXml}</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+      const r = await postXmlWithRetry(cfg, env, ct);
+      const created = parseInt(String(r||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1]||'0');
+      const exc = parseInt(String(r||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1]||'0');
+      const line = [...String(r||'').matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m=>m[1].trim());
+      return { created, exceptions: exc, lineErrors: line, raw: String(r||'').slice(0,500) };
+    };
+
+    const results = {};
+    results.itemUsed = { itemName, salesLed, base, cgst, sgst, rate, grand };
+    results.test1_withGodown = await send(buildMinimal(true));
+    results.test2_noGodown   = await send(buildMinimal(false));
+
+    res.json({ success: true, invoiceNo, results,
+      note: 'test1=minimal+godown, test2=minimal without godown. Whichever CREATED>0 shows what works.' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message, stack: e.stack });
+  }
+});
+
 // ── Connector endpoints ───────────────────────────────────────────────────────
 router.get('/connectors/status',     protect, async (req, res) => {
   try {
