@@ -867,9 +867,14 @@ router.get('/backfill-hsn', async (req, res) => {
     const resp = await postXmlWithRetry(cfg, xml, ct, 3);
 
     const itemHsnFromTally = new Map();
-    for (const m of String(resp||'').matchAll(/<STOCKITEM[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
-      const name = m[1].trim();
-      const block = m[2];
+    for (const m of String(resp||'').matchAll(/<STOCKITEM\b[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
+      const block = m[1];
+      // real items carry the name inside <NAME.LIST><NAME>...</NAME></NAME.LIST>
+      const name = (
+        block.match(/<NAME\.LIST[^>]*>\s*<NAME>(.*?)<\/NAME>/i)?.[1] ||
+        block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || ''
+      ).trim();
+      if (!name) continue; // skips header entries like "<STOCKITEM>242</STOCKITEM>"
       let hsn = '';
       for (const hm of block.matchAll(/<HSN(?:CODE)?>(.*?)<\/HSN(?:CODE)?>/gi)) {
         const v = (hm[1]||'').trim();
@@ -950,10 +955,14 @@ router.get('/debug-stock-hsn', async (req, res) => {
     for (const tm of resp.matchAll(/<([A-Z][A-Z0-9._]*)\b/gi)) {
       const t = tm[1].toUpperCase(); tagCounts[t] = (tagCounts[t]||0)+1;
     }
-    const blocks = [...resp.matchAll(/<STOCKITEM[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)];
+    const blocks = [...resp.matchAll(/<STOCKITEM\b[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)];
     let chosen = null, chosenName = '';
     for (const m of blocks) {
-      const nm = (m[0].match(/NAME="([^"]*)"/i)?.[1] || m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      const nm = (
+        m[1].match(/<NAME\.LIST[^>]*>\s*<NAME>(.*?)<\/NAME>/i)?.[1] ||
+        m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || ''
+      ).trim();
+      if (!nm) continue;
       if (!q || nm.toLowerCase().includes(q)) { chosen = m[0]; chosenName = nm; break; }
     }
     res.json({
