@@ -765,6 +765,64 @@ router.get('/diff-xml', async (req, res) => {
   }
 });
 
+// ── FINAL FIX: DELETE the corrupt chopper stock item and CREATE it fresh with
+// proper Unit + GST + HSN. A fresh master clears whatever was corrupt.
+// Then test a voucher automatically.
+// Open: /api/tally/recreate-chopper-item
+router.get('/recreate-chopper-item', async (req, res) => {
+  try {
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const co = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const ITEM = 'Rico 2509 Choper with Steel Bowl 3 Ltr';
+    const send = async (xml) => await postXmlWithRetry(cfg, xml, ct);
+    const wrap = (body, extra='') => `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME><STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST>${extra}</STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${body}</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+    const out = {};
+
+    // 1) Delete the existing (corrupt) item
+    const delXml = wrap(`<STOCKITEM NAME="${ITEM}" ACTION="Delete"><NAME>${ITEM}</NAME></STOCKITEM>`);
+    const delResp = await send(delXml);
+    out.deleted = parseInt(String(delResp||'').match(/<DELETED>(\d+)<\/DELETED>/i)?.[1]||'0');
+    out.deleteExceptions = parseInt(String(delResp||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1]||'0');
+    out.deleteRaw = String(delResp||'').slice(0,300);
+
+    // 2) Create it fresh
+    const createXml = wrap(`
+<STOCKITEM NAME="${ITEM}" ACTION="Create">
+  <NAME>${ITEM}</NAME>
+  <BASEUNITS>Nos</BASEUNITS>
+  <GSTAPPLICABLE>&#4; Applicable</GSTAPPLICABLE>
+  <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
+  <HSNCODE>850940</HSNCODE>
+  <GSTDETAILS.LIST>
+    <APPLICABLEFROM>20230401</APPLICABLEFROM>
+    <HSNCODE>850940</HSNCODE>
+    <TAXABILITY>Taxable</TAXABILITY>
+    <STATEWISEDETAILS.LIST>
+      <STATENAME>&#4; Any</STATENAME>
+      <RATEDETAILS.LIST><GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD><GSTRATE>9</GSTRATE></RATEDETAILS.LIST>
+      <RATEDETAILS.LIST><GSTRATEDUTYHEAD>SGST/UTGST</GSTRATEDUTYHEAD><GSTRATE>9</GSTRATE></RATEDETAILS.LIST>
+      <RATEDETAILS.LIST><GSTRATEDUTYHEAD>IGST</GSTRATEDUTYHEAD><GSTRATE>18</GSTRATE></RATEDETAILS.LIST>
+    </STATEWISEDETAILS.LIST>
+  </GSTDETAILS.LIST>
+</STOCKITEM>`);
+    const createResp = await send(createXml);
+    out.created = parseInt(String(createResp||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1]||'0');
+    out.createExceptions = parseInt(String(createResp||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1]||'0');
+    out.createLineErrors = [...String(createResp||'').matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m=>m[1].trim());
+    out.createRaw = String(createResp||'').slice(0,400);
+
+    res.json({ success: true, item: ITEM, result: out,
+      note: 'If deleted=1 & created=1 the item was rebuilt. Now run diagnose-one?invoiceNo=BIW2492 to confirm it exports.' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── TEST: send chopper voucher WITHOUT GSTHSNNAME, and with 8-digit HSN, to see
 // if the 6-digit HSN "850940" in GSTHSNNAME is the reject cause.
 // Open: /api/tally/hsn-test
