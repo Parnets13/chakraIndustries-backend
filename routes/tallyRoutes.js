@@ -707,6 +707,89 @@ router.get('/fix-hsn', async (req, res) => {
   }
 });
 
+// ── DEFINITIVE TEST: send the SAME minimal voucher for TWO items — the failing
+// Chopper and the working Fan Heater — identical in every way except item name.
+// If Chopper fails and Fan Heater passes -> the Chopper STOCK ITEM is the problem.
+// If both pass -> the export XML was the problem, not the item.
+// Creates test vouchers then DELETES them. Open: /api/tally/twin-test
+router.get('/twin-test', async (req, res) => {
+  try {
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    if (!cfg) return res.json({ success: false, error: 'No TallyConfig' });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const co = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    const esc = (s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const today = (()=>{const n=new Date();return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`;})();
+    const party = 'BI Worldwide India PVT LTD';
+
+    // Identical numbers for both — only the STOCKITEMNAME differs.
+    const build = (item, vno) => `
+<VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">
+  <DATE>${today}</DATE><EFFECTIVEDATE>${today}</EFFECTIVEDATE>
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${vno}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(party)}</PARTYLEDGERNAME>
+  <ISINVOICE>Yes</ISINVOICE>
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(party)}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <AMOUNT>-1000.00</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${esc(item)}</STOCKITEMNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <RATE>1000/Nos</RATE>
+    <AMOUNT>1000.00</AMOUNT>
+    <ACTUALQTY> 1 Nos</ACTUALQTY>
+    <BILLEDQTY> 1 Nos</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST>
+      <LEDGERNAME>Sales</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <AMOUNT>1000.00</AMOUNT>
+    </ACCOUNTINGALLOCATIONS.LIST>
+  </ALLINVENTORYENTRIES.LIST>
+</VOUCHER>`;
+
+    const send = async (voucherXml) => {
+      const env = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${voucherXml}</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+      const r = await postXmlWithRetry(cfg, env, ct);
+      return {
+        created: parseInt(String(r||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1]||'0'),
+        exceptions: parseInt(String(r||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1]||'0'),
+        lineErrors: [...String(r||'').matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m=>m[1].trim()),
+      };
+    };
+
+    const del = async (vno) => {
+      const env = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}</STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF"><VOUCHER VCHTYPE="Sales" ACTION="Delete"><VOUCHERNUMBER>${vno}</VOUCHERNUMBER><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME><DATE>${today}</DATE></VOUCHER></TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+      try { await postXmlWithRetry(cfg, env, ct); } catch(_){}
+    };
+
+    const vnoChop = `TWIN-CHOP-${Date.now()}`;
+    const vnoFan  = `TWIN-FAN-${Date.now()}`;
+    const chopper = await send(build('Rico 2509 Choper with Steel Bowl 3 Ltr', vnoChop));
+    const fan     = await send(build('Electric Fan Heater New Areva 2000W', vnoFan));
+    if (chopper.created) await del(vnoChop);
+    if (fan.created) await del(vnoFan);
+
+    let verdict;
+    if (fan.created && !chopper.created) verdict = 'CONFIRMED: the Chopper STOCK ITEM is the problem (same voucher works for Fan Heater, fails for Chopper).';
+    else if (fan.created && chopper.created) verdict = 'Both items accepted — the item is fine; the export XML was the issue.';
+    else if (!fan.created && !chopper.created) verdict = 'Both failed — problem is not item-specific (party/ledger/company level).';
+    else verdict = 'Chopper worked but Fan Heater failed — unexpected.';
+
+    res.json({ success: true, chopper, fanHeater: fan, verdict });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── FIX: clear tallySalesLedger on the chopper item so the exporter auto-resolves
 // it (exactly like the working Fan Heater whose ledger was blank). DB only.
 // Open: /api/tally/clear-chopper-ledger          -> report
