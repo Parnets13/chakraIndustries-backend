@@ -733,7 +733,8 @@ router.get('/find-stock', async (req, res) => {
       if (!q || name.toLowerCase().includes(q)) {
         const units = (block.match(/<BASEUNITS>(.*?)<\/BASEUNITS>/i)?.[1] || '').trim();
         const hsn = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1] || '').trim();
-        matches.push({ name, units, hsn });
+        // Include the FULL raw block so we can see every field Tally stores
+        matches.push({ name, units, hsn, rawBlock: block.slice(0, 2000) });
       }
     }
     res.json({ success: true, query: q, count: matches.length, items: matches });
