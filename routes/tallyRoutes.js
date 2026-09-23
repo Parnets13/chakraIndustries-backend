@@ -879,8 +879,46 @@ router.get('/new-chopper-item', async (req, res) => {
       out.invoicesRepointed = requeued;
     }
 
+    // 2b) If the new item failed, test the SAME new item with a KNOWN-GOOD ledger
+    // ("Fan Heater Sale Local" which exported fine). If THIS works, the problem is
+    // the "Hand Blenders and Chopper Sales Local" LEDGER as a GST source, not the item.
+    if (!out.testCreated) {
+      const GOODLED = 'Fan Heater Sale Local';
+      const vno2 = `NEWITEM-GOODLED-${Date.now()}`;
+      const t2 = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">
+<VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">
+  <DATE>${today}</DATE><EFFECTIVEDATE>${today}</EFFECTIVEDATE>
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME><VOUCHERNUMBER>${vno2}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>BI Worldwide India PVT LTD</PARTYLEDGERNAME><ISINVOICE>Yes</ISINVOICE>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>BI Worldwide India PVT LTD</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-2339.99</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>178.47</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>178.47</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${NEW}</STOCKITEMNAME>
+    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
+    <GSTSOURCETYPE>Ledger</GSTSOURCETYPE><GSTLEDGERSOURCE>${GOODLED}</GSTLEDGERSOURCE>
+    <HSNSOURCETYPE>Ledger</HSNSOURCETYPE><HSNLEDGERSOURCE>${GOODLED}</HSNLEDGERSOURCE>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <RATE>1983.05/Nos</RATE><AMOUNT>1983.05</AMOUNT>
+    <ACTUALQTY> 1 Nos</ACTUALQTY><BILLEDQTY> 1 Nos</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>${GOODLED}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1983.05</AMOUNT></ACCOUNTINGALLOCATIONS.LIST>
+    <RATEDETAILS.LIST><GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD><GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE><GSTRATE> 9.00</GSTRATE></RATEDETAILS.LIST>
+    <RATEDETAILS.LIST><GSTRATEDUTYHEAD>SGST/UTGST</GSTRATEDUTYHEAD><GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE><GSTRATE> 9.00</GSTRATE></RATEDETAILS.LIST>
+  </ALLINVENTORYENTRIES.LIST>
+</VOUCHER>
+</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+      const r2 = await send(t2);
+      out.testWithGoodLedger_created = parseInt(String(r2||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1]||'0');
+      out.testWithGoodLedger_exc = parseInt(String(r2||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1]||'0');
+      if (out.testWithGoodLedger_created) {
+        await send(`<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}</STATICVARIABLES></REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF"><VOUCHER VCHTYPE="Sales" ACTION="Delete"><VOUCHERNUMBER>${vno2}</VOUCHERNUMBER><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME><DATE>${today}</DATE></VOUCHER></TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`).catch(()=>{});
+      }
+    }
+
     res.json({ success: true, oldItem: OLD, newItem: NEW, result: out,
-      note: out.testCreated ? 'NEW item works! Run with ?apply=1 to repoint invoices, then export.' : 'NEW item test still failed — deeper Tally issue.' });
+      note: 'testCreated=item+chopper ledger. testWithGoodLedger=same item + Fan Heater ledger. If GoodLedger works, the "Hand Blenders and Chopper Sales Local" LEDGER is the culprit.' });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
