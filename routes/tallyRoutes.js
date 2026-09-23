@@ -573,6 +573,41 @@ router.get('/compare-items', async (req, res) => {
   }
 });
 
+// ── DIAGNOSTIC: how many pending-invoice items have a BLANK HSN? (DB only)
+// Open: /api/tally/hsn-check
+router.get('/hsn-check', async (req, res) => {
+  try {
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const pending = await Invoice.find(
+      { tallySync: { $ne: true }, source: { $nin: ['Tally','tally'] } }, 'invoiceNo items'
+    ).lean();
+
+    const blankHsn = new Map();   // itemName -> { count, ledger }
+    const okHsn = new Map();       // itemName -> hsn
+    for (const inv of pending) {
+      for (const it of (inv.items||[])) {
+        const name = (it.description||it.name||'').trim();
+        const hsn = (it.hsn||'').trim();
+        if (!hsn) {
+          if (!blankHsn.has(name)) blankHsn.set(name, { count: 0, ledger: it.tallySalesLedger||'' });
+          blankHsn.get(name).count++;
+        } else {
+          if (!okHsn.has(name)) okHsn.set(name, hsn);
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      pendingInvoices: pending.length,
+      itemsWithBlankHSN: [...blankHsn.entries()].map(([name, v]) => ({ name, invoiceCount: v.count, ledger: v.ledger })),
+      itemsWithHSN: [...okHsn.entries()].map(([name, hsn]) => ({ name, hsn })),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── Connector endpoints ───────────────────────────────────────────────────────
 router.get('/connectors/status',     protect, async (req, res) => {
   try {
