@@ -928,6 +928,48 @@ router.get('/backfill-hsn', async (req, res) => {
   }
 });
 
+// ── DEBUG: dump the RAW Tally stock-item response so we can see the real XML
+// tag layout for HSN. Reads Tally only. Open:
+//   /api/tally/debug-stock-hsn            -> summary + first item raw block
+//   /api/tally/debug-stock-hsn?q=Chopper  -> raw block for first item whose name contains q
+router.get('/debug-stock-hsn', async (req, res) => {
+  try {
+    const q = (req.query.q || '').toLowerCase();
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const co = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>StkHsn</ID></HEADER>
+<BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+<TDL><TDLMESSAGE><COLLECTION NAME="StkHsn"><TYPE>StockItem</TYPE><FETCH>Name,HSNCode,GSTDetails</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const resp = String(await postXmlWithRetry(cfg, xml, ct, 3) || '');
+
+    // list all distinct tag names present, to reveal where HSN actually lives
+    const tagCounts = {};
+    for (const tm of resp.matchAll(/<([A-Z][A-Z0-9._]*)\b/gi)) {
+      const t = tm[1].toUpperCase(); tagCounts[t] = (tagCounts[t]||0)+1;
+    }
+    const blocks = [...resp.matchAll(/<STOCKITEM[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)];
+    let chosen = null, chosenName = '';
+    for (const m of blocks) {
+      const nm = (m[0].match(/NAME="([^"]*)"/i)?.[1] || m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      if (!q || nm.toLowerCase().includes(q)) { chosen = m[0]; chosenName = nm; break; }
+    }
+    res.json({
+      success: true,
+      respLength: resp.length,
+      stockItemBlocks: blocks.length,
+      hsnTagPresent: /<HSN/i.test(resp),
+      tagCounts,
+      firstItemName: chosenName,
+      rawBlock: chosen ? chosen.slice(0, 4000) : resp.slice(0, 4000),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── DIAGNOSTIC: how many items (in exported + all invoices) have blank HSN?
 // And does ItemMaster have HSN for them? DB only.
 // Open: /api/tally/hsn-status
