@@ -829,8 +829,31 @@ router.get('/hsn-test', async (req, res) => {
       if (created) await postXmlWithRetry(cfg, `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}</STATICVARIABLES></REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF"><VOUCHER VCHTYPE="Sales" ACTION="Delete"><VOUCHERNUMBER>${vno}</VOUCHERNUMBER><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME><DATE>${today}</DATE></VOUCHER></TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`, ct).catch(()=>{});
     }
 
+    // B: PURE ACCOUNTING voucher — NO stock item at all (party debit + sales credit + GST).
+    // If this CREATES ok -> the STOCK ITEM is 100% the problem. If it fails too ->
+    // problem is at party/ledger/company level, unrelated to the item.
+    {
+      const vno = `HSNT-NOITEM-${Date.now()}`;
+      const voucherXml = `
+<VOUCHER VCHTYPE="Sales" ACTION="Create">
+  <DATE>${today}</DATE><EFFECTIVEDATE>${today}</EFFECTIVEDATE>
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${vno}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${party}</PARTYLEDGERNAME>
+  <ISINVOICE>Yes</ISINVOICE>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>${party}</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-2339.99</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>${LED}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1983.05</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>178.47</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>178.47</AMOUNT></ALLLEDGERENTRIES.LIST>
+</VOUCHER>`;
+      const { r } = await send(voucherXml);
+      const created = parseInt(String(r||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1]||'0');
+      results.B_noStockItem = { created, exceptions: parseInt(String(r||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1]||'0'), line: [...String(r||'').matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m=>m[1].trim()) };
+      if (created) await postXmlWithRetry(cfg, `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}</STATICVARIABLES></REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF"><VOUCHER VCHTYPE="Sales" ACTION="Delete"><VOUCHERNUMBER>${vno}</VOUCHERNUMBER><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME><DATE>${today}</DATE></VOUCHER></TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`, ct).catch(()=>{});
+    }
+
     res.json({ success: true, results,
-      note: 'A_noHsnName: chopper voucher sent WITHOUT GSTHSNNAME. If created=1 -> the 6-digit GSTHSNNAME 850940 was the reject cause.' });
+      note: 'B_noStockItem: pure accounting voucher, no item. If B created=1 -> the STOCK ITEM is the problem. If B also fails -> party/ledger/company level.' });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
