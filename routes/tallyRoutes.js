@@ -857,39 +857,38 @@ router.get('/backfill-hsn', async (req, res) => {
     const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
     const ItemMaster = (await import('../models/ItemMaster.js')).default;
 
-    // 1) Fetch ledger -> HSN map from Tally (ledgers carry GSTDetails.HSNCode)
+    // 1) Fetch STOCK ITEM -> HSN map from Tally (item master carries HSN in GSTDetails)
     const co = (cfg.companyName||'').trim().toUpperCase();
     const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
-    const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedHsn</ID></HEADER>
+    const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>StkHsn</ID></HEADER>
 <BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
-<TDL><TDLMESSAGE><COLLECTION NAME="LedHsn"><TYPE>Ledger</TYPE><FETCH>Name,HSNCode,GSTDetails</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+<TDL><TDLMESSAGE><COLLECTION NAME="StkHsn"><TYPE>StockItem</TYPE><FETCH>Name,HSNCode,GSTDetails</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
     const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
     const resp = await postXmlWithRetry(cfg, xml, ct, 3);
 
-    const ledgerHsn = new Map();
-    for (const m of String(resp||'').matchAll(/<LEDGER[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
+    const itemHsnFromTally = new Map();
+    for (const m of String(resp||'').matchAll(/<STOCKITEM[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
       const name = m[1].trim();
       const block = m[2];
-      // HSN can appear as <HSNCODE>, <HSN>, or inside <GSTDETAILS.LIST> — take the
-      // first non-empty numeric HSN we find anywhere in the ledger block.
       let hsn = '';
       for (const hm of block.matchAll(/<HSN(?:CODE)?>(.*?)<\/HSN(?:CODE)?>/gi)) {
         const v = (hm[1]||'').trim();
         if (/^\d{4,8}$/.test(v)) { hsn = v; break; }
       }
-      if (name && hsn) ledgerHsn.set(name, hsn);
+      if (name && hsn) itemHsnFromTally.set(name, hsn);
     }
+    const ledgerHsn = itemHsnFromTally; // reuse variable name below
 
     // 2) Items with blank HSN
     const items = await ItemMaster.find(
-      { $or: [ { hsn: '' }, { hsn: { $exists: false } } ], tallySalesLedger: { $exists: true, $ne: '' } },
+      { $or: [ { hsn: '' }, { hsn: { $exists: false } } ] },
       'name hsn tallySalesLedger'
     ).lean();
 
     const plan = [];
     for (const it of items) {
-      const hsn = ledgerHsn.get((it.tallySalesLedger||'').trim());
-      if (hsn) plan.push({ item: it.name, ledger: it.tallySalesLedger, hsnFromLedger: hsn });
+      const hsn = itemHsnFromTally.get((it.name||'').trim());
+      if (hsn) plan.push({ item: it.name, ledger: it.tallySalesLedger || '', hsnFromLedger: hsn });
     }
 
     let updated = 0;
