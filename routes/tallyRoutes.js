@@ -845,6 +845,41 @@ router.get('/fix-chopper-veg', async (req, res) => {
   }
 });
 
+// ── DIAGNOSTIC: how many items (in exported + all invoices) have blank HSN?
+// And does ItemMaster have HSN for them? DB only.
+// Open: /api/tally/hsn-status
+router.get('/hsn-status', async (req, res) => {
+  try {
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+
+    // sample recently-synced invoices
+    const synced = await Invoice.find({ tallySync: true }, 'invoiceNo items').sort({ updatedAt: -1 }).limit(50).lean();
+    const itemBlank = new Map();   // itemName -> count of invoice-items with blank hsn
+    for (const inv of synced) {
+      for (const it of (inv.items||[])) {
+        const name = (it.description||it.name||'').trim();
+        const hsn = (it.hsn||'').trim();
+        if (!hsn) itemBlank.set(name, (itemBlank.get(name)||0)+1);
+      }
+    }
+    // for those blank item names, does ItemMaster have HSN?
+    const names = [...itemBlank.keys()];
+    const masters = await ItemMaster.find({ name: { $in: names } }, 'name hsn').lean();
+    const mMap = new Map(masters.map(m=>[m.name, (m.hsn||'').trim()]));
+    const report = names.map(n => ({ item: n, invoiceHsnBlankCount: itemBlank.get(n), itemMasterHsn: mMap.get(n) || '(blank)' }));
+
+    res.json({
+      success: true,
+      syncedInvoicesChecked: synced.length,
+      itemsWithBlankInvoiceHSN: report.length,
+      detail: report,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── FINAL FIX: create a NEW clean stock item under a slightly different name,
 // test that a voucher with it succeeds, and if so repoint the 12 chopper
 // invoices (ItemMaster + invoices) to the new item. Nothing else changes.
