@@ -765,6 +765,77 @@ router.get('/diff-xml', async (req, res) => {
   }
 });
 
+// ── TEST: send chopper voucher WITHOUT GSTHSNNAME, and with 8-digit HSN, to see
+// if the 6-digit HSN "850940" in GSTHSNNAME is the reject cause.
+// Open: /api/tally/hsn-test
+router.get('/hsn-test', async (req, res) => {
+  try {
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const co = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const today = (()=>{const n=new Date();return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`;})();
+    const party = 'BI Worldwide India PVT LTD';
+    const ITEM = 'Rico 2509 Choper with Steel Bowl 3 Ltr';
+    const LED = 'Hand Blenders and Chopper Sales Local';
+
+    // full real-style voucher, but hsnName is a parameter (or omitted)
+    const build = (hsnName, vno) => `
+<VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">
+  <DATE>${today}</DATE><EFFECTIVEDATE>${today}</EFFECTIVEDATE>
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>${vno}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${party}</PARTYLEDGERNAME>
+  <ISINVOICE>Yes</ISINVOICE>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>${party}</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-2339.99</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>178.47</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>178.47</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${ITEM}</STOCKITEMNAME>
+    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
+    <GSTSOURCETYPE>Ledger</GSTSOURCETYPE>
+    <GSTLEDGERSOURCE>${LED}</GSTLEDGERSOURCE>
+    <HSNSOURCETYPE>Ledger</HSNSOURCETYPE>
+    <HSNLEDGERSOURCE>${LED}</HSNLEDGERSOURCE>
+    <GSTRATEINFERAPPLICABILITY>As per Masters/Company</GSTRATEINFERAPPLICABILITY>
+    ${hsnName ? `<GSTHSNNAME>${hsnName}</GSTHSNNAME>` : ''}
+    <GSTHSNINFERAPPLICABILITY>As per Masters/Company</GSTHSNINFERAPPLICABILITY>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <RATE>1983.05/Nos</RATE><AMOUNT>1983.05</AMOUNT>
+    <ACTUALQTY> 1 Nos</ACTUALQTY><BILLEDQTY> 1 Nos</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>${LED}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1983.05</AMOUNT></ACCOUNTINGALLOCATIONS.LIST>
+    <RATEDETAILS.LIST><GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD><GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE><GSTRATE> 9.00</GSTRATE></RATEDETAILS.LIST>
+    <RATEDETAILS.LIST><GSTRATEDUTYHEAD>SGST/UTGST</GSTRATEDUTYHEAD><GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE><GSTRATE> 9.00</GSTRATE></RATEDETAILS.LIST>
+  </ALLINVENTORYENTRIES.LIST>
+</VOUCHER>`;
+
+    const send = async (voucherXml) => {
+      const env = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${voucherXml}</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+      const r = await postXmlWithRetry(cfg, env, ct);
+      const del = async (vno) => { try { await postXmlWithRetry(cfg, `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}</STATICVARIABLES></REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF"><VOUCHER VCHTYPE="Sales" ACTION="Delete"><VOUCHERNUMBER>${vno}</VOUCHERNUMBER><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME><DATE>${today}</DATE></VOUCHER></TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`, ct); } catch(_){} };
+      return { r, del };
+    };
+
+    const results = {};
+    // A: no GSTHSNNAME at all
+    {
+      const vno = `HSNT-NONE-${Date.now()}`;
+      const { r } = await send(build('', vno));
+      const created = parseInt(String(r||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1]||'0');
+      results.A_noHsnName = { created, exceptions: parseInt(String(r||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1]||'0'), line: [...String(r||'').matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m=>m[1].trim()) };
+      if (created) await postXmlWithRetry(cfg, `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}</STATICVARIABLES></REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF"><VOUCHER VCHTYPE="Sales" ACTION="Delete"><VOUCHERNUMBER>${vno}</VOUCHERNUMBER><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME><DATE>${today}</DATE></VOUCHER></TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`, ct).catch(()=>{});
+    }
+
+    res.json({ success: true, results,
+      note: 'A_noHsnName: chopper voucher sent WITHOUT GSTHSNNAME. If created=1 -> the 6-digit GSTHSNNAME 850940 was the reject cause.' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── FIX: recreate/repair the chopper STOCK ITEM master in Tally with proper
 // Unit + GST rate + HSN, then test a voucher. If the item master was corrupt,
 // altering it fixes the silent reject.
