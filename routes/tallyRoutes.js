@@ -870,8 +870,13 @@ router.get('/backfill-hsn', async (req, res) => {
     for (const m of String(resp||'').matchAll(/<LEDGER[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
       const name = m[1].trim();
       const block = m[2];
-      // HSN may be in <HSNCODE> at ledger level or inside <GSTDETAILS.LIST>
-      const hsn = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1] || '').trim();
+      // HSN can appear as <HSNCODE>, <HSN>, or inside <GSTDETAILS.LIST> — take the
+      // first non-empty numeric HSN we find anywhere in the ledger block.
+      let hsn = '';
+      for (const hm of block.matchAll(/<HSN(?:CODE)?>(.*?)<\/HSN(?:CODE)?>/gi)) {
+        const v = (hm[1]||'').trim();
+        if (/^\d{4,8}$/.test(v)) { hsn = v; break; }
+      }
       if (name && hsn) ledgerHsn.set(name, hsn);
     }
 
@@ -904,14 +909,20 @@ router.get('/backfill-hsn', async (req, res) => {
       }
     }
 
+    // sample: show HSN for the specific sales ledgers our items use
+    const wantLedgers = [...new Set(items.map(i => (i.tallySalesLedger||'').trim()))];
+    const ledgerHsnSample = wantLedgers.map(l => ({ ledger: l, hsnFound: ledgerHsn.get(l) || '(none)' }));
+
     res.json({
       success: true,
       mode: apply ? 'APPLIED' : 'REPORT ONLY (add ?apply=1)',
       ledgersWithHsn: ledgerHsn.size,
+      blankHsnItems: items.length,
+      ledgerHsnSample,
       itemsToFix: plan.length,
       plan,
       itemsUpdated: apply ? updated : 0,
-      note: 'Copies each item HSN from its sales-ledger HSN. Note: already-exported vouchers in Tally are NOT changed; re-export or edit them in Tally to show HSN.',
+      note: 'Copies each item HSN from its sales-ledger HSN.',
     });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
