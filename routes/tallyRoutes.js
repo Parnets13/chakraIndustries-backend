@@ -720,7 +720,7 @@ router.get('/find-stock', async (req, res) => {
     const coTag = company ? `<SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>` : '';
     const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>AllStk</ID></HEADER>
 <BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
-<TDL><TDLMESSAGE><COLLECTION NAME="AllStk"><TYPE>StockItem</TYPE><FETCH>Name,BaseUnits,GSTApplicable,HSNCode</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+<TDL><TDLMESSAGE><COLLECTION NAME="AllStk"><TYPE>StockItem</TYPE><FETCH>Name,BaseUnits,GSTApplicable,HSNCode,GSTDetails,GSTTypeOfSupply,GSTRateDetails</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
     const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
     const resp = await postXmlWithRetry(cfg, xml, ct, 3);
 
@@ -734,7 +734,7 @@ router.get('/find-stock', async (req, res) => {
         const units = (block.match(/<BASEUNITS>(.*?)<\/BASEUNITS>/i)?.[1] || '').trim();
         const hsn = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1] || '').trim();
         // Include the FULL raw block so we can see every field Tally stores
-        matches.push({ name, units, hsn, rawBlock: block.slice(0, 2000) });
+        matches.push({ name, units, hsn, rawBlock: block.slice(0, 8000) });
       }
     }
     res.json({ success: true, query: q, count: matches.length, items: matches });
