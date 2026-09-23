@@ -524,13 +524,48 @@ router.get('/isolate-fail', async (req, res) => {
       return { created, exceptions: exc, lineErrors: line, raw: String(r||'').slice(0,500) };
     };
 
+    // Variant builder: choose the item name, sales ledger, and whether to add GST ledgers
+    const buildVariant = ({ item, ledger, withGst }) => `
+<VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">
+  <DATE>${today}</DATE>
+  <EFFECTIVEDATE>${today}</EFFECTIVEDATE>
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>ISOLATE-V-${Date.now()}-${Math.floor(Math.random()*1000)}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(party)}</PARTYLEDGERNAME>
+  <ISINVOICE>Yes</ISINVOICE>
+  <ALLLEDGERENTRIES.LIST>
+    <LEDGERNAME>${esc(party)}</LEDGERNAME>
+    <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+    <AMOUNT>-${(withGst ? grand : base).toFixed(2)}</AMOUNT>
+  </ALLLEDGERENTRIES.LIST>
+  ${withGst ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${cgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${sgst.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>` : ''}
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${esc(item)}</STOCKITEMNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <RATE>${rate}/Nos</RATE>
+    <AMOUNT>${base.toFixed(2)}</AMOUNT>
+    <ACTUALQTY> ${qty} Nos</ACTUALQTY>
+    <BILLEDQTY> ${qty} Nos</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST>
+      <LEDGERNAME>${esc(ledger)}</LEDGERNAME>
+      <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+      <AMOUNT>${base.toFixed(2)}</AMOUNT>
+    </ACCOUNTINGALLOCATIONS.LIST>
+  </ALLINVENTORYENTRIES.LIST>
+</VOUCHER>`;
+
     const results = {};
     results.itemUsed = { itemName, salesLed, base, cgst, sgst, rate, grand };
-    results.test1_withGodown = await send(buildMinimal(true));
-    results.test2_noGodown   = await send(buildMinimal(false));
+    results.test1_minimal_withGodown = await send(buildMinimal(true));
+    results.test2_minimal_noGodown   = await send(buildMinimal(false));
+    // test3: same item + sales ledger but NO GST ledgers (pure item + sales)
+    results.test3_noGstLedgers = await send(buildVariant({ item: itemName, ledger: salesLed, withGst: false }));
+    // test4: same item but generic "Sales Accounts" ledger (is the specific ledger the problem?)
+    results.test4_genericSalesLedger = await send(buildVariant({ item: itemName, ledger: 'Sales Accounts', withGst: true }));
 
     res.json({ success: true, invoiceNo, results,
-      note: 'test1=minimal+godown, test2=minimal without godown. Whichever CREATED>0 shows what works.' });
+      note: 'test3=no GST ledgers, test4=generic Sales Accounts ledger. Whichever CREATED>0 pinpoints the culprit.' });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message, stack: e.stack });
   }
