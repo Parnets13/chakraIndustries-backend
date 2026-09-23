@@ -799,6 +799,52 @@ router.get('/fetch-working-chopper', async (req, res) => {
   }
 });
 
+// ── REAL FIX: point the "Rico 2509 Choper" item to the SAME ledger + HSN that the
+// working chopper ("Rico Rechargeble Electric Chopper") uses: Veg Chopper Sales Local + 39241090.
+// Open: /api/tally/fix-chopper-veg            -> report
+//       /api/tally/fix-chopper-veg?apply=1     -> apply + re-queue 12 invoices
+router.get('/fix-chopper-veg', async (req, res) => {
+  try {
+    const apply = req.query.apply === '1';
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+    const ITEM = 'Rico 2509 Choper with Steel Bowl 3 Ltr';
+    const LEDGER = 'Veg Chopper Sales Local';
+    const HSN = '39241090';
+
+    const im = await ItemMaster.findOne({ name: ITEM }, 'name tallySalesLedger hsn').lean();
+    const affected = await Invoice.find(
+      { $or: [ { 'items.description': ITEM }, { 'items.name': ITEM } ] }, 'invoiceNo items'
+    ).lean();
+
+    if (apply) {
+      await ItemMaster.updateOne({ name: ITEM }, { $set: { tallySalesLedger: LEDGER, hsn: HSN } });
+      for (const inv of affected) {
+        const newItems = (inv.items||[]).map(x => {
+          const key = (x.description||x.name||'').trim();
+          return key === ITEM ? { ...x, tallySalesLedger: LEDGER, hsn: HSN } : x;
+        });
+        await Invoice.updateOne(
+          { _id: inv._id },
+          { $set: { items: newItems, tallySync: false, tallyVoucher: null }, $unset: { tallySyncAt: '' } }
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      mode: apply ? 'APPLIED' : 'REPORT ONLY (add ?apply=1)',
+      item: ITEM,
+      currentLedger: im?.tallySalesLedger || '(none)', newLedger: LEDGER,
+      currentHsn: im?.hsn || '(none)', newHsn: HSN,
+      invoicesAffected: affected.map(i => i.invoiceNo),
+      note: 'Uses the SAME ledger+HSN as the working chopper (Rico Rechargeble Electric Chopper). After apply, export.',
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── FINAL FIX: create a NEW clean stock item under a slightly different name,
 // test that a voucher with it succeeds, and if so repoint the 12 chopper
 // invoices (ItemMaster + invoices) to the new item. Nothing else changes.
