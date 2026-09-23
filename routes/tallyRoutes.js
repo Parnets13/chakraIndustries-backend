@@ -707,6 +707,45 @@ router.get('/fix-hsn', async (req, res) => {
   }
 });
 
+// ── Compare the REAL serialized inventory XML of two invoices (fail vs working)
+// so we can see the exact difference in the <ALLINVENTORYENTRIES.LIST> block.
+// Open: /api/tally/diff-xml?fail=BIW2492&ok=BIW2456
+router.get('/diff-xml', async (req, res) => {
+  try {
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+    const { normalizeToTallyVoucher } = await import('../services/normalizeToTallyVoucher.js');
+    const { serializeTallyVoucher } = await import('../services/tallyExportService.js');
+
+    const buildXml = async (no) => {
+      if (!no) return null;
+      const inv = await Invoice.findOne({ invoiceNo: no }).lean();
+      if (!inv) return { error: `${no} not found` };
+      const names = [...new Set((inv.items||[]).map(i => (i.description||i.name||'').trim()).filter(Boolean))];
+      const masters = await ItemMaster.find({ name: { $in: names } }, 'name hsn tallySalesLedger').lean();
+      const mMap = new Map(masters.map(m => [m.name, m]));
+      const items = (inv.items||[]).map(it => {
+        const im = mMap.get((it.description||it.name||'').trim());
+        return { ...it, hsn: (it.hsn||'').trim()||(im?.hsn||'').trim(), tallySalesLedger: (it.tallySalesLedger||'').trim()||(im?.tallySalesLedger||'').trim() };
+      });
+      const tv = normalizeToTallyVoucher({ ...inv, items }, { salesVoucherTypeName: 'Sales' });
+      const xml = serializeTallyVoucher(tv, cfg, 'Create', '');
+      // extract just the inventory block for easy comparison
+      const invBlock = (xml.match(/<ALLINVENTORYENTRIES\.LIST>[\s\S]*?<\/ALLINVENTORYENTRIES\.LIST>/i)||[''])[0];
+      return { invoiceNo: no, inventoryBlock: invBlock };
+    };
+
+    res.json({
+      success: true,
+      failing: await buildXml(req.query.fail),
+      working: await buildXml(req.query.ok),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── DEFINITIVE TEST: send the SAME minimal voucher for TWO items — the failing
 // Chopper and the working Fan Heater — identical in every way except item name.
 // If Chopper fails and Fan Heater passes -> the Chopper STOCK ITEM is the problem.
