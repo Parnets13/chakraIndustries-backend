@@ -765,6 +765,63 @@ router.get('/diff-xml', async (req, res) => {
   }
 });
 
+// ── FIX: recreate/repair the chopper STOCK ITEM master in Tally with proper
+// Unit + GST rate + HSN, then test a voucher. If the item master was corrupt,
+// altering it fixes the silent reject.
+// Open: /api/tally/repair-chopper-item
+router.get('/repair-chopper-item', async (req, res) => {
+  try {
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const co = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const ITEM = 'Rico 2509 Choper with Steel Bowl 3 Ltr';
+
+    // Alter the stock item: ensure Unit=Nos, GST Applicable, HSN 850940, rate 18%.
+    const masterXml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME><STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">
+<STOCKITEM NAME="${ITEM}" ACTION="Alter">
+  <NAME>${ITEM}</NAME>
+  <BASEUNITS>Nos</BASEUNITS>
+  <GSTAPPLICABLE>&#4; Applicable</GSTAPPLICABLE>
+  <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
+  <HSNCODE>850940</HSNCODE>
+  <GSTDETAILS.LIST>
+    <APPLICABLEFROM>20230401</APPLICABLEFROM>
+    <HSNCODE>850940</HSNCODE>
+    <TAXABILITY>Taxable</TAXABILITY>
+    <GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD>
+    <STATEWISEDETAILS.LIST>
+      <STATENAME>&#4; Any</STATENAME>
+      <RATEDETAILS.LIST><GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD><GSTRATE>9</GSTRATE></RATEDETAILS.LIST>
+      <RATEDETAILS.LIST><GSTRATEDUTYHEAD>SGST/UTGST</GSTRATEDUTYHEAD><GSTRATE>9</GSTRATE></RATEDETAILS.LIST>
+      <RATEDETAILS.LIST><GSTRATEDUTYHEAD>IGST</GSTRATEDUTYHEAD><GSTRATE>18</GSTRATE></RATEDETAILS.LIST>
+    </STATEWISEDETAILS.LIST>
+  </GSTDETAILS.LIST>
+</STOCKITEM>
+</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+
+    const mResp = await postXmlWithRetry(cfg, masterXml, ct);
+    const mAltered = parseInt(String(mResp||'').match(/<ALTERED>(\d+)<\/ALTERED>/i)?.[1]||'0');
+    const mExc = parseInt(String(mResp||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1]||'0');
+    const mLine = [...String(mResp||'').matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi)].map(m=>m[1].trim());
+
+    res.json({
+      success: true,
+      item: ITEM,
+      masterAltered: mAltered,
+      masterExceptions: mExc,
+      masterLineErrors: mLine.length ? mLine : '(none)',
+      masterRaw: String(mResp||'').slice(0, 600),
+      note: 'If masterAltered=1, the stock item was repaired. Now re-run export.',
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── Check if specific voucher numbers ALREADY EXIST in Tally (duplicate check).
 // Open: /api/tally/voucher-exists?nos=BIW2485,BIW2492,BIW2530
 router.get('/voucher-exists', async (req, res) => {
