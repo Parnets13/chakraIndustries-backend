@@ -846,87 +846,115 @@ router.get('/fix-chopper-veg', async (req, res) => {
 });
 
 // ── FIX: for every ItemMaster item with blank HSN, copy the HSN from its
-// sales ledger (fetched live from Tally). DB only for the write; reads Tally
-// once for ledger HSNs. Open:
-//   /api/tally/backfill-hsn           -> report (no change)
-//   /api/tally/backfill-hsn?apply=1    -> apply
-router.get('/backfill-hsn', async (req, res) => {
+// ── LIST: every item that has a blank HSN (in ItemMaster OR on pending
+// invoices). DB only — no Tally, no changes. Use this list to fill in the
+// correct HSN per item, then feed it to /set-hsn.
+// Open: /api/tally/list-blank-hsn
+router.get('/list-blank-hsn', async (req, res) => {
   try {
-    const apply = req.query.apply === '1';
-    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
-    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
     const ItemMaster = (await import('../models/ItemMaster.js')).default;
+    const Invoice = (await import('../models/Invoice.js')).default;
 
-    // 1) Fetch STOCK ITEM -> HSN map from Tally (item master carries HSN in GSTDetails)
-    const co = (cfg.companyName||'').trim().toUpperCase();
-    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
-    const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>StkHsn</ID></HEADER>
-<BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
-<TDL><TDLMESSAGE><COLLECTION NAME="StkHsn"><TYPE>StockItem</TYPE><FETCH>Name,HSNCode,GSTDetails</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
-    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
-    const resp = await postXmlWithRetry(cfg, xml, ct, 3);
-
-    const itemHsnFromTally = new Map();
-    for (const m of String(resp||'').matchAll(/<STOCKITEM\b[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
-      const block = m[1];
-      // real items carry the name inside <NAME.LIST><NAME>...</NAME></NAME.LIST>
-      const name = (
-        block.match(/<NAME\.LIST[^>]*>\s*<NAME>(.*?)<\/NAME>/i)?.[1] ||
-        block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || ''
-      ).trim();
-      if (!name) continue; // skips header entries like "<STOCKITEM>242</STOCKITEM>"
-      let hsn = '';
-      for (const hm of block.matchAll(/<HSN(?:CODE)?>(.*?)<\/HSN(?:CODE)?>/gi)) {
-        const v = (hm[1]||'').trim();
-        if (/^\d{4,8}$/.test(v)) { hsn = v; break; }
-      }
-      if (name && hsn) itemHsnFromTally.set(name, hsn);
-    }
-    const ledgerHsn = itemHsnFromTally; // reuse variable name below
-
-    // 2) Items with blank HSN
-    const items = await ItemMaster.find(
+    // 1) ItemMaster items with blank/absent HSN
+    const masters = await ItemMaster.find(
       { $or: [ { hsn: '' }, { hsn: { $exists: false } } ] },
       'name hsn tallySalesLedger'
     ).lean();
 
-    const plan = [];
-    for (const it of items) {
-      const hsn = itemHsnFromTally.get((it.name||'').trim());
-      if (hsn) plan.push({ item: it.name, ledger: it.tallySalesLedger || '', hsnFromLedger: hsn });
-    }
-
-    let updated = 0;
-    if (apply) {
-      const Invoice = (await import('../models/Invoice.js')).default;
-      let Arch = null; try { Arch = (await import('../models/StockInvoiceArchive.js')).default; } catch(_){}
-      for (const p of plan) {
-        await ItemMaster.updateOne({ name: p.item }, { $set: { hsn: p.hsnFromLedger } });
-        const setHsn = (coll) => coll.updateMany(
-          { $or: [ { 'items.description': p.item }, { 'items.name': p.item } ] },
-          { $set: { 'items.$[e].hsn': p.hsnFromLedger } },
-          { arrayFilters: [ { $or: [ { 'e.description': p.item }, { 'e.name': p.item } ] } ] }
-        ).catch(()=>{});
-        await setHsn(Invoice);
-        if (Arch) await setHsn(Arch);
-        updated++;
+    // 2) which of those actually appear on invoices still waiting to sync
+    const pending = await Invoice.find({ tallySync: { $ne: true } }, 'invoiceNo items').lean();
+    const onPending = new Map(); // itemName -> invoice count
+    for (const inv of pending) {
+      for (const it of (inv.items||[])) {
+        const nm = (it.description||it.name||'').trim();
+        const hsn = (it.hsn||'').trim();
+        if (nm && !hsn) onPending.set(nm, (onPending.get(nm)||0)+1);
       }
     }
 
-    // sample: show HSN for the specific sales ledgers our items use
-    const wantLedgers = [...new Set(items.map(i => (i.tallySalesLedger||'').trim()))];
-    const ledgerHsnSample = wantLedgers.map(l => ({ ledger: l, hsnFound: ledgerHsn.get(l) || '(none)' }));
+    const list = masters.map(m => ({
+      item: m.name,
+      ledger: m.tallySalesLedger || '',
+      currentHsn: (m.hsn||'') || '(blank)',
+      onPendingInvoices: onPending.get((m.name||'').trim()) || 0,
+    }));
+    // put items that are actually on pending invoices first
+    list.sort((a,b) => b.onPendingInvoices - a.onPendingInvoices);
+
+    res.json({
+      success: true,
+      totalBlankInItemMaster: masters.length,
+      itemsOnPendingInvoices: [...onPending.keys()].length,
+      note: 'Fill HSN for each item, then POST/GET /api/tally/set-hsn with the mapping.',
+      list,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── SET: write a user-supplied item -> HSN mapping into ItemMaster AND into
+// invoice/archive line items. DB only. This is the correct, permanent fix:
+// once ItemMaster has HSN, every future export shows HSN automatically.
+// Usage (report first, then apply):
+//   POST /api/tally/set-hsn        body: { "map": { "Item Name": "85164000", ... } }
+//   POST /api/tally/set-hsn?apply=1 body: { "map": { ... } }
+// Also supports GET for quick single item:
+//   /api/tally/set-hsn?item=Exact%20Name&hsn=85164000&apply=1
+router.all('/set-hsn', async (req, res) => {
+  try {
+    const apply = req.query.apply === '1';
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+    const Invoice = (await import('../models/Invoice.js')).default;
+    let Arch = null; try { Arch = (await import('../models/StockInvoiceArchive.js')).default; } catch(_){}
+
+    // build the mapping from body.map or single ?item=&hsn=
+    let map = {};
+    if (req.body && req.body.map && typeof req.body.map === 'object') map = req.body.map;
+    if (req.query.item && req.query.hsn) map[String(req.query.item)] = String(req.query.hsn);
+
+    const entries = Object.entries(map)
+      .map(([k, v]) => [String(k).trim(), String(v).trim()])
+      .filter(([k, v]) => k && /^\d{4,8}$/.test(v));
+
+    if (!entries.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'No valid { item: hsn } pairs. HSN must be 4–8 digits.',
+        example: { map: { 'Electric Dry Iron Panache 1000W': '85164000' } },
+      });
+    }
+
+    const results = [];
+    let mUpdated = 0, invTouched = 0, archTouched = 0;
+    for (const [item, hsn] of entries) {
+      if (apply) {
+        const mr = await ItemMaster.updateOne({ name: item }, { $set: { hsn } });
+        mUpdated += (mr.matchedCount || mr.n || 0);
+        const setHsn = async (coll) => {
+          if (!coll) return 0;
+          const r = await coll.updateMany(
+            { $or: [ { 'items.description': item }, { 'items.name': item } ] },
+            { $set: { 'items.$[e].hsn': hsn } },
+            { arrayFilters: [ { $or: [ { 'e.description': item }, { 'e.name': item } ] } ] }
+          ).catch(()=>({modifiedCount:0}));
+          return r.modifiedCount || 0;
+        };
+        invTouched  += await setHsn(Invoice);
+        archTouched += await setHsn(Arch);
+      }
+      results.push({ item, hsn });
+    }
 
     res.json({
       success: true,
       mode: apply ? 'APPLIED' : 'REPORT ONLY (add ?apply=1)',
-      ledgersWithHsn: ledgerHsn.size,
-      blankHsnItems: items.length,
-      ledgerHsnSample,
-      itemsToFix: plan.length,
-      plan,
-      itemsUpdated: apply ? updated : 0,
-      note: 'Copies each item HSN from its sales-ledger HSN.',
+      pairs: results.length,
+      itemMasterUpdated: apply ? mUpdated : 0,
+      invoiceItemsUpdated: apply ? invTouched : 0,
+      archiveItemsUpdated: apply ? archTouched : 0,
+      results,
+      note: 'After apply, re-run the sales export so vouchers carry HSN.',
     });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
