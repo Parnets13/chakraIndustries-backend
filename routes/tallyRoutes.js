@@ -746,6 +746,32 @@ router.get('/diff-xml', async (req, res) => {
   }
 });
 
+// ── Check if specific voucher numbers ALREADY EXIST in Tally (duplicate check).
+// Open: /api/tally/voucher-exists?nos=BIW2485,BIW2492,BIW2530
+router.get('/voucher-exists', async (req, res) => {
+  try {
+    const wanted = (req.query.nos || '').split(',').map(s=>s.trim()).filter(Boolean);
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const company = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = company ? `<SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>VNos</ID></HEADER>
+<BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+<TDL><TDLMESSAGE><COLLECTION NAME="VNos"><TYPE>Voucher</TYPE><FETCH>VoucherNumber,VoucherTypeName,Date</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const resp = await postXmlWithRetry(cfg, xml, ct, 3);
+
+    const allNos = new Set();
+    for (const m of String(resp||'').matchAll(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/gi)) {
+      allNos.add(m[1].trim());
+    }
+    const result = wanted.map(n => ({ voucherNo: n, existsInTally: allNos.has(n) }));
+    res.json({ success: true, totalVouchersInTally: allNos.size, checked: result });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── DEFINITIVE TEST: send the SAME minimal voucher for TWO items — the failing
 // Chopper and the working Fan Heater — identical in every way except item name.
 // If Chopper fails and Fan Heater passes -> the Chopper STOCK ITEM is the problem.
