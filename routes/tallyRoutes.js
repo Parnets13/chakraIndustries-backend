@@ -881,12 +881,20 @@ router.get('/list-blank-hsn', async (req, res) => {
     // put items that are actually on pending invoices first
     list.sort((a,b) => b.onPendingInvoices - a.onPendingInvoices);
 
+    // PRIORITY LIST = items that actually get sold to Tally: they either sit on a
+    // pending invoice, OR have a sales ledger assigned (so they are real sale items).
+    const needHsn = list
+      .filter(x => x.onPendingInvoices > 0 || (x.ledger && x.ledger.trim()))
+      .sort((a,b) => (b.onPendingInvoices - a.onPendingInvoices) || a.item.localeCompare(b.item));
+
     res.json({
       success: true,
       totalBlankInItemMaster: masters.length,
       itemsOnPendingInvoices: [...onPending.keys()].length,
-      note: 'Fill HSN for each item, then POST/GET /api/tally/set-hsn with the mapping.',
-      list,
+      itemsThatNeedHsn: needHsn.length,
+      note: 'Fill HSN for each item in needHsnList, then POST /api/tally/set-hsn with { map: { "Item": "HSN" } }.',
+      needHsnList: needHsn,
+      allBlankList: list,
     });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
