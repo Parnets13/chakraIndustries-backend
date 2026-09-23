@@ -536,6 +536,43 @@ router.get('/isolate-fail', async (req, res) => {
   }
 });
 
+// ── DIAGNOSTIC: compare the raw item data of a FAILING invoice vs a WORKING one.
+// No Tally/connector needed — reads MongoDB only. Shows every item field so we
+// can spot what differs (rate, qty, tax, name, hsn, ledger, unit).
+// Open: /api/tally/compare-items?fail=BIW2485&ok=BIW2523
+router.get('/compare-items', async (req, res) => {
+  try {
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const failNo = req.query.fail || '';
+    const okNo   = req.query.ok   || '';
+
+    const dump = async (no) => {
+      if (!no) return null;
+      const inv = await Invoice.findOne({ invoiceNo: no }).lean();
+      if (!inv) return { invoiceNo: no, error: 'not found' };
+      return {
+        invoiceNo: inv.invoiceNo,
+        invoiceDate: inv.invoiceDate,
+        partyName: inv.partyName,
+        subtotal: inv.subtotal, grandTotal: inv.grandTotal ?? inv.total,
+        tallySync: inv.tallySync,
+        items: (inv.items||[]).map(it => ({
+          description: it.description || it.name,
+          hsn: it.hsn, unit: it.unit,
+          qty: it.qty ?? it.quantity,
+          rate: it.rate, basic: it.basic, amount: it.amount,
+          cgst: it.cgst, sgst: it.sgst, igst: it.igst, taxRate: it.taxRate,
+          tallySalesLedger: it.tallySalesLedger,
+        })),
+      };
+    };
+
+    res.json({ success: true, failing: await dump(failNo), working: await dump(okNo) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── Connector endpoints ───────────────────────────────────────────────────────
 router.get('/connectors/status',     protect, async (req, res) => {
   try {
