@@ -707,6 +707,41 @@ router.get('/fix-hsn', async (req, res) => {
   }
 });
 
+// ── DIAGNOSTIC: fetch stock items from Tally matching a search term, so we can
+// see the EXACT item name/HSN/GST as Tally stores it.
+// Open: /api/tally/find-stock?q=Choper
+router.get('/find-stock', async (req, res) => {
+  try {
+    const q = (req.query.q || '').toLowerCase();
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    if (!cfg) return res.json({ success: false, error: 'No TallyConfig' });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const company = (cfg.companyName || '').trim().toUpperCase();
+    const coTag = company ? `<SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>AllStk</ID></HEADER>
+<BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+<TDL><TDLMESSAGE><COLLECTION NAME="AllStk"><TYPE>StockItem</TYPE><FETCH>Name,BaseUnits,GSTApplicable,HSNCode</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const resp = await postXmlWithRetry(cfg, xml, ct, 3);
+
+    const matches = [];
+    for (const m of String(resp || '').matchAll(/<STOCKITEM[^>]*NAME="([^"]*)"[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
+      const nameAttr = m[1];
+      const block = m[2];
+      const nameTag = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      const name = (nameTag || nameAttr).trim();
+      if (!q || name.toLowerCase().includes(q)) {
+        const units = (block.match(/<BASEUNITS>(.*?)<\/BASEUNITS>/i)?.[1] || '').trim();
+        const hsn = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1] || '').trim();
+        matches.push({ name, units, hsn });
+      }
+    }
+    res.json({ success: true, query: q, count: matches.length, items: matches });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── Connector endpoints ───────────────────────────────────────────────────────
 router.get('/connectors/status',     protect, async (req, res) => {
   try {
