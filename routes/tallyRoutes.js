@@ -557,13 +557,34 @@ router.get('/isolate-fail', async (req, res) => {
 
     const results = {};
     results.itemUsed = { itemName, salesLed, base, cgst, sgst, rate, grand };
-    // test5: EXACT real ledger + proper CGST/SGST ledgers, but NO RATEDETAILS/
-    // GSTSOURCETYPE/HSNSOURCETYPE (the extra GST-source fields the real export adds).
-    // If this CREATES ok -> those extra fields are what Tally rejects for this item.
     results.test5_realLedger_withGst_noExtras = await send(buildVariant({ item: itemName, ledger: salesLed || 'Hand Blenders and Chopper Sales Local', withGst: true }));
 
+    // test6: CLEAN ROUND numbers (rate 1000, cgst 90, sgst 90) with the chopper item.
+    // If this CREATES ok but the real amounts fail -> it's a rounding/amount issue.
+    // If this ALSO fails -> the stock item itself is corrupt in Tally.
+    const ledgerT6 = salesLed || 'Hand Blenders and Chopper Sales Local';
+    const t6 = `
+<VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">
+  <DATE>${today}</DATE><EFFECTIVEDATE>${today}</EFFECTIVEDATE>
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+  <VOUCHERNUMBER>ISOLATE-T6-${Date.now()}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>${esc(party)}</PARTYLEDGERNAME>
+  <ISINVOICE>Yes</ISINVOICE>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>${esc(party)}</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1180.00</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90.00</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90.00</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <RATE>1000/Nos</RATE><AMOUNT>1000.00</AMOUNT>
+    <ACTUALQTY> 1 Nos</ACTUALQTY><BILLEDQTY> 1 Nos</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>${esc(ledgerT6)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1000.00</AMOUNT></ACCOUNTINGALLOCATIONS.LIST>
+  </ALLINVENTORYENTRIES.LIST>
+</VOUCHER>`;
+    results.test6_cleanRoundAmounts = await send(t6);
+
     res.json({ success: true, invoiceNo, results,
-      note: 'test5 = correct sales ledger + CGST/SGST, but WITHOUT RateDetails/GSTSource. If CREATED>0, the extra GST-source fields are the culprit.' });
+      note: 'test6 uses clean round numbers. If test6 CREATED>0 -> rounding/amount issue. If test6 also fails -> the stock item is corrupt in Tally.' });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message, stack: e.stack });
   }
