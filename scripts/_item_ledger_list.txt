@@ -1,0 +1,130 @@
+ITEMS WITH A LEDGER SET: 42
+(Only these need checking. Empty-ledger items auto-resolve at export.)
+
+CHECK EACH: is the ledger correct for that item in Tally?
+
+1. ITEM  : Chill Air Cooler-35 L
+   LEDGER: Air Cooler Sales Local
+
+2. ITEM  : GC Digital Air Fryer Frizzle 4.2L
+   LEDGER: Air Cooler Sales Local
+
+3. ITEM  : Multicool Mini Desert Air Cooler- 60L
+   LEDGER: Air Cooler Sales Local
+
+4. ITEM  : Electric Dry Iron Kratos Ultimate Plus 1100W
+   LEDGER: Cast Iron Dosa Tawa Sales Local 5%
+
+5. ITEM  : Orient Fabrismooth 1000W Dry Iron
+   LEDGER: Cast Iron Dosa Tawa Sales Local 5%
+
+6. ITEM  : Electric Aeon Bldc Ceiling Fan With Remote
+   LEDGER: Ceiling Fan Sales Intertstate
+
+7. ITEM  : Electric Fan Heater New Areva 2000W
+   LEDGER: Ceiling Fan Sales Intertstate
+
+8. ITEM  : Europa Drip 600-Watt 5 Cup Drip Coffee
+   LEDGER: Coffee Maker Sales Local
+
+9. ITEM  : Comforter Green Dark Grey Single
+   LEDGER: Comforter Mattres Sales Local
+
+10. ITEM  : Comforter Pink Steel Grey Single
+   LEDGER: Comforter Mattres Sales Local
+
+11. ITEM  : Livpure Comforter Pink Steel Grey Single 56x90
+   LEDGER: Comforter Mattres Sales Local
+
+12. ITEM  : Livpure Livpure Comforter Pink Steel Grey Single 56x90 56x90
+   LEDGER: Comforter Mattres Sales Local
+
+13. ITEM  : Electric Dry Iron Fabrishine 1000W
+   LEDGER: Dry Iron Sales Local
+
+14. ITEM  : Electric Dry Iron Panache 1000W
+   LEDGER: Dry Iron Sales Local
+
+15. ITEM  : Electric Dry Iron Panache Crystal 1100W
+   LEDGER: Dry Iron Sales Local
+
+16. ITEM  : Rico Steam Iron SI03
+   LEDGER: Dry Iron Sales Local
+
+17. ITEM  : Bajaj ICX 160TS Neo Induction Stove
+   LEDGER: Electical cooker inducton stove toster sales local
+
+18. ITEM  : GC GT LPG STOVE - D/B Opal
+   LEDGER: Electical cooker inducton stove toster sales local
+
+19. ITEM  : Greenchef Ss Cooker - 3Ltr - Classic Curve
+   LEDGER: Electical cooker inducton stove toster sales local
+
+20. ITEM  : Ss Cooker - 3Ltr - Classic Curve
+   LEDGER: Electical cooker inducton stove toster sales local
+
+21. ITEM  : Electric Arc Plus Immersion Rod
+   LEDGER: Electric Fan Heater Glint Sales Local
+
+22. ITEM  : Electric Maveric Storage Water Heater 15Ltr
+   LEDGER: Electric Fan Heater Glint Sales Local
+
+23. ITEM  : Electric Maveric Storage Water Heater 25Ltr
+   LEDGER: Electric Fan Heater Glint Sales Local
+
+24. ITEM  : Rico Rechargeble Electric Chopper
+   LEDGER: Electric Fan Heater Glint Sales Local
+
+25. ITEM  : SNAPPLE HYDRA STEEL WATER BOTTLE 1000ML
+   LEDGER: Glass Bottle and Other Glasware Sales Local
+
+26. ITEM  : Rico 2509 Choper with Steel Bowl 3 Ltr
+   LEDGER: Hand Blenders and Chopper Sales Local
+
+27. ITEM  : Bajaj IRX 220F Infrared Cooktop
+   LEDGER: Induction Cooktop
+
+28. ITEM  : Maharaja Marvello 13DX Induction 1300W
+   LEDGER: Induction Stove Sales Local
+
+29. ITEM  : Carbon Knife 6 Pcs Set - Elite Edge
+   LEDGER: Knife Set Sales Local
+
+30. ITEM  : GC SS 4 Pcs Gift Set -Steeliq
+   LEDGER: Knife Set Sales Local
+
+31. ITEM  : Greenchef Carbon Knife 6 Pcs set - Elite Edge
+   LEDGER: Knife Set Sales Local
+
+32. ITEM  : Stainless Steel 4Pcs Gift Set - Steeliq Soft Touch  (Sandwitch Bottom)  (Frypan 220Cm + Kadai 220Cm With Glasslid + Saucepan 160Cm)
+   LEDGER: Knife Set Sales Local
+
+33. ITEM  : Livpure Liv-Envy-Alkaline(RO+UV+UF+Alkaline)
+   LEDGER: Livpure Comforter Sales Local
+
+34. ITEM  : Livpure Travel Neck Pillow 11x11x3
+   LEDGER: Livpure Comforter Sales Local
+
+35. ITEM  : Greenchef Mixer Grinder Strobe (3 Jars)
+   LEDGER: Mixer Grinder Food Factory Local Sales
+
+36. ITEM  : Wakefit  Orthopedic Cervical Pillow
+   LEDGER: Neck Pillow Sales Local
+
+37. ITEM  : HYDRA STEEL WATER BOTTLE 1000ML
+   LEDGER: SS Bottle Sales Local 5%
+
+38. ITEM  : Rico Sandwich Grill Toaster Blk SG2408
+   LEDGER: Toasters Sales Local
+
+39. ITEM  : LIV-BOLT-WAAS
+   LEDGER: Water Purifier Sales Local
+
+40. ITEM  : LIV-ZINGER-COPPER-HOT-HR(RO+UV+UF)
+   LEDGER: Water Purifier Sales Local
+
+41. ITEM  : Liv-Envy-Alkaline(RO+UV+UF+Alkaline)
+   LEDGER: Water Purifier Sales Local
+
+42. ITEM  : Liv-Glo-Star-Copper(RO+UV+UF+CU)
+   LEDGER: Water Purifier Sales Local

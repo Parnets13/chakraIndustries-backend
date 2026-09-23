@@ -1,0 +1,177 @@
+========================================================================
+  ALL 42 ITEMS THAT HAVE A LEDGER SET — CROSS CHECK EACH
+  (baaki ~1130 items ka ledger blank hai, woh export ke waqt khud sahi ho jaate hain)
+------------------------------------------------------------------------
+  Har item ke neeche "RIGHT:" ke aage sahi ledger likho.
+  Agar ledger already sahi hai to "RIGHT: OK" likh do.
+========================================================================
+
+1.  ITEM : Chill Air Cooler-35 L
+    NOW  : Air Cooler Sales Local
+    RIGHT:
+
+2.  ITEM : GC Digital Air Fryer Frizzle 4.2L
+    NOW  : Air Cooler Sales Local
+    RIGHT:
+
+3.  ITEM : Multicool Mini Desert Air Cooler- 60L
+    NOW  : Air Cooler Sales Local
+    RIGHT:
+
+4.  ITEM : Electric Dry Iron Kratos Ultimate Plus 1100W
+    NOW  : Cast Iron Dosa Tawa Sales Local 5%
+    RIGHT:
+
+5.  ITEM : Orient Fabrismooth 1000W Dry Iron
+    NOW  : Cast Iron Dosa Tawa Sales Local 5%
+    RIGHT:
+
+6.  ITEM : Electric Aeon Bldc Ceiling Fan With Remote
+    NOW  : Ceiling Fan Sales Intertstate
+    RIGHT:
+
+7.  ITEM : Electric Fan Heater New Areva 2000W
+    NOW  : Ceiling Fan Sales Intertstate
+    RIGHT:
+
+8.  ITEM : Europa Drip 600-Watt 5 Cup Drip Coffee
+    NOW  : Coffee Maker Sales Local
+    RIGHT:
+
+9.  ITEM : Comforter Green Dark Grey Single
+    NOW  : Comforter Mattres Sales Local
+    RIGHT:
+
+10. ITEM : Comforter Pink Steel Grey Single
+    NOW  : Comforter Mattres Sales Local
+    RIGHT:
+
+11. ITEM : Livpure Comforter Pink Steel Grey Single 56x90
+    NOW  : Comforter Mattres Sales Local
+    RIGHT:
+
+12. ITEM : Livpure Livpure Comforter Pink Steel Grey Single 56x90 56x90
+    NOW  : Comforter Mattres Sales Local
+    RIGHT:
+
+13. ITEM : Electric Dry Iron Fabrishine 1000W
+    NOW  : Dry Iron Sales Local
+    RIGHT:
+
+14. ITEM : Electric Dry Iron Panache 1000W
+    NOW  : Dry Iron Sales Local
+    RIGHT:
+
+15. ITEM : Electric Dry Iron Panache Crystal 1100W
+    NOW  : Dry Iron Sales Local
+    RIGHT:
+
+16. ITEM : Rico Steam Iron SI03
+    NOW  : Dry Iron Sales Local
+    RIGHT:
+
+17. ITEM : Bajaj ICX 160TS Neo Induction Stove
+    NOW  : Electical cooker inducton stove toster sales local
+    RIGHT:
+
+18. ITEM : GC GT LPG STOVE - D/B Opal
+    NOW  : Electical cooker inducton stove toster sales local
+    RIGHT:
+
+19. ITEM : Greenchef Ss Cooker - 3Ltr - Classic Curve
+    NOW  : Electical cooker inducton stove toster sales local
+    RIGHT:
+
+20. ITEM : Ss Cooker - 3Ltr - Classic Curve
+    NOW  : Electical cooker inducton stove toster sales local
+    RIGHT:
+
+21. ITEM : Electric Arc Plus Immersion Rod
+    NOW  : Electric Fan Heater Glint Sales Local
+    RIGHT:
+
+22. ITEM : Electric Maveric Storage Water Heater 15Ltr
+    NOW  : Electric Fan Heater Glint Sales Local
+    RIGHT:
+
+23. ITEM : Electric Maveric Storage Water Heater 25Ltr
+    NOW  : Electric Fan Heater Glint Sales Local
+    RIGHT:
+
+24. ITEM : Rico Rechargeble Electric Chopper
+    NOW  : Electric Fan Heater Glint Sales Local
+    RIGHT:
+
+25. ITEM : SNAPPLE HYDRA STEEL WATER BOTTLE 1000ML
+    NOW  : Glass Bottle and Other Glasware Sales Local
+    RIGHT:
+
+26. ITEM : Rico 2509 Choper with Steel Bowl 3 Ltr
+    NOW  : Hand Blenders and Chopper Sales Local
+    RIGHT:
+
+27. ITEM : Bajaj IRX 220F Infrared Cooktop
+    NOW  : Induction Cooktop
+    RIGHT:
+
+28. ITEM : Maharaja Marvello 13DX Induction 1300W
+    NOW  : Induction Stove Sales Local
+    RIGHT:
+
+29. ITEM : Carbon Knife 6 Pcs Set - Elite Edge
+    NOW  : Knife Set Sales Local
+    RIGHT:
+
+30. ITEM : GC SS 4 Pcs Gift Set -Steeliq
+    NOW  : Knife Set Sales Local
+    RIGHT:
+
+31. ITEM : Greenchef Carbon Knife 6 Pcs set - Elite Edge
+    NOW  : Knife Set Sales Local
+    RIGHT:
+
+32. ITEM : Stainless Steel 4Pcs Gift Set - Steeliq Soft Touch (Sandwitch Bottom) (Frypan 220Cm + Kadai 220Cm With Glasslid + Saucepan 160Cm)
+    NOW  : Knife Set Sales Local
+    RIGHT:
+
+33. ITEM : Livpure Liv-Envy-Alkaline(RO+UV+UF+Alkaline)
+    NOW  : Livpure Comforter Sales Local
+    RIGHT:
+
+34. ITEM : Livpure Travel Neck Pillow 11x11x3
+    NOW  : Livpure Comforter Sales Local
+    RIGHT:
+
+35. ITEM : Greenchef Mixer Grinder Strobe (3 Jars)
+    NOW  : Mixer Grinder Food Factory Local Sales
+    RIGHT:
+
+36. ITEM : Wakefit Orthopedic Cervical Pillow
+    NOW  : Neck Pillow Sales Local
+    RIGHT:
+
+37. ITEM : HYDRA STEEL WATER BOTTLE 1000ML
+    NOW  : SS Bottle Sales Local 5%
+    RIGHT:
+
+38. ITEM : Rico Sandwich Grill Toaster Blk SG2408
+    NOW  : Toasters Sales Local
+    RIGHT:
+
+39. ITEM : LIV-BOLT-WAAS
+    NOW  : Water Purifier Sales Local
+    RIGHT:
+
+40. ITEM : LIV-ZINGER-COPPER-HOT-HR(RO+UV+UF)
+    NOW  : Water Purifier Sales Local
+    RIGHT:
+
+41. ITEM : Liv-Envy-Alkaline(RO+UV+UF+Alkaline)
+    NOW  : Water Purifier Sales Local
+    RIGHT:
+
+42. ITEM : Liv-Glo-Star-Copper(RO+UV+UF+CU)
+    NOW  : Water Purifier Sales Local
+    RIGHT:
+
+========================================================================

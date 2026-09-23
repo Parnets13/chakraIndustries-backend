@@ -1,0 +1,93 @@
+========================================================================
+  ITEM ke saamne uska LEDGER diya hai (jo hum abhi bhej rahe hain).
+  Tally me ye ledger dhoondho:
+     - agar EXACTLY milta hai       -> "OK"
+     - agar naam alag hai           -> Tally ka SAHI naam likho
+     - agar hai hi nahi             -> "NAHI HAI" + jo use karna hai wo naam
+========================================================================
+  NOTE: Tally ne confirm kiya hai ki "Hand Blenders and Chopper Sales Local"
+        EXIST NAHI karta. Isliye #7 zaroor theek karna hai.
+========================================================================
+
+ 1. ITEM  : Chill Air Cooler / Multicool Air Cooler
+    LEDGER: Air Cooler Sales Local
+    TALLY :__________________________
+
+ 2. ITEM  : GC Digital Air Fryer Frizzle 4.2L
+    LEDGER: Air Fryer Sales Local
+    TALLY :__________________________
+
+ 3. ITEM  : Electric Aeon Bldc Ceiling Fan
+    LEDGER: Ceiling Fan Sales Local
+    TALLY :__________________________
+
+ 4. ITEM  : Europa Drip Coffee Maker
+    LEDGER: Coffee Maker Sales Local
+    TALLY :__________________________
+
+ 5. ITEM  : Electric Dry Iron (Kratos / Panache / Fabrishine) + Rico Steam Iron
+    LEDGER: Dry Iron Sales Local
+    TALLY :__________________________
+
+ 6. ITEM  : Electric Fan Heater New Areva 2000W
+    LEDGER: Fan Heater Sales Local
+    TALLY :__________________________
+
+ 7. ITEM  : Rico 2509 Choper with Steel Bowl 3 Ltr    <<< TALLY KEHTI HAI YE NAHI HAI
+    LEDGER: Hand Blenders and Chopper Sales Local
+    TALLY :__________________________
+
+ 8. ITEM  : Greenchef Mixer Grinder Strobe (3 Jars)
+    LEDGER: Mixer Grinder Local Sales
+    TALLY :__________________________
+
+ 9. ITEM  : Livpure Travel Neck Pillow
+    LEDGER: Neck Pillow Sales Local
+    TALLY :__________________________
+
+10. ITEM  : Rico Sandwich Grill Toaster
+    LEDGER: Toasters Sales Local
+    TALLY :__________________________
+
+11. ITEM  : Rico Rechargeble Electric Chopper
+    LEDGER: Veg Chopper Sales Local
+    TALLY :__________________________
+
+12. ITEM  : Electric Water Heater / Immersion Rod
+    LEDGER: Water Heater Sales Local
+    TALLY :__________________________
+
+13. ITEM  : Livpure Water Purifiers (Bolt / Envy / Glo / Zinger)
+    LEDGER: Water Purifier Sales Local
+    TALLY :__________________________
+
+14. ITEM  : Comforter (Green/Pink/Livpure)
+    LEDGER: Comforter Sales Local @5%
+    TALLY :__________________________
+
+15. ITEM  : Bajaj ICX Induction Stove
+    LEDGER: Induction Stove Sales Local
+    TALLY :__________________________
+
+16. ITEM  : GC GT LPG Stove - D/B Opal
+    LEDGER: Glass Sales-Local
+    TALLY :__________________________
+
+17. ITEM  : SS Cooker 3Ltr (Greenchef / plain)
+    LEDGER: Pressure Cooker Local Sales @5%
+    TALLY :__________________________
+
+18. ITEM  : Snapple Hydra Steel Water Bottle 1000ml
+    LEDGER: SS Bottle Sales Local 5%
+    TALLY :__________________________
+
+19. ITEM  : Stainless Steel 4Pcs Gift Set - Steeliq
+    LEDGER: SS Utensils Sales Local 5%
+    TALLY :__________________________
+
+========================================================================
+  ZAROORI SAWAAL: 2 alag chopper items ke 2 alag ledger diye the —
+    - Rico 2509 Chopper  -> Hand Blenders and Chopper Sales Local  (NAHI HAI)
+    - Rico Electric Chopper -> Veg Chopper Sales Local
+  Kya dono ek hi ledger me jaane chahiye? Batao.
+========================================================================

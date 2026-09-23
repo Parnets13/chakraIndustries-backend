@@ -296,6 +296,43 @@ router.get('/diagnose-one', async (req, res) => {
   }
 });
 
+// ── DIAGNOSTIC: list ALL sales ledgers that actually exist in Tally ───────────
+// Read-only. Open in browser:
+//   /api/tally/list-sales-ledgers
+// Returns every ledger whose parent group or name contains "sales" — the exact
+// names as stored in Tally, so we can match ItemMaster.tallySalesLedger to them.
+router.get('/list-sales-ledgers', async (req, res) => {
+  try {
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    if (!cfg) return res.json({ success: false, error: 'No TallyConfig' });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+
+    const company = (cfg.companyName || '').trim().toUpperCase();
+    const coTag = company ? `<SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>AllLed</ID></HEADER>
+<BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+<TDL><TDLMESSAGE><COLLECTION NAME="AllLed"><TYPE>Ledger</TYPE><FETCH>Name,Parent</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const resp = await postXmlWithRetry(cfg, xml, ct, 3);
+
+    const salesLedgers = [];
+    for (const m of String(resp || '').matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
+      const name = (m[1].match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      const parent = (m[1].match(/<PARENT>(.*?)<\/PARENT>/i)?.[1] || '').trim();
+      const low = name.toLowerCase();
+      if (parent.toLowerCase().includes('sales') || low.includes('sale')) {
+        salesLedgers.push(name);
+      }
+    }
+    salesLedgers.sort();
+
+    res.json({ success: true, count: salesLedgers.length, salesLedgers });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── Connector endpoints ───────────────────────────────────────────────────────
 router.get('/connectors/status',     protect, async (req, res) => {
   try {
