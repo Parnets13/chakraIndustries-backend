@@ -765,6 +765,127 @@ router.get('/diff-xml', async (req, res) => {
   }
 });
 
+// ── FINAL FIX: create a NEW clean stock item under a slightly different name,
+// test that a voucher with it succeeds, and if so repoint the 12 chopper
+// invoices (ItemMaster + invoices) to the new item. Nothing else changes.
+// Open: /api/tally/new-chopper-item            -> create new item + test (no DB change)
+//       /api/tally/new-chopper-item?apply=1     -> also repoint the 12 invoices
+router.get('/new-chopper-item', async (req, res) => {
+  try {
+    const apply = req.query.apply === '1';
+    const cfg = await TallyConfig.findOne({}, null, { sort: { _id: 1 } });
+    const { postXmlWithRetry } = await import('../services/tallyFetchEngine.js');
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+    const co = (cfg.companyName||'').trim().toUpperCase();
+    const coTag = co ? `<SVCURRENTCOMPANY>${co}</SVCURRENTCOMPANY>` : '';
+    const ct = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const OLD = 'Rico 2509 Choper with Steel Bowl 3 Ltr';
+    const NEW = 'Rico 2509 Chopper with Steel Bowl 3 Ltr'; // "Chopper" (double p) — fresh clean master
+    const LED = 'Hand Blenders and Chopper Sales Local';
+    const today = (()=>{const n=new Date();return `${n.getFullYear()}${String(n.getMonth()+1).padStart(2,'0')}${String(n.getDate()).padStart(2,'0')}`;})();
+    const send = async (xml) => await postXmlWithRetry(cfg, xml, ct);
+    const out = {};
+
+    // 1) Create the new clean stock item
+    const createXml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME><STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">
+<STOCKITEM NAME="${NEW}" ACTION="Create">
+  <NAME>${NEW}</NAME>
+  <BASEUNITS>Nos</BASEUNITS>
+  <GSTAPPLICABLE>&#4; Applicable</GSTAPPLICABLE>
+  <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
+  <HSNCODE>850940</HSNCODE>
+  <GSTDETAILS.LIST>
+    <APPLICABLEFROM>20230401</APPLICABLEFROM>
+    <HSNCODE>850940</HSNCODE>
+    <TAXABILITY>Taxable</TAXABILITY>
+    <STATEWISEDETAILS.LIST>
+      <STATENAME>&#4; Any</STATENAME>
+      <RATEDETAILS.LIST><GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD><GSTRATE>9</GSTRATE></RATEDETAILS.LIST>
+      <RATEDETAILS.LIST><GSTRATEDUTYHEAD>SGST/UTGST</GSTRATEDUTYHEAD><GSTRATE>9</GSTRATE></RATEDETAILS.LIST>
+      <RATEDETAILS.LIST><GSTRATEDUTYHEAD>IGST</GSTRATEDUTYHEAD><GSTRATE>18</GSTRATE></RATEDETAILS.LIST>
+    </STATEWISEDETAILS.LIST>
+  </GSTDETAILS.LIST>
+</STOCKITEM>
+</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+    const cResp = await send(createXml);
+    out.itemCreated = parseInt(String(cResp||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1]||'0');
+    out.itemAltered = parseInt(String(cResp||'').match(/<ALTERED>(\d+)<\/ALTERED>/i)?.[1]||'0');
+
+    // 2) Test a voucher with the NEW item
+    const vno = `NEWITEM-TEST-${Date.now()}`;
+    const testXml = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}<SVSHOWERRORLIST>Yes</SVSHOWERRORLIST></STATICVARIABLES></REQUESTDESC>
+<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">
+<VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">
+  <DATE>${today}</DATE><EFFECTIVEDATE>${today}</EFFECTIVEDATE>
+  <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME><VOUCHERNUMBER>${vno}</VOUCHERNUMBER>
+  <PARTYLEDGERNAME>BI Worldwide India PVT LTD</PARTYLEDGERNAME><ISINVOICE>Yes</ISINVOICE>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>BI Worldwide India PVT LTD</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-2339.99</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>178.47</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>178.47</AMOUNT></ALLLEDGERENTRIES.LIST>
+  <ALLINVENTORYENTRIES.LIST>
+    <STOCKITEMNAME>${NEW}</STOCKITEMNAME>
+    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
+    <GSTSOURCETYPE>Ledger</GSTSOURCETYPE><GSTLEDGERSOURCE>${LED}</GSTLEDGERSOURCE>
+    <HSNSOURCETYPE>Ledger</HSNSOURCETYPE><HSNLEDGERSOURCE>${LED}</HSNLEDGERSOURCE>
+    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+    <RATE>1983.05/Nos</RATE><AMOUNT>1983.05</AMOUNT>
+    <ACTUALQTY> 1 Nos</ACTUALQTY><BILLEDQTY> 1 Nos</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>${LED}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1983.05</AMOUNT></ACCOUNTINGALLOCATIONS.LIST>
+    <RATEDETAILS.LIST><GSTRATEDUTYHEAD>CGST</GSTRATEDUTYHEAD><GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE><GSTRATE> 9.00</GSTRATE></RATEDETAILS.LIST>
+    <RATEDETAILS.LIST><GSTRATEDUTYHEAD>SGST/UTGST</GSTRATEDUTYHEAD><GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE><GSTRATE> 9.00</GSTRATE></RATEDETAILS.LIST>
+  </ALLINVENTORYENTRIES.LIST>
+</VOUCHER>
+</TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`;
+    const tResp = await send(testXml);
+    out.testCreated = parseInt(String(tResp||'').match(/<CREATED>(\d+)<\/CREATED>/i)?.[1]||'0');
+    out.testExceptions = parseInt(String(tResp||'').match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1]||'0');
+    // delete the test voucher if created
+    if (out.testCreated) {
+      await send(`<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES>${coTag}</STATICVARIABLES></REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF"><VOUCHER VCHTYPE="Sales" ACTION="Delete"><VOUCHERNUMBER>${vno}</VOUCHERNUMBER><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME><DATE>${today}</DATE></VOUCHER></TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>`).catch(()=>{});
+    }
+
+    // 3) If test passed AND apply=1 → repoint the 12 invoices + ItemMaster to NEW name
+    if (apply && out.testCreated) {
+      // rename in ItemMaster (create/update a master row for NEW; keep OLD too)
+      await ItemMaster.updateOne(
+        { name: OLD },
+        { $set: { name: NEW, tallySalesLedger: LED, hsn: '850940' } }
+      ).catch(()=>{});
+      const affected = await Invoice.find(
+        { $or: [ { 'items.description': OLD }, { 'items.name': OLD } ] }, 'invoiceNo items'
+      ).lean();
+      let requeued = 0;
+      for (const inv of affected) {
+        const newItems = (inv.items||[]).map(x => {
+          const key = (x.description||x.name||'').trim();
+          if (key === OLD) {
+            const y = { ...x, tallySalesLedger: LED, hsn: '850940' };
+            if (y.description) y.description = NEW;
+            if (y.name) y.name = NEW;
+            return y;
+          }
+          return x;
+        });
+        await Invoice.updateOne(
+          { _id: inv._id },
+          { $set: { items: newItems, tallySync: false, tallyVoucher: null }, $unset: { tallySyncAt: '' } }
+        );
+        requeued++;
+      }
+      out.invoicesRepointed = requeued;
+    }
+
+    res.json({ success: true, oldItem: OLD, newItem: NEW, result: out,
+      note: out.testCreated ? 'NEW item works! Run with ?apply=1 to repoint invoices, then export.' : 'NEW item test still failed — deeper Tally issue.' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── FINAL FIX: DELETE the corrupt chopper stock item and CREATE it fresh with
 // proper Unit + GST + HSN. A fresh master clears whatever was corrupt.
 // Then test a voucher automatically.
