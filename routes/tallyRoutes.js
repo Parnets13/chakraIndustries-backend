@@ -853,8 +853,14 @@ router.get('/hsn-status', async (req, res) => {
     const Invoice = (await import('../models/Invoice.js')).default;
     const ItemMaster = (await import('../models/ItemMaster.js')).default;
 
-    // sample recently-synced invoices
-    const synced = await Invoice.find({ tallySync: true }, 'invoiceNo items').sort({ updatedAt: -1 }).limit(50).lean();
+    // sample recently-synced invoices — check BOTH Invoice and the archive
+    let synced = await Invoice.find({}, 'invoiceNo items').sort({ updatedAt: -1 }).limit(50).lean();
+    if (!synced.length) {
+      try {
+        const Arch = (await import('../models/StockInvoiceArchive.js')).default;
+        synced = await Arch.find({}, 'invoiceNo items').sort({ updatedAt: -1 }).limit(50).lean();
+      } catch (_) {}
+    }
     const itemBlank = new Map();   // itemName -> count of invoice-items with blank hsn
     for (const inv of synced) {
       for (const it of (inv.items||[])) {
