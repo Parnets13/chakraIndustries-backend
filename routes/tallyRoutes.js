@@ -557,15 +557,13 @@ router.get('/isolate-fail', async (req, res) => {
 
     const results = {};
     results.itemUsed = { itemName, salesLed, base, cgst, sgst, rate, grand };
-    results.test1_minimal_withGodown = await send(buildMinimal(true));
-    results.test2_minimal_noGodown   = await send(buildMinimal(false));
-    // test3: same item + sales ledger but NO GST ledgers (pure item + sales)
-    results.test3_noGstLedgers = await send(buildVariant({ item: itemName, ledger: salesLed, withGst: false }));
-    // test4: same item but generic "Sales Accounts" ledger (is the specific ledger the problem?)
-    results.test4_genericSalesLedger = await send(buildVariant({ item: itemName, ledger: 'Sales Accounts', withGst: true }));
+    // test5: EXACT real ledger + proper CGST/SGST ledgers, but NO RATEDETAILS/
+    // GSTSOURCETYPE/HSNSOURCETYPE (the extra GST-source fields the real export adds).
+    // If this CREATES ok -> those extra fields are what Tally rejects for this item.
+    results.test5_realLedger_withGst_noExtras = await send(buildVariant({ item: itemName, ledger: salesLed || 'Hand Blenders and Chopper Sales Local', withGst: true }));
 
     res.json({ success: true, invoiceNo, results,
-      note: 'test3=no GST ledgers, test4=generic Sales Accounts ledger. Whichever CREATED>0 pinpoints the culprit.' });
+      note: 'test5 = correct sales ledger + CGST/SGST, but WITHOUT RateDetails/GSTSource. If CREATED>0, the extra GST-source fields are the culprit.' });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message, stack: e.stack });
   }
