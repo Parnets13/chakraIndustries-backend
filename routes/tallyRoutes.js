@@ -707,6 +707,50 @@ router.get('/fix-hsn', async (req, res) => {
   }
 });
 
+// ── FIX: clear tallySalesLedger on the chopper item so the exporter auto-resolves
+// it (exactly like the working Fan Heater whose ledger was blank). DB only.
+// Open: /api/tally/clear-chopper-ledger          -> report
+//       /api/tally/clear-chopper-ledger?apply=1  -> apply
+router.get('/clear-chopper-ledger', async (req, res) => {
+  try {
+    const apply = req.query.apply === '1';
+    const Invoice = (await import('../models/Invoice.js')).default;
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+    const ITEM = 'Rico 2509 Choper with Steel Bowl 3 Ltr';
+
+    const im = await ItemMaster.findOne({ name: ITEM }, 'name tallySalesLedger hsn').lean();
+    const affected = await Invoice.find(
+      { $or: [ { 'items.description': ITEM }, { 'items.name': ITEM } ] }, 'invoiceNo items'
+    ).lean();
+
+    if (apply) {
+      await ItemMaster.updateOne({ name: ITEM }, { $set: { tallySalesLedger: '' } });
+      for (const inv of affected) {
+        const newItems = (inv.items||[]).map(x => {
+          const key = (x.description||x.name||'').trim();
+          return key === ITEM ? { ...x, tallySalesLedger: '' } : x;
+        });
+        await Invoice.updateOne(
+          { _id: inv._id },
+          { $set: { items: newItems, tallySync: false, tallyVoucher: null }, $unset: { tallySyncAt: '' } }
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      mode: apply ? 'APPLIED' : 'REPORT ONLY (add ?apply=1)',
+      item: ITEM,
+      itemMasterLedgerNow: im?.tallySalesLedger || '(none)',
+      willBecome: '',
+      invoicesAffected: affected.map(i => i.invoiceNo),
+      count: affected.length,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── DIAGNOSTIC: fetch stock items from Tally matching a search term, so we can
 // see the EXACT item name/HSN/GST as Tally stores it.
 // Open: /api/tally/find-stock?q=Choper
