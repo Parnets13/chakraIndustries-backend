@@ -1219,7 +1219,7 @@ function buildSingleVoucherXml(inv, cfg) {
     ${gstSourceXml}
     ${hsnSourceXml}
     ${gstOverrideXml}
-    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : ''}${acctAllocsXml}
+    ${acctAllocsXml}
   </ALLINVENTORYENTRIES.LIST>`;
   }).join('');
 
