@@ -1593,12 +1593,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     const invGstSourceXml = hasRealLedger
       ? `\n    <GSTSOURCETYPE>Ledger</GSTSOURCETYPE>\n    <GSTLEDGERSOURCE>${esc(gstLedgerName)}</GSTLEDGERSOURCE>\n    <HSNSOURCETYPE>Ledger</HSNSOURCETYPE>\n    <HSNLEDGERSOURCE>${esc(gstLedgerName)}</HSNLEDGERSOURCE>`
       : '';
-    // Do NOT send a transaction-level HSN. HSNSOURCETYPE=Ledger + GSTHSNINFERAPPLICABILITY
-    // = "As per Masters/Company" already tell Tally to take HSN from the ledger/item
-    // master. Emitting <GSTHSNNAME> here forces a transaction HSN that conflicts with
-    // the master and triggers the "As per Transaction vs As per Master" mismatch.
-    // Leaving it out makes Tally use the master HSN with no mismatch.
-    const invHsnNameXml = '';
+    const invHsnNameXml = gstHsnName ? `\n    <GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : '';
     return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
