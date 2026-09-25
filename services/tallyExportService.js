@@ -1593,9 +1593,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     const invGstSourceXml = hasRealLedger
       ? `\n    <GSTSOURCETYPE>Ledger</GSTSOURCETYPE>\n    <GSTLEDGERSOURCE>${esc(gstLedgerName)}</GSTLEDGERSOURCE>\n    <HSNSOURCETYPE>Ledger</HSNSOURCETYPE>\n    <HSNLEDGERSOURCE>${esc(gstLedgerName)}</HSNLEDGERSOURCE>`
       : '';
-    // HSN Tally ke ledger/stock item master se aayega (GSTHSNINFERAPPLICABILITY = As per Masters/Company).
-    // Transaction me GSTHSNNAME bhejne se "As per Transaction vs Master" mismatch popup aata hai.
-    const invHsnNameXml = '';
+    const invHsnNameXml = gstHsnName ? `\n    <GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : '';
     return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
