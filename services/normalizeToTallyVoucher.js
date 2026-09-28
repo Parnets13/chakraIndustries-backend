@@ -231,10 +231,11 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
 
   for (let i = 0; i < itemAmounts.length; i++) {
     const item = validItems[i];
-    // Always use Excel-provided tax amounts — they match what Tally expects
-    const excelCGST = +(item.cgst || 0);
-    const excelSGST = +(item.sgst || 0);
-    const excelIGST = +(item.igst || 0);
+    // Always use Excel-provided tax amounts — round to 2dp so long decimals
+    // from Excel formulas (e.g. 4122÷1.18×0.09) never reach the GST portal.
+    const excelCGST = +( +(item.cgst || 0) ).toFixed(2);
+    const excelSGST = +( +(item.sgst || 0) ).toFixed(2);
+    const excelIGST = +( +(item.igst || 0) ).toFixed(2);
     const r = itemTaxRates[i];
 
     if (excelIGST > 0) {
