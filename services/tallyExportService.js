@@ -2758,8 +2758,9 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         errorText.includes('master') ||
         errorText.includes('could not find');
 
-      // A no-op is not proof of a duplicate, so it cannot trigger Alter/Delete.
-      const isSilentDuplicate = false;
+      // A silent zero (CREATED=0, ALTERED=0, EXCEPTIONS=0) means the voucher already
+      // exists in Tally — safe to retry as Alter to update it with new values.
+      const isSilentDuplicate = result.ok && result.created === 0 && result.altered === 0 && result.exceptions === 0;
 
       // Only retry as Alter when:
       //   a) Silent zero (voucher already exists in Tally — no error, just not created)
