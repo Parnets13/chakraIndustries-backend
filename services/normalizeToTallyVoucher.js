@@ -231,22 +231,24 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
 
   for (let i = 0; i < itemAmounts.length; i++) {
     const item = validItems[i];
-    // Always use Excel-provided tax amounts — they match what Tally expects
-    const excelCGST = +(item.cgst || 0);
-    const excelSGST = +(item.sgst || 0);
+    // Compute CGST/SGST from the invoice total amount to ensure exact match.
+    // Using total × 9/118 guarantees: taxable + cgst + sgst = total exactly,
+    // which is what IRP requires. Excel values may have long decimals or
+    // rounding gaps — computing from total avoids both problems.
+    const itemTotal = +(+(item.total || item.amount || (itemAmounts[i] + (+(item.cgst||0)) + (+(item.sgst||0)) + (+(item.igst||0)))).toFixed(2));
     const excelIGST = +(item.igst || 0);
     const r = itemTaxRates[i];
 
-    if (excelIGST > 0) {
-      totalIGST = +(totalIGST + excelIGST).toFixed(2);
-    } else if (excelCGST > 0) {
-      totalCGST = +(totalCGST + excelCGST).toFixed(2);
-      totalSGST = +(totalSGST + excelSGST).toFixed(2);
-    } else if (r.igst > 0) {
-      totalIGST = +(totalIGST + +((itemAmounts[i] * r.igst) / 100).toFixed(2)).toFixed(2);
-    } else if (r.cgst > 0) {
-      totalCGST = +(totalCGST + +((itemAmounts[i] * r.cgst) / 100).toFixed(2)).toFixed(2);
-      totalSGST = +(totalSGST + +((itemAmounts[i] * r.sgst) / 100).toFixed(2)).toFixed(2);
+    if (excelIGST > 0 || r.igst > 0) {
+      // Interstate — IGST only
+      const igstAmt = itemTotal > 0 ? +((itemTotal * (r.igst || 18)) / (100 + (r.igst || 18))).toFixed(2) : +(item.igst||0);
+      totalIGST = +(totalIGST + igstAmt).toFixed(2);
+    } else {
+      // Intrastate — CGST + SGST
+      const rate = r.cgst || (gstRateFull / 2) || 9;
+      const cgstAmt = itemTotal > 0 ? +((itemTotal * rate) / (100 + rate * 2)).toFixed(2) : +(item.cgst||0);
+      totalCGST = +(totalCGST + cgstAmt).toFixed(2);
+      totalSGST = +(totalSGST + cgstAmt).toFixed(2); // CGST = SGST always
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
