@@ -251,6 +251,9 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
+  // If CGST and SGST differ by exactly 1 paisa due to rounding, align SGST to CGST.
+  // GST portal requires CGST = SGST for intra-state transactions.
+  if (Math.abs(totalCGST - totalSGST) === 0.01) totalSGST = totalCGST;
   const totalTax  = +(totalCGST + totalSGST + totalIGST).toFixed(2);
   const computedGrandTotal = +(salesBase + totalTax).toFixed(2);
 
