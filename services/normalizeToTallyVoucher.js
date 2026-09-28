@@ -231,11 +231,10 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
 
   for (let i = 0; i < itemAmounts.length; i++) {
     const item = validItems[i];
-    // Always use Excel-provided tax amounts — round to 2dp so long decimals
-    // from Excel formulas (e.g. 4122÷1.18×0.09) never reach the GST portal.
-    const excelCGST = +( +(item.cgst || 0) ).toFixed(2);
-    const excelSGST = +( +(item.sgst || 0) ).toFixed(2);
-    const excelIGST = +( +(item.igst || 0) ).toFixed(2);
+    // Always use Excel-provided tax amounts — they match what Tally expects
+    const excelCGST = +(item.cgst || 0);
+    const excelSGST = +(item.sgst || 0);
+    const excelIGST = +(item.igst || 0);
     const r = itemTaxRates[i];
 
     if (excelIGST > 0) {
@@ -251,9 +250,6 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
-  // If CGST and SGST differ by exactly 1 paisa due to rounding, align SGST to CGST.
-  // GST portal requires CGST = SGST for intra-state transactions.
-  if (Math.abs(totalCGST - totalSGST) === 0.01) totalSGST = totalCGST;
   const totalTax  = +(totalCGST + totalSGST + totalIGST).toFixed(2);
   const computedGrandTotal = +(salesBase + totalTax).toFixed(2);
 
