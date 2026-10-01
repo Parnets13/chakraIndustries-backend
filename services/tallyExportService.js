@@ -1653,8 +1653,16 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     if (state && !lines.some(line => line.toLowerCase().includes(state.toLowerCase()))) {
       lines.push(state);
     }
+    // IRP requires each address line to be 3–100 characters. Pad short lines and
+    // truncate long ones so the e-invoice portal does not reject on address length.
+    const fixed = lines.map(line => {
+      let l = line.trim();
+      if (l.length > 100) l = l.slice(0, 100).trim();
+      if (l.length > 0 && l.length < 3) l = (l + '  ').slice(0, 3); // pad to 3 chars
+      return l;
+    }).filter(Boolean);
     // Pincode goes into <PARTYPINCODE> / <CONSIGNEEPINCODE> tags — NOT in address lines.
-    return lines;
+    return fixed;
   };
 
   const billToName = (v.billToName || v.partyLedgerName || '').trim();
