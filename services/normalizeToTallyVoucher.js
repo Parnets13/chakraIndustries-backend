@@ -231,29 +231,23 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
 
   for (let i = 0; i < itemAmounts.length; i++) {
     const item = validItems[i];
-    const excelCGST = +(item.cgst || 0);
-    const excelSGST = +(item.sgst || 0);
     const excelIGST = +(item.igst || 0);
     const r = itemTaxRates[i];
-    const base = itemAmounts[i];  // original taxable value from Excel
+    const base = itemAmounts[i];  // taxable value — kept as-is (Tally's assessable value)
     const isInter = excelIGST > 0 || r.igst > 0;
-    // Item total (inclusive) = taxable + its own taxes. Used to derive tax so that
-    // taxable + cgst + sgst = total EXACTLY (no 1-paisa rounding gap -> IRP accepts).
-    const itemTotal = +(base + excelCGST + excelSGST + excelIGST).toFixed(2);
 
     if (isInter) {
       const igstRate = r.igst || 18;
-      // IGST from inclusive total: total × rate / (100 + rate)
-      const igstAmt = itemTotal > 0 ? +((itemTotal * igstRate) / (100 + igstRate)).toFixed(2) : excelIGST;
+      // IGST = round(taxable × rate) — EXACTLY what Tally computes as "Expected Tax Amount".
+      // This makes Expected == Modified (0 difference) so IRP never flags a tax mismatch.
+      const igstAmt = base > 0 ? +((base * igstRate) / 100).toFixed(2) : excelIGST;
       totalIGST = +(totalIGST + igstAmt).toFixed(2);
-      itemAmounts[i] = +(itemTotal - igstAmt).toFixed(2); // adjust taxable so sum == total
     } else {
       const halfRate = r.cgst || (gstRateFull / 2) || 9;
-      // CGST=SGST from inclusive total: total × rate / (100 + 2×rate)
-      const cgstAmt = itemTotal > 0 ? +((itemTotal * halfRate) / (100 + halfRate * 2)).toFixed(2) : excelCGST;
+      // CGST = SGST = round(taxable × halfRate) — matches Tally's "Expected Tax Amount" exactly.
+      const cgstAmt = base > 0 ? +((base * halfRate) / 100).toFixed(2) : (+(item.cgst || 0));
       totalCGST = +(totalCGST + cgstAmt).toFixed(2);
       totalSGST = +(totalSGST + cgstAmt).toFixed(2);
-      itemAmounts[i] = +(itemTotal - cgstAmt - cgstAmt).toFixed(2); // adjust taxable so sum == total
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
