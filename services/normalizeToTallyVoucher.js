@@ -231,22 +231,25 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
 
   for (let i = 0; i < itemAmounts.length; i++) {
     const item = validItems[i];
-    // Always use Excel-provided tax amounts — they match what Tally expects
     const excelCGST = +(item.cgst || 0);
     const excelSGST = +(item.sgst || 0);
     const excelIGST = +(item.igst || 0);
     const r = itemTaxRates[i];
+    const base = itemAmounts[i];  // taxable value (what Tally uses in "As per Calculation")
+    const isInter = excelIGST > 0 || r.igst > 0;
 
-    if (excelIGST > 0) {
-      totalIGST = +(totalIGST + excelIGST).toFixed(2);
-    } else if (excelCGST > 0) {
-      totalCGST = +(totalCGST + excelCGST).toFixed(2);
-      totalSGST = +(totalSGST + excelSGST).toFixed(2);
-    } else if (r.igst > 0) {
-      totalIGST = +(totalIGST + +((itemAmounts[i] * r.igst) / 100).toFixed(2)).toFixed(2);
-    } else if (r.cgst > 0) {
-      totalCGST = +(totalCGST + +((itemAmounts[i] * r.cgst) / 100).toFixed(2)).toFixed(2);
-      totalSGST = +(totalSGST + +((itemAmounts[i] * r.sgst) / 100).toFixed(2)).toFixed(2);
+    if (isInter) {
+      // IGST = taxable × igstRate — computed from base so it matches Tally's "As per Calculation"
+      const igstRate = r.igst || 18;
+      const igstAmt = base > 0 ? +((base * igstRate) / 100).toFixed(2) : excelIGST;
+      totalIGST = +(totalIGST + igstAmt).toFixed(2);
+    } else {
+      // CGST/SGST = taxable × halfRate each — computed from base (NOT from Excel) so the
+      // sum matches Tally's "As per Calculation" exactly (no 1-2 paisa IRP mismatch).
+      const halfRate = r.cgst || (gstRateFull / 2) || 9;
+      const cgstAmt = base > 0 ? +((base * halfRate) / 100).toFixed(2) : excelCGST;
+      totalCGST = +(totalCGST + cgstAmt).toFixed(2);
+      totalSGST = +(totalSGST + cgstAmt).toFixed(2);  // SGST = CGST
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
