@@ -229,26 +229,49 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     };
   });
 
+  // ── Tax totals computed PER RATE-GROUP, exactly as Tally's e-invoice engine does ──
+  //
+  // CRITICAL (fixes "SGST and CGST amount passed does not match with taxable value
+  // and tax rate" rejection): Tally's IRP validation groups all lines by tax rate and
+  // checks, for each rate group:
+  //     ROUND( sum(taxable value of that group) × rate / 100 , 2 )  ==  passed tax amount
+  //
+  // Previously we rounded EACH item's tax independently and summed those — that sum
+  // diverges from Tally's single group-level ROUND(groupBase × rate) by one or more
+  // paise on multi-line invoices, so IRP rejected them. Single-line invoices happened
+  // to match (one line = one group, one rounding), which is why "one by one" worked.
+  //
+  // Here we bucket item taxable values by their snapped rate, then round ONCE per group.
+  // The resulting totals are byte-for-byte what Tally expects → no mismatch.
+  const cgstGroups = new Map();  // halfRate% → summed taxable base (intrastate)
+  const igstGroups = new Map();  // fullRate% → summed taxable base (interstate)
+
   for (let i = 0; i < itemAmounts.length; i++) {
     const item = validItems[i];
     const excelIGST = +(item.igst || 0);
     const r = itemTaxRates[i];
     const base = itemAmounts[i];  // taxable value — kept as-is (Tally's assessable value)
+    if (base <= 0) continue;
     const isInter = excelIGST > 0 || r.igst > 0;
 
     if (isInter) {
       const igstRate = r.igst || 18;
-      // IGST = round(taxable × rate) — EXACTLY what Tally computes as "Expected Tax Amount".
-      // This makes Expected == Modified (0 difference) so IRP never flags a tax mismatch.
-      const igstAmt = base > 0 ? +((base * igstRate) / 100).toFixed(2) : excelIGST;
-      totalIGST = +(totalIGST + igstAmt).toFixed(2);
+      igstGroups.set(igstRate, +((igstGroups.get(igstRate) || 0) + base).toFixed(2));
     } else {
       const halfRate = r.cgst || (gstRateFull / 2) || 9;
-      // CGST = SGST = round(taxable × halfRate) — matches Tally's "Expected Tax Amount" exactly.
-      const cgstAmt = base > 0 ? +((base * halfRate) / 100).toFixed(2) : (+(item.cgst || 0));
-      totalCGST = +(totalCGST + cgstAmt).toFixed(2);
-      totalSGST = +(totalSGST + cgstAmt).toFixed(2);
+      cgstGroups.set(halfRate, +((cgstGroups.get(halfRate) || 0) + base).toFixed(2));
     }
+  }
+
+  // Round ONCE per rate group — this is the value Tally independently recomputes.
+  for (const [halfRate, groupBase] of cgstGroups) {
+    const amt = +((groupBase * halfRate) / 100).toFixed(2);
+    totalCGST = +(totalCGST + amt).toFixed(2);
+    totalSGST = +(totalSGST + amt).toFixed(2);
+  }
+  for (const [igstRate, groupBase] of igstGroups) {
+    const amt = +((groupBase * igstRate) / 100).toFixed(2);
+    totalIGST = +(totalIGST + amt).toFixed(2);
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
   const totalTax  = +(totalCGST + totalSGST + totalIGST).toFixed(2);
