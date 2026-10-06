@@ -250,26 +250,33 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     const item = validItems[i];
     const excelIGST = +(item.igst || 0);
     const r = itemTaxRates[i];
-    const base = itemAmounts[i];  // taxable value — kept as-is (Tally's assessable value)
+    const base = itemAmounts[i];  // taxable value — already rounded to 2dp
     if (base <= 0) continue;
     const isInter = excelIGST > 0 || r.igst > 0;
 
     if (isInter) {
       const igstRate = r.igst || 18;
-      igstGroups.set(igstRate, +((igstGroups.get(igstRate) || 0) + base).toFixed(2));
+      // Accumulate WITHOUT intermediate rounding — round only once at the end
+      igstGroups.set(igstRate, (igstGroups.get(igstRate) || 0) + base);
     } else {
       const halfRate = r.cgst || (gstRateFull / 2) || 9;
-      cgstGroups.set(halfRate, +((cgstGroups.get(halfRate) || 0) + base).toFixed(2));
+      // Accumulate WITHOUT intermediate rounding — round only once at the end
+      cgstGroups.set(halfRate, (cgstGroups.get(halfRate) || 0) + base);
     }
   }
 
-  // Round ONCE per rate group — this is the value Tally independently recomputes.
-  for (const [halfRate, groupBase] of cgstGroups) {
+  // Round ONCE per rate group — this is the value IRP independently recomputes.
+  // groupBase is the raw sum (no intermediate rounding). We round the BASE first
+  // to 2dp (Tally's assessable value), THEN compute tax from that rounded base.
+  // This matches IRP's algorithm: ROUND(SUM(taxable values), 2) × rate / 100, rounded to 2dp.
+  for (const [halfRate, rawGroupBase] of cgstGroups) {
+    const groupBase = +(rawGroupBase.toFixed(2));
     const amt = +((groupBase * halfRate) / 100).toFixed(2);
     totalCGST = +(totalCGST + amt).toFixed(2);
     totalSGST = +(totalSGST + amt).toFixed(2);
   }
-  for (const [igstRate, groupBase] of igstGroups) {
+  for (const [igstRate, rawGroupBase] of igstGroups) {
+    const groupBase = +(rawGroupBase.toFixed(2));
     const amt = +((groupBase * igstRate) / 100).toFixed(2);
     totalIGST = +(totalIGST + amt).toFixed(2);
   }
