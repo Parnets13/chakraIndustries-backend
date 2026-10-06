@@ -1775,6 +1775,19 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const billToStateForSupply = (v.billToState || v.partyState || cfg.state || '').trim();
   const placeOfSupply = billToStateForSupply;
   const companyGstIn = (cfg.gstin || '').trim();
+
+  // ── Consignee state for GST (CONSIGNEESTATENAME) ──────────────────────────
+  // When the voucher is INTRASTATE (CGST+SGST, no IGST), the consignee's GST
+  // state MUST equal the Place of Supply (Bill To state). If we send a different
+  // ship-to state here, Tally treats the consignee as interstate and rejects the
+  // CGST/SGST voucher with EXCEPTIONS (no diagnostic). The ship-to NAME, CITY,
+  // ADDRESS and PINCODE are still sent as-is for the delivery label — only the
+  // GST STATE is aligned to the Place of Supply. For true interstate vouchers
+  // (IGST present) we keep the real ship-to state.
+  const voucherIsIntrastate = !(+(v._totalIGST || 0) > 0);
+  const consigneeStateName = voucherIsIntrastate && placeOfSupply
+    ? placeOfSupply
+    : resolvedShipToState;
   const companyState = (cfg.state || '').trim();
   const companyRegLabel = `${companyState} Registration`;
 
@@ -1864,7 +1877,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>` : ''}
   <CONSIGNEEGSTIN>${esc(shipToGST || '.')}</CONSIGNEEGSTIN>
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
-  ${resolvedShipToState ? `<CONSIGNEESTATENAME>${esc(resolvedShipToState)}</CONSIGNEESTATENAME>` : ''}
+  ${consigneeStateName ? `<CONSIGNEESTATENAME>${esc(consigneeStateName)}</CONSIGNEESTATENAME>` : ''}
   ${consigneePlace ? `<CONSIGNEEPLACE>${esc(consigneePlace)}</CONSIGNEEPLACE>` : ''}
   ${consigneePlace ? `<SHIPTOPLACE>${esc(consigneePlace)}</SHIPTOPLACE>` : ''}
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
