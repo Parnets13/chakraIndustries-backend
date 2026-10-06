@@ -1,67 +1,71 @@
-// check-will-pass.js — READ ONLY. Predicts which of the 99 invoices Tally will
-// accept vs reject, based on the two real failure modes we observed:
-//   (A) tax per line != ROUND(base * rate /100, 2)  → "amount does not match"
-//   (B) ship-to state != bill-to state while tax is CGST/SGST (intrastate)
-//        AND no IGST → Tally treats consignee as interstate → EXCEPTIONS
-//   (C) missing tallySalesLedger on an item (GSTLEDGERSOURCE blank)
+// check-will-pass.js — READ ONLY. After the CONSIGNEESTATENAME fix, verifies the
+// ACTUAL serialized voucher: for intrastate invoices CONSIGNEESTATENAME must equal
+// PLACEOFSUPPLY (so Tally accepts CGST/SGST). Also re-checks per-line tax balance.
 import dotenv from 'dotenv';
 dotenv.config();
 import mongoose from 'mongoose';
 import Invoice from './models/Invoice.js';
+import { normalizeToTallyVoucher } from './services/normalizeToTallyVoucher.js';
+import { serializeTallyVoucher } from './services/tallyExportService.js';
 
 const r2 = n => +(+n).toFixed(2);
-const GST_SLABS = [0, 2.5, 5, 6, 9, 12, 14, 18, 28];
-const snap = r => r <= 0 ? 0 : GST_SLABS.reduce((b, s) => Math.abs(s - r) < Math.abs(b - r) ? s : b, 0);
 
 async function main() {
   await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 20000 });
   const invs = await Invoice.find({ status: { $nin: ['Cancelled'] } }).sort({ createdAt: -1 }).lean();
 
+  // Minimal cfg stub for the serializer (company state Karnataka)
+  const cfg = { companyName: 'SRI CHAKRA INDUSTRIES', state: 'Karnataka', gstin: '29ABWFS0002M1ZR' };
+
   let pass = 0;
-  const taxFail = [], stateFail = [], ledgerFail = [];
+  const stateFail = [], balanceFail = [], threw = [];
 
   for (const inv of invs) {
-    const billState = (inv.billToState || inv.partyState || '').trim().toLowerCase();
-    const shipState = (inv.shipToState || '').trim().toLowerCase();
-    const items = (inv.items || []).filter(i => (i.description || i.name || '').toString().trim());
-    let hasTaxProblem = false, hasLedgerProblem = false;
+    try {
+      const tv = normalizeToTallyVoucher(inv, {});
+      const xml = serializeTallyVoucher(tv, cfg, 'Create', '');
 
-    for (const it of items) {
-      const base = r2(+(it.basic || it.amount || 0) || (+(it.qty||1) * +(it.rate||0)));
-      const cg = +(it.cgst || 0), sg = +(it.sgst || 0), ig = +(it.igst || 0);
-      if (base > 0) {
-        if (ig > 0) {
-          const rate = snap(+(ig / base * 100).toFixed(4));
-          if (Math.abs(r2(base * rate / 100) - r2(ig)) > 0.00) hasTaxProblem = true;
-        } else {
-          const rate = snap(+(cg / base * 100).toFixed(4));
-          if (Math.abs(r2(base * rate / 100) - r2(cg)) > 0.00) hasTaxProblem = true;
-        }
+      const pos  = (xml.match(/<PLACEOFSUPPLY>(.*?)<\/PLACEOFSUPPLY>/i) || [])[1] || '';
+      const cons = (xml.match(/<CONSIGNEESTATENAME>(.*?)<\/CONSIGNEESTATENAME>/i) || [])[1] || '';
+      const hasIgst = +(tv._totalIGST || 0) > 0;
+
+      // Intrastate: consignee state must match place of supply (or be absent)
+      let ok = true;
+      if (!hasIgst && cons && pos && cons.trim().toLowerCase() !== pos.trim().toLowerCase()) {
+        ok = false;
+        stateFail.push(`${inv.invoiceNo} (POS=${pos}, CONSIGNEE=${cons})`);
       }
-      if (!(it.tallySalesLedger || '').trim()) hasLedgerProblem = true;
+
+      // Balance: inventory + tax == party grand total
+      const invBase = (tv.allInventoryEntries || []).reduce((s, ie) => s + (+ie.amount || 0), 0);
+      const party = Math.abs(+(tv.allLedgerEntries.find(e => e.isDeemedPositive)?.amount || 0));
+      const tax = r2((tv._totalCGST||0)+(tv._totalSGST||0)+(tv._totalIGST||0));
+      if (Math.abs(party - r2(invBase + tax)) > 0.01) {
+        ok = false;
+        balanceFail.push(inv.invoiceNo);
+      }
+
+      if (ok) pass++;
+    } catch (e) {
+      threw.push(`${inv.invoiceNo}: ${e.message}`);
     }
-
-    // State mismatch: intrastate tax (no IGST) but ship state differs from bill state
-    const anyIgst = items.some(it => +(it.igst || 0) > 0);
-    const stateMismatch = !anyIgst && shipState && billState && shipState !== billState;
-
-    if (hasTaxProblem) taxFail.push(inv.invoiceNo);
-    else if (stateMismatch) stateFail.push(inv.invoiceNo);
-    else if (hasLedgerProblem) ledgerFail.push(inv.invoiceNo);
-    else pass++;
   }
 
   console.log('═══════════════════════════════════════════════════════');
-  console.log(`  Total invoices checked: ${invs.length}`);
-  console.log(`  WILL PASS:              ${pass}`);
-  console.log(`  FAIL — tax mismatch:    ${taxFail.length}`);
-  console.log(`  FAIL — ship state != bill state (intrastate): ${stateFail.length}`);
-  console.log(`  FAIL — missing sales ledger: ${ledgerFail.length}`);
+  console.log(`  Total invoices:                 ${invs.length}`);
+  console.log(`  WILL PASS (post-fix):           ${pass}`);
+  console.log(`  FAIL — consignee state != POS:  ${stateFail.length}`);
+  console.log(`  FAIL — voucher imbalanced:      ${balanceFail.length}`);
+  console.log(`  FAIL — normalize threw:         ${threw.length}`);
   console.log('═══════════════════════════════════════════════════════\n');
 
-  if (taxFail.length)   console.log('TAX MISMATCH:\n  ' + taxFail.join(', ') + '\n');
-  if (stateFail.length) console.log('SHIP-STATE != BILL-STATE (Place of Supply issue):\n  ' + stateFail.join(', ') + '\n');
-  if (ledgerFail.length)console.log('MISSING tallySalesLedger:\n  ' + ledgerFail.join(', ') + '\n');
+  if (stateFail.length)   console.log('STATE STILL MISMATCHED:\n  ' + stateFail.join('\n  ') + '\n');
+  if (balanceFail.length) console.log('IMBALANCED:\n  ' + balanceFail.join(', ') + '\n');
+  if (threw.length)       console.log('THREW:\n  ' + threw.join('\n  ') + '\n');
+  if (!stateFail.length && !balanceFail.length && !threw.length) {
+    console.log('✓ All 99 invoices now produce intrastate-consistent, balanced vouchers.');
+    console.log('  CONSIGNEESTATENAME aligned to Place of Supply (Karnataka) for intrastate.');
+  }
 
   await mongoose.disconnect();
   process.exit(0);

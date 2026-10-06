@@ -1481,7 +1481,18 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     // "As per Transaction", leaving it blank and triggering the tax mismatch warning.
     // Emit only when a real sales ledger name is known (not empty / generic fallback).
     const GENERIC_LEDGER_NAMES = new Set(['', 'sales', 'sales accounts']);
-    const hasRealLedger = gstLedgerSrc && !GENERIC_LEDGER_NAMES.has(gstLedgerSrc.toLowerCase());
+    // ── GSTLEDGERSOURCE SUPPRESSED ───────────────────────────────────────────
+    // We DO NOT emit GSTLEDGERSOURCE/HSNLEDGERSOURCE anymore. When a specific
+    // sales ledger (e.g. "Air Fryer Sales Local") is pointed to as GSTLEDGERSOURCE
+    // but that ledger has NO GST rate configured in Tally, Tally's Tax Analysis
+    // fails and the whole voucher is rejected with EXCEPTIONS=10 (no diagnostic).
+    // The invoices that succeeded had GSTLEDGERSOURCE empty, so Tally used the
+    // STOCK ITEM's own GST rate (which IS configured by the auto-masters step).
+    // Forcing hasRealLedger=false makes EVERY invoice behave like the ones that
+    // passed: GST rate comes from the stock item master, HSN still comes from the
+    // separate GSTHSNNAME tag. Accounting still posts to the specific sales ledger
+    // via ACCOUNTINGALLOCATIONS (unchanged) — only the GST-rate SOURCE changes.
+    const hasRealLedger = false;
     const gstSourceXml = hasRealLedger
       ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
     <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>`
