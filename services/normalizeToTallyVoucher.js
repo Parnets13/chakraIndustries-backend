@@ -229,24 +229,41 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     };
   });
 
+  // ── Tax totals: round on the FULL rate once, then split CGST/SGST ────────────
+  //
+  // ROOT CAUSE of "Mismatch between Expected Tax Amount and Modified Tax Amount":
+  // Tally computes Expected Tax as a SINGLE round on the FULL GST rate:
+  //     Expected = ROUND(taxable × fullRate/100, 2)      e.g. 7457.63 × 18% = 1342.37
+  // If we instead round CGST and SGST SEPARATELY and add them, we get a different paisa:
+  //     ROUND(7457.63 × 9%) × 2 = 671.19 × 2 = 1342.38   → 0.01 mismatch → reject.
+  //
+  // Fix: compute the full-rate tax with ONE round (= Tally's Expected), then split it
+  // into CGST/SGST so that CGST + SGST == that single rounded number EXACTLY.
+  //     full = ROUND(base × fullRate, 2)
+  //     CGST = ROUND(full / 2, 2);  SGST = full − CGST   (SGST absorbs the odd paisa)
+  // This makes Modified == Expected for every line, so the e-invoice validates.
   for (let i = 0; i < itemAmounts.length; i++) {
     const item = validItems[i];
-    // Always use Excel-provided tax amounts — they match what Tally expects
-    const excelCGST = +(item.cgst || 0);
-    const excelSGST = +(item.sgst || 0);
-    const excelIGST = +(item.igst || 0);
+    const base = itemAmounts[i];
+    if (base <= 0) continue;
     const r = itemTaxRates[i];
+    const excelIGST = +(item.igst || 0);
+    const isInter = excelIGST > 0 || r.igst > 0;
 
-    if (excelIGST > 0) {
-      totalIGST = +(totalIGST + excelIGST).toFixed(2);
-    } else if (excelCGST > 0) {
-      totalCGST = +(totalCGST + excelCGST).toFixed(2);
-      totalSGST = +(totalSGST + excelSGST).toFixed(2);
-    } else if (r.igst > 0) {
-      totalIGST = +(totalIGST + +((itemAmounts[i] * r.igst) / 100).toFixed(2)).toFixed(2);
-    } else if (r.cgst > 0) {
-      totalCGST = +(totalCGST + +((itemAmounts[i] * r.cgst) / 100).toFixed(2)).toFixed(2);
-      totalSGST = +(totalSGST + +((itemAmounts[i] * r.sgst) / 100).toFixed(2)).toFixed(2);
+    if (isInter) {
+      const igstRate = r.igst || snapToSlab(+((excelIGST / base) * 100).toFixed(4)) || 18;
+      const fullIGST = +((base * igstRate) / 100).toFixed(2);   // single round = Expected
+      totalIGST = +(totalIGST + fullIGST).toFixed(2);
+    } else {
+      // Intrastate: round the FULL rate once (CGST rate + SGST rate), then split.
+      const fullRate = (r.cgst || 0) + (r.sgst || 0) || gstRateFull;
+      if (fullRate > 0) {
+        const fullTax = +((base * fullRate) / 100).toFixed(2);  // = Tally Expected
+        const cgst = +(fullTax / 2).toFixed(2);
+        const sgst = +(fullTax - cgst).toFixed(2);              // CGST+SGST == fullTax exactly
+        totalCGST = +(totalCGST + cgst).toFixed(2);
+        totalSGST = +(totalSGST + sgst).toFixed(2);
+      }
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
