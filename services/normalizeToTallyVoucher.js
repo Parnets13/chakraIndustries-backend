@@ -229,25 +229,13 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     };
   });
 
-  // ── Tax totals: USE EXCEL VALUES DIRECTLY (restores Sept-3 working behaviour) ──
-  //
-  // IMPORTANT: Up to Sept-7 this code passed the e-invoice/IRP consistently because
-  // it sent the EXACT CGST/SGST/IGST amounts from the source Excel. Later "fixes"
-  // changed it to RECOMPUTE tax as base × rate, which produced values differing from
-  // the Excel amounts by a paisa — and the IRP rejected every line with
-  // "SGST and CGST amount passed does not match with taxable value and tax rate".
-  //
-  // Restored logic: when the Excel row carries the tax amount, use it as-is. Only
-  // fall back to base × rate when the Excel row has no tax amount at all.
   for (let i = 0; i < itemAmounts.length; i++) {
     const item = validItems[i];
-    const base = itemAmounts[i];
-    if (base <= 0) continue;
-    const r = itemTaxRates[i];
-    // Always use Excel-provided tax amounts — they match what Tally/IRP expects
+    // Always use Excel-provided tax amounts — they match what Tally expects
     const excelCGST = +(item.cgst || 0);
     const excelSGST = +(item.sgst || 0);
     const excelIGST = +(item.igst || 0);
+    const r = itemTaxRates[i];
 
     if (excelIGST > 0) {
       totalIGST = +(totalIGST + excelIGST).toFixed(2);
@@ -255,11 +243,10 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
       totalCGST = +(totalCGST + excelCGST).toFixed(2);
       totalSGST = +(totalSGST + excelSGST).toFixed(2);
     } else if (r.igst > 0) {
-      // Fallback only when Excel has no tax amount
-      totalIGST = +(totalIGST + +((base * r.igst) / 100).toFixed(2)).toFixed(2);
+      totalIGST = +(totalIGST + +((itemAmounts[i] * r.igst) / 100).toFixed(2)).toFixed(2);
     } else if (r.cgst > 0) {
-      totalCGST = +(totalCGST + +((base * r.cgst) / 100).toFixed(2)).toFixed(2);
-      totalSGST = +(totalSGST + +((base * r.sgst) / 100).toFixed(2)).toFixed(2);
+      totalCGST = +(totalCGST + +((itemAmounts[i] * r.cgst) / 100).toFixed(2)).toFixed(2);
+      totalSGST = +(totalSGST + +((itemAmounts[i] * r.sgst) / 100).toFixed(2)).toFixed(2);
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
@@ -334,23 +321,16 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     // this before reaching here.
     const rawLedger = (item.tallySalesLedger || '').toString().trim();
     const GENERIC_LEDGERS = new Set(['', 'sales', 'sales accounts', 'sales accounts (group)']);
-    const hasSpecificLedger = rawLedger && !GENERIC_LEDGERS.has(rawLedger.toLowerCase());
-    // ── CRITICAL: only use a specific sales ledger in ACCOUNTINGALLOCATIONS ──
-    // Using the generic "Sales" ledger (no GST rate configured) as GSTLEDGERSOURCE
-    // causes Tally to find no GST rate on the ledger master → Tax Analysis blank
-    // → EXCEPTIONS=10 on every invoice. If no specific ledger is available,
-    // fall back to "Sales" ONLY in ACCOUNTINGALLOCATIONS (for the accounting entry)
-    // but suppress GSTLEDGERSOURCE (set to empty) so Tally uses the stock item's
-    // own GST rate instead — which IS configured correctly by the auto-masters step.
-    const salesLedger = hasSpecificLedger ? rawLedger : 'Sales';
+    const salesLedger = (rawLedger && !GENERIC_LEDGERS.has(rawLedger.toLowerCase()))
+      ? rawLedger
+      : 'Sales';
 
     // ── GSTLEDGERSOURCE = sales ledger for this item ─────────────────────────
-    // Only set GSTLEDGERSOURCE when we have a SPECIFIC sales ledger (one that has
-    // GST rate configured in Tally). When using the generic "Sales" fallback,
-    // leave gstLedgerSource empty — Tally will then read the GST rate from the
-    // stock item master (set by the auto-masters step), which is correct.
-    // Setting GSTLEDGERSOURCE to "Sales" (no GST rate) causes EXCEPTIONS=10.
-    const gstLedgerSource = hasSpecificLedger ? rawLedger : '';
+    // Per REVTEST01.xml + BIW20_test_fixed.xml (both confirmed working e-invoices):
+    // GSTSOURCETYPE=Ledger and GSTLEDGERSOURCE=<sales ledger name> must be present.
+    // Without it Tally's Tax Analysis shows Tax Rate = blank and "As per Transaction = 0".
+    // HSNLEDGERSOURCE also uses the same ledger — Tally reads HSN from the ledger master.
+    const gstLedgerSource = salesLedger;  // same as accountingAllocations ledger name
 
     // ── RATEDETAILS: explicit CGST/SGST/IGST rates for this item ────────────
     // Per BIW20_EXACT_COPY.xml lines 293-315, RATEDETAILS.LIST inside

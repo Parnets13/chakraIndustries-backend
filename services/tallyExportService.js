@@ -22,7 +22,7 @@ import { normalizeToTallyVoucher, tallyUnitSymbol } from './normalizeToTallyVouc
 
 const LOG = (...a) => console.log('[TallyExport]', ...a);
 const ERR = (...a) => console.error('[TallyExport ERROR]', ...a);
-const MAX_RETRIES = 10; // enough retries to survive transient Tally offline/mismatch errors
+const MAX_RETRIES = 4; // allow one more retry attempt for pending invoices
 
 // ─── CONFIG HELPERS ───────────────────────────────────────────────────────────
 
@@ -251,24 +251,6 @@ ${innerXml}
   </REQUESTDATA>
 </IMPORTDATA></BODY>
 </ENVELOPE>`;
-}
-
-// ── DIAGNOSTIC: send a SINGLE voucher and capture Tally's full raw response ──
-// Tally hides errors in multi-voucher batch imports (EXCEPTIONS=N, no LINEERROR).
-// When we send ONE voucher at a time with SVSHOWERRORLIST=Yes, Tally is far more
-// likely to return the actual LINEERROR/LASTERROR text describing WHY it failed.
-// This is called once (first failing voucher) to surface the real reason in logs.
-async function diagnoseSingleVoucher(cfg, singleVoucherXml, label) {
-  try {
-    ERR(`${label} DIAGNOSE: sending ONE voucher alone to force Tally's real error message...`);
-    const envelope = importEnvelope(cfg, 'Vouchers', singleVoucherXml);
-    const body = await postXml(cfg, envelope, 60000);
-    ERR(`${label} DIAGNOSE RAW RESPONSE (full):\n${String(body || '(empty)')}`);
-    // parseResponse logs every diagnostic tag it can find
-    parseResponse(body, `${label} DIAGNOSE`);
-  } catch (e) {
-    ERR(`${label} DIAGNOSE failed: ${e.message}`);
-  }
 }
 
 async function sendImportWithFallbackDebug(cfg, reportName, innerXml, label, timeoutMs = 40000) {
@@ -1260,21 +1242,6 @@ function resolveSalesLedger(salesLedgers, itemName, itemGSTRate, tallySalesLedge
   // Build keywords from item name (split by space, take meaningful words)
   const itemWords = (itemName || '').toLowerCase().split(/\s+/).filter(w => w.length > 2);
 
-  // ── RATE SAFETY GUARD ───────────────────────────────────────────────────────
-  // A ledger whose name states a GST rate (e.g. "... Local 5%") must NOT be used
-  // for an item of a different rate. Using a 5% sales ledger for an 18% item makes
-  // Tally reject the whole batch with EXCEPTIONS and no diagnostic (rate mismatch).
-  // This returns false when the ledger name declares a rate that conflicts with the
-  // item's actual GST rate. Ledgers with no rate in the name are considered safe.
-  const rateConflicts = (low) => {
-    // Find a rate number in the ledger name, e.g. "5%", "12 %", "18%"
-    const m = low.match(/(\d+(?:\.\d+)?)\s*%/);
-    if (!m) return false;                    // no rate in name → no conflict
-    const ledgerRate = Math.round(parseFloat(m[1]));
-    if (!itemGSTRate || itemGSTRate <= 0) return false; // unknown item rate → don't block
-    return ledgerRate !== Math.round(itemGSTRate);
-  };
-
   // Priority 2: ledger contains item keyword AND gst rate
   for (const ledger of salesLedgers) {
     const low = ledger.toLowerCase();
@@ -1285,10 +1252,8 @@ function resolveSalesLedger(salesLedgers, itemName, itemGSTRate, tallySalesLedge
   }
 
   // Priority 3: ledger contains item keyword (no rate match)
-  // GUARD: skip ledgers whose stated rate conflicts with the item's GST rate.
   for (const ledger of salesLedgers) {
     const low = ledger.toLowerCase();
-    if (rateConflicts(low)) continue;
     const hasKeyword = itemWords.some(w => low.includes(w));
     const hasSupplyType = isInterstate ? low.includes('interstate') : (low.includes('local') || !low.includes('interstate'));
     if (hasKeyword && hasSupplyType) return ledger;
@@ -1300,11 +1265,8 @@ function resolveSalesLedger(salesLedgers, itemName, itemGSTRate, tallySalesLedge
     if (low.includes(gstStr + '%') || low.includes(gstStr)) return ledger;
   }
 
-  // Priority 5: first non-generic sales ledger — but never one whose stated rate
-  // conflicts with the item's GST rate (that guarantees a Tally rate-mismatch reject).
-  const nonGeneric = salesLedgers.find(l =>
-    l.toLowerCase() !== 'sales accounts' && !rateConflicts(l.toLowerCase())
-  );
+  // Priority 5: first non-generic sales ledger
+  const nonGeneric = salesLedgers.find(l => l.toLowerCase() !== 'sales accounts');
   if (nonGeneric) return nonGeneric;
 
   return 'Sales Accounts';
@@ -1481,18 +1443,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     // "As per Transaction", leaving it blank and triggering the tax mismatch warning.
     // Emit only when a real sales ledger name is known (not empty / generic fallback).
     const GENERIC_LEDGER_NAMES = new Set(['', 'sales', 'sales accounts']);
-    // ── GSTLEDGERSOURCE SUPPRESSED ───────────────────────────────────────────
-    // We DO NOT emit GSTLEDGERSOURCE/HSNLEDGERSOURCE anymore. When a specific
-    // sales ledger (e.g. "Air Fryer Sales Local") is pointed to as GSTLEDGERSOURCE
-    // but that ledger has NO GST rate configured in Tally, Tally's Tax Analysis
-    // fails and the whole voucher is rejected with EXCEPTIONS=10 (no diagnostic).
-    // The invoices that succeeded had GSTLEDGERSOURCE empty, so Tally used the
-    // STOCK ITEM's own GST rate (which IS configured by the auto-masters step).
-    // Forcing hasRealLedger=false makes EVERY invoice behave like the ones that
-    // passed: GST rate comes from the stock item master, HSN still comes from the
-    // separate GSTHSNNAME tag. Accounting still posts to the specific sales ledger
-    // via ACCOUNTINGALLOCATIONS (unchanged) — only the GST-rate SOURCE changes.
-    const hasRealLedger = false;
+    const hasRealLedger = gstLedgerSrc && !GENERIC_LEDGER_NAMES.has(gstLedgerSrc.toLowerCase());
     const gstSourceXml = hasRealLedger
       ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
     <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>`
@@ -1550,39 +1501,16 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     </RATEDETAILS.LIST>`;
     }).join('');
 
-    // Godown: prefer the VOUCHER-LEVEL resolved godown (v.godownName) which the
-    // export service sets to the ACTUAL Tally godown name fetched live from Tally.
-    // The batch.godownName baked into normalizeToTallyVoucher is a hardcoded
-    // "Srichakra Industries" placeholder — if the real Tally godown is named
-    // differently (or the company uses no godowns), that placeholder does NOT
-    // exist in Tally and every voucher fails with EXCEPTIONS and NO diagnostic
-    // (Tally rejects a non-existent godown before line-level validation runs).
-    // Priority: resolved voucher godown → item/batch → last-resort "Main Location".
+    // Godown: use item-level batchAllocations if present, else build from item/voucher fields
     const batch = item.batchAllocations?.[0];
+    const godownName = esc((batch?.godownName || item.godownName || v._godownName || 'Main Location').trim());
     // Add leading space to QTY fields to match known-good XML
     const formatQty = (qty) => qty ? ` ${qty.trim()}` : '';
-
-    // ── GODOWN HANDLING ───────────────────────────────────────────────────────
-    // CRITICAL: If the Tally company has NO godowns (inventory location feature
-    // is turned OFF — <GODOWN>0</GODOWN> in company info), then sending ANY
-    // <GODOWNNAME> causes the voucher to be rejected with EXCEPTIONS and no
-    // diagnostic — Tally rejects a non-existent godown before line validation.
-    // v._noGodowns is set true by the export service when the live godown fetch
-    // returns zero godowns. In that case, emit the batch allocation WITHOUT any
-    // GODOWNNAME/DESTINATIONGODOWNNAME — Tally accepts stock movement without a
-    // godown when the feature is off.
-    const noGodowns = v._noGodowns === true;
-    const godownName = esc((
-      v.godownName || v._godownName || item.godownName || batch?.godownName || 'Main Location'
-    ).trim());
-    const godownTags = noGodowns
-      ? ''  // godowns disabled in Tally — omit godown tags entirely
-      : `
-      <GODOWNNAME>${godownName}</GODOWNNAME>
-      <DESTINATIONGODOWNNAME>${godownName}</DESTINATIONGODOWNNAME>`;
     const batchAllocXml = `
-    <BATCHALLOCATIONS.LIST>${godownTags}
+    <BATCHALLOCATIONS.LIST>
+      <GODOWNNAME>${godownName}</GODOWNNAME>
       <BATCHNAME>${esc(batch?.batchName || 'Primary Batch')}</BATCHNAME>
+      <DESTINATIONGODOWNNAME>${godownName}</DESTINATIONGODOWNNAME>
       <INDENTNO>&#4; Not Applicable</INDENTNO>
       <ORDERNO>&#4; Not Applicable</ORDERNO>
       <TRACKINGNUMBER>&#4; Not Applicable</TRACKINGNUMBER>
@@ -1594,38 +1522,20 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
       <VOUCHERCOMPONENTLIST.LIST></VOUCHERCOMPONENTLIST.LIST>
     </BATCHALLOCATIONS.LIST>`;
 
-    // ── Structure replicated field-for-field from BIW20_EXACT_COPY.xml ─────────
-    // (a confirmed-working e-invoice where Tally DISPLAYS Qty and Rate).
-    // The critical ordering: all GST classification + the No/No flag block come
-    // FIRST, THEN <RATE>/<AMOUNT>/<ACTUALQTY>/<BILLEDQTY>. Tally only shows the
-    // Qty/Rate columns when the inventory entry carries this full classification
-    // block; a trimmed entry is treated as accounting-only and the columns hide.
-    const gstLedgerName = gstLedgerSrc; // real sales ledger driving GST rate + HSN
-    const invGstSourceXml = hasRealLedger
-      ? `\n    <GSTSOURCETYPE>Ledger</GSTSOURCETYPE>\n    <GSTLEDGERSOURCE>${esc(gstLedgerName)}</GSTLEDGERSOURCE>\n    <HSNSOURCETYPE>Ledger</HSNSOURCETYPE>\n    <HSNLEDGERSOURCE>${esc(gstLedgerName)}</HSNLEDGERSOURCE>`
-      : '';
-    const invHsnNameXml = gstHsnName ? `\n    <GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>` : '';
+    // ── Tag order matches REVTEST01.xml exactly ───────────────────────────────
+    // GSTOVRDNTAXABILITY + GSTOVRDNTYPEOFSUPPLY are required — without them Tally
+    // cannot classify the supply for GST and Tax Analysis shows a blank Tax Rate.
+    // They appear in every confirmed working e-invoice (REVTEST01, BIW20_test_fixed).
+    // RATEDETAILS.LIST must come AFTER ACCOUNTINGALLOCATIONS.LIST per reference XML.
     return `
   <ALLINVENTORYENTRIES.LIST>
     <STOCKITEMNAME>${esc(itemName)}</STOCKITEMNAME>
-    <GSTOVRDNISREVCHARGEAPPL>&#4; Not Applicable</GSTOVRDNISREVCHARGEAPPL>
-    <GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>${invGstSourceXml}
-    <GSTOVRDNSTOREDNATURE>Local Sales - Taxable</GSTOVRDNSTOREDNATURE>
-    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
-    <GSTRATEINFERAPPLICABILITY>As per Masters/Company</GSTRATEINFERAPPLICABILITY>${invHsnNameXml}
-    <GSTHSNINFERAPPLICABILITY>As per Masters/Company</GSTHSNINFERAPPLICABILITY>
     <ISDEEMEDPOSITIVE>${item.isDeemedPositive ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>
-    <ISGSTASSESSABLEVALUEOVERRIDDEN>No</ISGSTASSESSABLEVALUEOVERRIDDEN>
-    <STRDISGSTAPPLICABLE>No</STRDISGSTAPPLICABLE>
-    <CONTENTNEGISPOS>No</CONTENTNEGISPOS>
     <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
-    <ISAUTONEGATE>No</ISAUTONEGATE>
-    <ISCUSTOMSCLEARANCE>No</ISCUSTOMSCLEARANCE>
-    <ISTRACKCOMPONENT>No</ISTRACKCOMPONENT>
-    <ISTRACKPRODUCTION>No</ISTRACKPRODUCTION>
-    <ISPRIMARYITEM>No</ISPRIMARYITEM>
-    <ISSCRAP>No</ISSCRAP>
-    <RATE>${esc(item.rate || '')}</RATE>
+    <ISGSTASSESSABLEVALUEOVERRIDDEN>No</ISGSTASSESSABLEVALUEOVERRIDDEN>
+    ${gstSourceXml ? gstSourceXml + '\n    ' : ''}<GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
+    ${hsnSourceXml ? hsnSourceXml + '\n    ' : ''}<GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
+    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>\n    ` : ''}<RATE>${esc(item.rate || '')}</RATE>
     <AMOUNT>${itemAmountTag.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${esc(formatQty(item.actualQty || ''))}</ACTUALQTY>
     <BILLEDQTY>${esc(formatQty(item.billedQty || ''))}</BILLEDQTY>${batchAllocXml}${acctAllocsXml}${rateDetailsXml}
@@ -1664,16 +1574,8 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     if (state && !lines.some(line => line.toLowerCase().includes(state.toLowerCase()))) {
       lines.push(state);
     }
-    // IRP requires each address line to be 3–100 characters. Pad short lines and
-    // truncate long ones so the e-invoice portal does not reject on address length.
-    const fixed = lines.map(line => {
-      let l = line.trim();
-      if (l.length > 100) l = l.slice(0, 100).trim();
-      if (l.length > 0 && l.length < 3) l = (l + '  ').slice(0, 3); // pad to 3 chars
-      return l;
-    }).filter(Boolean);
     // Pincode goes into <PARTYPINCODE> / <CONSIGNEEPINCODE> tags — NOT in address lines.
-    return fixed;
+    return lines;
   };
 
   const billToName = (v.billToName || v.partyLedgerName || '').trim();
@@ -1786,19 +1688,6 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   const billToStateForSupply = (v.billToState || v.partyState || cfg.state || '').trim();
   const placeOfSupply = billToStateForSupply;
   const companyGstIn = (cfg.gstin || '').trim();
-
-  // ── Consignee state for GST (CONSIGNEESTATENAME) ──────────────────────────
-  // When the voucher is INTRASTATE (CGST+SGST, no IGST), the consignee's GST
-  // state MUST equal the Place of Supply (Bill To state). If we send a different
-  // ship-to state here, Tally treats the consignee as interstate and rejects the
-  // CGST/SGST voucher with EXCEPTIONS (no diagnostic). The ship-to NAME, CITY,
-  // ADDRESS and PINCODE are still sent as-is for the delivery label — only the
-  // GST STATE is aligned to the Place of Supply. For true interstate vouchers
-  // (IGST present) we keep the real ship-to state.
-  const voucherIsIntrastate = !(+(v._totalIGST || 0) > 0);
-  const consigneeStateName = voucherIsIntrastate && placeOfSupply
-    ? placeOfSupply
-    : resolvedShipToState;
   const companyState = (cfg.state || '').trim();
   const companyRegLabel = `${companyState} Registration`;
 
@@ -1888,7 +1777,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
   <CONSIGNEEMAILINGNAME>${esc(shipToName)}</CONSIGNEEMAILINGNAME>` : ''}
   <CONSIGNEEGSTIN>${esc(shipToGST || '.')}</CONSIGNEEGSTIN>
   ${v.shipToPincode ? `<CONSIGNEEPINCODE>${esc(v.shipToPincode)}</CONSIGNEEPINCODE>` : ''}
-  ${consigneeStateName ? `<CONSIGNEESTATENAME>${esc(consigneeStateName)}</CONSIGNEESTATENAME>` : ''}
+  ${resolvedShipToState ? `<CONSIGNEESTATENAME>${esc(resolvedShipToState)}</CONSIGNEESTATENAME>` : ''}
   ${consigneePlace ? `<CONSIGNEEPLACE>${esc(consigneePlace)}</CONSIGNEEPLACE>` : ''}
   ${consigneePlace ? `<SHIPTOPLACE>${esc(consigneePlace)}</SHIPTOPLACE>` : ''}
   ${v.shipToCity ? `<CONSIGNEECITY>${esc(v.shipToCity)}</CONSIGNEECITY>` : ''}`
@@ -1933,8 +1822,6 @@ ${addressListXml}
   <VOUCHERTYPENAME>${esc(voucherTypeName)}</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(v.voucherNumber || '')}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
-  <VCHGSTCLASS>&#4; Not Applicable</VCHGSTCLASS>
-  <VCHENTRYMODE>Item Invoice</VCHENTRYMODE>
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
   ${poOrderRefXml}
@@ -2048,15 +1935,9 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // The auto-masters step creates these ledgers if they don't exist anyway.
     let tallyGstLedgers = null;
     let tallySalesLedgers = [];
-    // ── ALWAYS fetch live ledger names — even in connector mode ──────────────
-    // Previously this was skipped when the connector was ONLINE because the
-    // TDL Collection query was assumed to be slow over the relay. In practice
-    // the connector handles it fine, and skipping it means tallySalesLedgers
-    // is always empty in production (connector mode), which disables the
-    // validation guard that prevents wrong ledger names from reaching Tally XML.
-    // Result: every invoice fails with EXCEPTIONS=10 and no diagnostic message.
-    // Fix: always fetch, use a generous timeout so the connector relay has time.
-    try {
+    const isConnectorOnlineMode = cfg.useConnector && cfg.connectorId && cfg.connectorOnline;
+    if (!isConnectorOnlineMode) {
+      // Only fetch live ledger names in direct (local) mode or when connector is offline — fast enough
       [tallyGstLedgers, tallySalesLedgers] = await Promise.all([
         fetchTallyGstLedgerNames(cfg),
         fetchTallySalesLedgerNames(cfg),
@@ -2067,8 +1948,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         LOG(`exportSalesInvoices: using Tally GST ledgers — cgst:[${tallyGstLedgers.cgstNames.join(', ')}] sgst:[${tallyGstLedgers.sgstNames.join(', ')}]`);
       }
       LOG(`exportSalesInvoices: found ${tallySalesLedgers.length} sales ledgers in Tally`);
-    } catch (ledgerFetchErr) {
-      LOG(`exportSalesInvoices: ledger name fetch failed (non-fatal): ${ledgerFetchErr.message} — guard will not run this export`);
+    } else {
+      LOG('exportSalesInvoices: connector mode (ONLINE) — skipping live GST/sales ledger name fetch (using fallback names)');
     }
 
     // Fetch all ERP invoices that haven't been successfully synced.
@@ -2113,7 +1994,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // Fetch the live list now, pick the best default, and use it for every invoice.
     let tallyGodownNames = [];
     let resolvedDefaultGodown = 'Main Location'; // last resort only
-    let noGodownsInTally = false; // true when the company has godowns feature OFF
     try {
       const godownXml = `<ENVELOPE>
 <HEADER>
@@ -2144,11 +2024,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         resolvedDefaultGodown = preferred;
         LOG(`exportSalesInvoices: resolved default godown = "${resolvedDefaultGodown}"`);
       } else {
-        // ── NO GODOWNS: the company has the inventory-location feature turned OFF.
-        // Sending ANY <GODOWNNAME> in this case causes EXCEPTIONS=10 with no
-        // diagnostic. Flag it so the serializer omits godown tags entirely.
-        noGodownsInTally = true;
-        LOG('exportSalesInvoices: ⚠ Tally has NO godowns (inventory-location feature OFF) — will OMIT all GODOWNNAME tags to avoid EXCEPTIONS');
+        LOG('exportSalesInvoices: ⚠ no godowns returned from Tally — using "Main Location" fallback');
       }
     } catch (gErr) {
       LOG(`exportSalesInvoices: godown fetch failed (non-fatal): ${gErr.message} — using "Main Location"`);
@@ -2564,7 +2440,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
                                 || (im?.tallySalesLedger  || '').trim();
 
             if (GENERIC.has(tallySalesLedger.toLowerCase()) && tallySalesLedgers.length > 0) {
-              // No ledger set (or just cleared) — auto-resolve from live Tally list
+              // No ledger set — auto-resolve from live Tally list
               const itemCgst = +(item.cgst || 0);
               const itemIgst = +(item.igst || 0);
               const taxBase  = +(item.basic || 0) || +(item.amount || 0);
@@ -2579,19 +2455,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
                 tallySalesLedgers, n, gstRate, null, isInterstate
               );
               const GENERIC_RESOLVED = new Set(['sales accounts', 'sales accounts (group)']);
-              // ── GUARD: only save back to ItemMaster if resolved ledger is
-              // verified to exist in the live Tally sales ledger list.
-              // Never save a guessed/fallback name — it may not exist in Tally.
-              if (resolved && !GENERIC_RESOLVED.has(resolved.toLowerCase()) && tallySalesLedgers.includes(resolved)) {
+              if (resolved && !GENERIC_RESOLVED.has(resolved.toLowerCase())) {
                 tallySalesLedger = resolved;
                 LOG(`Auto-resolved tallySalesLedger for "${n}": "${resolved}" — saving to ItemMaster`);
-                // Safe to persist: confirmed in live Tally ledger list
+                // Save back to ItemMaster so future exports skip this resolution step
                 ItemMaster.updateOne({ name: n }, { $set: { tallySalesLedger: resolved } })
                   .catch(e => ERR(`Failed to save tallySalesLedger for "${n}":`, e.message));
-              } else if (resolved && !GENERIC_RESOLVED.has(resolved.toLowerCase())) {
-                // Resolved but NOT confirmed in live list — use for this export only, don't persist
-                tallySalesLedger = resolved;
-                LOG(`Auto-resolved tallySalesLedger for "${n}": "${resolved}" (not persisted — not in live Tally list)`);
               }
             }
 
@@ -2654,27 +2523,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             : (tv.allLedgerEntries?.find(e => !e.isDeemedPositive && !e.ledgerName?.toLowerCase().includes('cgst') && !e.ledgerName?.toLowerCase().includes('sgst') && !e.ledgerName?.toLowerCase().includes('igst'))?.ledgerName || 'Sales');
           LOG(`Invoice ${inv.invoiceNo}: action=${action} date=${tv.date} inventoryEntries=${hasInventory ? tv.allInventoryEntries.length : 0} salesLedger="${salesLedgerUsed}" voucherType="${tv.voucherType || 'Sales'}" company="${cfg.companyName}"`);
 
-          // Inject real Tally godown names so serializer uses the correct godown.
-          // resolvedDefaultGodown = the ACTUAL godown name fetched live from Tally.
-          // FORCE it onto the voucher AND every inventory entry's batch allocation —
-          // overriding the hardcoded "Srichakra Industries" placeholder baked in by
-          // normalizeToTallyVoucher. If that placeholder does not exactly match a
-          // real Tally godown, every voucher fails with EXCEPTIONS and no diagnostic.
-          tv.warehouseNames = tallyGodownNames;   // full list for validation
-          tv.godownName     = resolvedDefaultGodown; // always use the resolved real godown
-          tv._godownName    = resolvedDefaultGodown;
-          tv._noGodowns     = noGodownsInTally;      // serializer omits GODOWNNAME when true
-          // Overwrite the hardcoded godown on each inventory entry's batch allocation
-          for (const ie of (tv.allInventoryEntries || [])) {
-            for (const ba of (ie.batchAllocations || [])) {
-              ba.godownName = resolvedDefaultGodown;
-            }
-          }
+          // Inject real Tally godown names so serializer uses the correct godown
+          // resolvedDefaultGodown = first matching Tally godown (e.g. "Srichakra Industries")
+          tv.warehouseNames      = tallyGodownNames;   // full list for validation
+          tv.godownName          = tv.godownName || resolvedDefaultGodown; // override blank godown
 
           // ── STEP 7: Pre-export validation against live Tally masters ────────
           if (tallyMastersForValidation) {
             try {
-              const vResult = validateTallyExport(tv, tallyMastersForValidation, { strict: false });
+              const vResult = validateTallyExport(tv, tallyMastersForValidation, { strict: true });
               if (vResult.warnings.length > 0) {
                 LOG(`Invoice ${inv.invoiceNo}: pre-export warnings:\n${vResult.warnings.map((w, i) => `  [${i+1}] ${w}`).join('\n')}`);
               }
@@ -2732,7 +2589,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     let   totalCreated = 0, totalAltered = 0;
     const batchErrors  = [...preflightErrors];
     const successIds   = [];
-    let   diagnosedOnce = false; // send one voucher alone once to force Tally's real error
 
     for (let b = 0; b < vouchersXml.length; b += BATCH_SIZE) {
       const batch    = vouchersXml.slice(b, b + BATCH_SIZE);
@@ -2760,15 +2616,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         LOG(`Sales DEBUG — first FAILING batch (${batchNo}/${batchTot}) full XML:\n${singleEnvelope}`);
       }
 
-      // ── FORCE REAL ERROR: on the FIRST failing batch with no diagnostics,
-      // send just ONE voucher alone. Tally surfaces the actual LINEERROR/LASTERROR
-      // for a single-voucher import that it hides in a multi-voucher batch.
-      // This runs only once per export (guarded by _diagnosedOnce) to avoid spam.
-      if (!result.ok && result.exceptions > 0 && !result.diagnosticsFound && !diagnosedOnce && batch.length > 0) {
-        diagnosedOnce = true;
-        await diagnoseSingleVoucher(cfg, batch[0].xml, `Sales batch ${batchNo}/${batchTot} invoice ${batch[0].invoiceNo}`);
-      }
-
       // ── SAFEGUARD: Smart retry — only attempt Alter/Delete when appropriate ──
       //
       // ERROR CLASSIFICATION before any retry:
@@ -2790,9 +2637,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         errorText.includes('master') ||
         errorText.includes('could not find');
 
-      // A silent zero (CREATED=0, ALTERED=0, EXCEPTIONS=0) means the voucher already
-      // exists in Tally — safe to retry as Alter to update it with new values.
-      const isSilentDuplicate = result.ok && result.created === 0 && result.altered === 0 && result.exceptions === 0;
+      // A no-op is not proof of a duplicate, so it cannot trigger Alter/Delete.
+      const isSilentDuplicate = false;
 
       // Only retry as Alter when:
       //   a) Silent zero (voucher already exists in Tally — no error, just not created)
@@ -2911,12 +2757,9 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         const errMsg = result.error || 'Tally rejected';
         batchErrors.push(`Batch ${batchNo}: ${errMsg}`);
         // ── SAFEGUARD 3: Per-invoice export log (failed) ───────────────────
-        // Also add each invoice individually to failedItems so the Export UI
-        // can display EXACTLY which invoice numbers failed and why.
         for (const v of batch) {
           failedInvoiceIds.push(v.id);
           invoiceErrorMap[String(v.id)] = errMsg;
-          failedItems.push({ id: v.invoiceNo, partyName: v.partyName, error: errMsg });
           await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', errMsg);
         }
       }
