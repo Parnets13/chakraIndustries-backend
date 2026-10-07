@@ -229,40 +229,37 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     };
   });
 
-  // ── Tax totals: PER-LINE computation matching IRP's per-line validation ──────
+  // ── Tax totals: USE EXCEL VALUES DIRECTLY (restores Sept-3 working behaviour) ──
   //
-  // CRITICAL (fixes "For Sl. No 1, SGST and CGST amount passed does not match
-  // with taxable value and tax rate"): The IRP validates EACH line item separately:
-  //     ROUND( line_taxable_value × rate / 100 , 2 )  ==  line_tax_amount
+  // IMPORTANT: Up to Sept-7 this code passed the e-invoice/IRP consistently because
+  // it sent the EXACT CGST/SGST/IGST amounts from the source Excel. Later "fixes"
+  // changed it to RECOMPUTE tax as base × rate, which produced values differing from
+  // the Excel amounts by a paisa — and the IRP rejected every line with
+  // "SGST and CGST amount passed does not match with taxable value and tax rate".
   //
-  // Tally generates the e-invoice JSON by computing per-line tax from each
-  // inventory entry's AMOUNT and the RATEDETAILS rate. The LEDGERENTRIES total
-  // must equal the SUM of those per-line rounded amounts. If we compute the
-  // total differently (e.g. group-level rounding), the total may differ by a
-  // paisa from Tally's per-line sum, causing every line to fail validation.
-  //
-  // Fix: compute tax PER LINE as ROUND(lineBase × rate / 100, 2), then sum.
-  // This is exactly what Tally does internally → totals match → IRP passes.
+  // Restored logic: when the Excel row carries the tax amount, use it as-is. Only
+  // fall back to base × rate when the Excel row has no tax amount at all.
   for (let i = 0; i < itemAmounts.length; i++) {
     const item = validItems[i];
-    const excelIGST = +(item.igst || 0);
-    const r = itemTaxRates[i];
-    const base = itemAmounts[i];  // taxable value — already rounded to 2dp
+    const base = itemAmounts[i];
     if (base <= 0) continue;
-    const isInter = excelIGST > 0 || r.igst > 0;
+    const r = itemTaxRates[i];
+    // Always use Excel-provided tax amounts — they match what Tally/IRP expects
+    const excelCGST = +(item.cgst || 0);
+    const excelSGST = +(item.sgst || 0);
+    const excelIGST = +(item.igst || 0);
 
-    if (isInter) {
-      const igstRate = r.igst || 18;
-      // Per-line tax: ROUND(base × rate / 100, 2) — same formula IRP uses
-      const lineIGST = +((base * igstRate / 100).toFixed(2));
-      totalIGST = +(totalIGST + lineIGST).toFixed(2);
-    } else {
-      const halfRate = r.cgst || (gstRateFull / 2) || 9;
-      // Per-line CGST and SGST: each = ROUND(base × halfRate / 100, 2)
-      const lineCGST = +((base * halfRate / 100).toFixed(2));
-      const lineSGST = +((base * halfRate / 100).toFixed(2));
-      totalCGST = +(totalCGST + lineCGST).toFixed(2);
-      totalSGST = +(totalSGST + lineSGST).toFixed(2);
+    if (excelIGST > 0) {
+      totalIGST = +(totalIGST + excelIGST).toFixed(2);
+    } else if (excelCGST > 0) {
+      totalCGST = +(totalCGST + excelCGST).toFixed(2);
+      totalSGST = +(totalSGST + excelSGST).toFixed(2);
+    } else if (r.igst > 0) {
+      // Fallback only when Excel has no tax amount
+      totalIGST = +(totalIGST + +((base * r.igst) / 100).toFixed(2)).toFixed(2);
+    } else if (r.cgst > 0) {
+      totalCGST = +(totalCGST + +((base * r.cgst) / 100).toFixed(2)).toFixed(2);
+      totalSGST = +(totalSGST + +((base * r.sgst) / 100).toFixed(2)).toFixed(2);
     }
   }
   const salesBase = +itemAmounts.reduce((s, a) => s + a, 0).toFixed(2);
