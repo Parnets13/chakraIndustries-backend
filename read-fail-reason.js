@@ -3,10 +3,11 @@
 import dotenv from 'dotenv';
 dotenv.config();
 import mongoose from 'mongoose';
+import connectDB from './config/database.js';
 import Invoice from './models/Invoice.js';
 
 async function main() {
-  await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 20000 });
+  await connectDB();
 
   const failed = await Invoice.find({
     status: { $nin: ['Cancelled'] },
