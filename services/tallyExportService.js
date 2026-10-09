@@ -2652,23 +2652,30 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // with SVSHOWERRORLIST (importEnvelope already sets it) forces Tally to return
       // the actual <LINEERROR>/<LASTERROR> text. We capture it into each invoice's
       // lastError so the exact rejection reason becomes visible (DB + logs).
-      if (!result.ok && (result.exceptions || 0) > 0 && !result.diagnosticsFound) {
-        ERR(`Sales batch ${batchNo}: EXCEPTIONS with no diagnostics — running per-voucher diagnostic to extract real reason...`);
+      if (!result.ok && (result.created || 0) === 0) {
+        ERR(`Sales batch ${batchNo}: failed — running per-voucher diagnostic to extract Tally's real reason...`);
         for (const v of batch) {
           try {
             const soloEnvelope = importEnvelope(cfg, 'Vouchers', v.xml);
-            const soloResp = await postXml(cfg, soloEnvelope, 60000);
+            const soloResp = String(await postXml(cfg, soloEnvelope, 60000) || '');
             const soloResult = parseResponse(soloResp, `Sales DIAGNOSE ${v.invoiceNo}`);
-            // Pull any human-readable error text Tally returned for this single voucher
-            const reason = soloResult.error
-              || (soloResp.match(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/i)?.[1]?.trim())
-              || (soloResp.match(/<LASTERROR>([\s\S]*?)<\/LASTERROR>/i)?.[1]?.trim())
-              || `EXCEPTIONS=${soloResult.exceptions || '?'} (Tally gave no text) — raw saved to logs`;
+            // Pull any human-readable error text Tally returned for this single voucher.
+            // If Tally gives none, capture the KEY response counters + any stray text so
+            // the DB lastError shows exactly what Tally returned (no silent "see logs").
+            const lineErr = soloResp.match(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/i)?.[1]?.trim();
+            const lastErr = soloResp.match(/<LASTERROR>([\s\S]*?)<\/LASTERROR>/i)?.[1]?.trim();
+            const created = soloResp.match(/<CREATED>(\d+)<\/CREATED>/i)?.[1] || '?';
+            const exc     = soloResp.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/i)?.[1] || '?';
+            // Any non-tag text content in the response (sometimes Tally puts the reason here)
+            const strayText = soloResp.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+            const reason = lineErr || lastErr || soloResult.error
+              || `SOLO created=${created} exceptions=${exc} | text="${strayText}"`;
             ERR(`Sales DIAGNOSE ${v.invoiceNo}: ${reason}`);
             invoiceErrorMap[String(v.id)] = reason;
             await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', reason);
           } catch (e) {
             ERR(`Sales DIAGNOSE ${v.invoiceNo} failed: ${e.message}`);
+            invoiceErrorMap[String(v.id)] = `diagnose error: ${e.message}`;
           }
         }
       }
