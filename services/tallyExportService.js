@@ -2275,9 +2275,16 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       // vouchers referencing that item, retroactively breaking manually-created
       // invoices that were correctly posted at a different GST rate.
       const tallyRateIsMissing = existsInTally && tallyCurrentRate === 0;
+      // When the live stock-rate fetch returned NOTHING for this item (connector
+      // round-trip limits, timing, etc.), existsInTally is false even though the
+      // item may already exist in Tally at 0%. In that case a plain "Create" is
+      // SILENTLY SKIPPED by Tally (item already exists) and its rate stays 0 — so
+      // the voucher's 18% then mismatches the master's 0% → EXCEPTIONS. To cover
+      // this, when the fetch is unavailable we ALSO send an Alter to set the rate.
+      const rateFetchUnavailable = tallyStockGstMap.size === 0;
 
-      if (!existsInTally) {
-        // Item doesn't exist → CREATE with full GST setup.
+      if (!existsInTally && !rateFetchUnavailable) {
+        // Item confirmed NOT in Tally → CREATE with full GST setup.
         // Use the SAME unit the voucher line will send (see stockUnitMap) so the
         // master's base unit matches the voucher — otherwise Tally hides Qty/Rate.
         const unit = stockUnitMap.get(name) || 'Nos';
@@ -2286,6 +2293,14 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         // Item exists but GST rate is 0/unset in Tally → ALTER to set the correct rate
         LOG(`exportSalesInvoices: stock item "${name}" has no GST rate in Tally (rate=0) → setting to ${gstRate}%`);
         return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
+      } else if (rateFetchUnavailable && gstRate > 0) {
+        // Live rate unknown → send BOTH a Create (makes the item if missing) AND an
+        // Alter (sets the rate if it already exists at 0). Tally skips whichever is
+        // not applicable. This guarantees the master carries the correct rate before
+        // the voucher is validated, without ever lowering an already-correct rate.
+        const unit = stockUnitMap.get(name) || 'Nos';
+        return `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>${esc(unit)}</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`
+             + `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
       } else {
         // Item exists with a nonzero rate already set → skip entirely (never overwrite)
         return '';
