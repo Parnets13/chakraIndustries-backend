@@ -335,9 +335,19 @@ export function normalizeToTallyVoucher(invoiceData, options = {}) {
     // this before reaching here.
     const rawLedger = (item.tallySalesLedger || '').toString().trim();
     const GENERIC_LEDGERS = new Set(['', 'sales', 'sales accounts', 'sales accounts (group)']);
-    const salesLedger = (rawLedger && !GENERIC_LEDGERS.has(rawLedger.toLowerCase()))
-      ? rawLedger
-      : 'Sales';
+    // ── ACCOUNTINGALLOCATIONS sales ledger ───────────────────────────────────
+    // ALWAYS post to the generic "Sales" ledger, NOT the item-specific one.
+    // Reason: ItemMaster.tallySalesLedger is frequently wrong (a party name, a
+    // wrong-product ledger like "Electric Fan Heater Glint Sales Local" on a
+    // kettle, or a wrong-rate ledger like "...Local 5%" on an 18% item). When such
+    // a mis-rated/mis-typed ledger is used in ACCOUNTINGALLOCATIONS, Tally's GST
+    // engine finds a rate on the ledger that conflicts with the voucher's 18% and
+    // rejects the whole voucher with EXCEPTIONS=1 and NO diagnostic — exactly the
+    // symptom seen on these items. The plain "Sales" ledger carries no fixed GST
+    // rate, so there is no conflict, and GST is taken from the STOCK ITEM master
+    // (GSTLEDGERSOURCE is suppressed; GSTRATEINFERAPPLICABILITY=As per Masters).
+    // The accounting value still lands under Sales Accounts correctly.
+    const salesLedger = 'Sales';
 
     // ── GSTLEDGERSOURCE = sales ledger for this item ─────────────────────────
     // Per REVTEST01.xml + BIW20_test_fixed.xml (both confirmed working e-invoices):
