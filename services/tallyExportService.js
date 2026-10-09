@@ -2823,8 +2823,14 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         // ── SAFEGUARD 3: Per-invoice export log (failed) ───────────────────
         for (const v of batch) {
           failedInvoiceIds.push(v.id);
-          invoiceErrorMap[String(v.id)] = errMsg;
-          await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', errMsg);
+          // PRESERVE the per-voucher diagnostic reason if one was already captured
+          // above (it carries Tally's real response). Only fall back to the generic
+          // batch error when no specific reason exists, so the DB lastError shows the
+          // actual Tally response instead of "EXCEPTIONS=N — see RAW RESPONSE in logs".
+          if (!invoiceErrorMap[String(v.id)]) {
+            invoiceErrorMap[String(v.id)] = errMsg;
+          }
+          await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', invoiceErrorMap[String(v.id)]);
         }
       }
     }
