@@ -2297,13 +2297,14 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         LOG(`exportSalesInvoices: stock item "${name}" has no GST rate in Tally (rate=0) → setting to ${gstRate}%`);
         return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
       } else if (rateFetchUnavailable && gstRate > 0) {
-        // Live rate unknown → send BOTH a Create (makes the item if missing) AND an
-        // Alter (sets the rate if it already exists at 0). Tally skips whichever is
-        // not applicable. This guarantees the master carries the correct rate before
-        // the voucher is validated, without ever lowering an already-correct rate.
-        const unit = stockUnitMap.get(name) || 'Nos';
-        return `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>${esc(unit)}</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`
-             + `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
+        // Live rate unknown (connector fetch returned nothing). Send ONLY an Alter.
+        // Why not Create+Alter together: sending Create AND Alter for the SAME item
+        // in ONE masters import makes Tally reject the whole import with EXCEPTIONS
+        // (duplicate master in a single message). An Alter alone is safe: if the item
+        // exists it sets the GST rate; if it does not exist Tally skips it quietly.
+        // (These items already exist in Tally from earlier GST-less creation, which is
+        // exactly why their rate is 0 — so Alter is the correct, sufficient action.)
+        return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
       } else {
         // Item exists with a nonzero rate already set → skip entirely (never overwrite)
         return '';
