@@ -2646,6 +2646,33 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         LOG(`Sales DEBUG — first FAILING batch (${batchNo}/${batchTot}) full XML:\n${singleEnvelope}`);
       }
 
+      // ── FORCE REAL DIAGNOSTIC: send each voucher ALONE to extract Tally's LINEERROR ──
+      // When a batch returns EXCEPTIONS with NO diagnostic tags, Tally hid the reason
+      // because multiple vouchers were sent together. Sending ONE voucher at a time
+      // with SVSHOWERRORLIST (importEnvelope already sets it) forces Tally to return
+      // the actual <LINEERROR>/<LASTERROR> text. We capture it into each invoice's
+      // lastError so the exact rejection reason becomes visible (DB + logs).
+      if (!result.ok && (result.exceptions || 0) > 0 && !result.diagnosticsFound) {
+        ERR(`Sales batch ${batchNo}: EXCEPTIONS with no diagnostics — running per-voucher diagnostic to extract real reason...`);
+        for (const v of batch) {
+          try {
+            const soloEnvelope = importEnvelope(cfg, 'Vouchers', v.xml);
+            const soloResp = await postXml(cfg, soloEnvelope, 60000);
+            const soloResult = parseResponse(soloResp, `Sales DIAGNOSE ${v.invoiceNo}`);
+            // Pull any human-readable error text Tally returned for this single voucher
+            const reason = soloResult.error
+              || (soloResp.match(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/i)?.[1]?.trim())
+              || (soloResp.match(/<LASTERROR>([\s\S]*?)<\/LASTERROR>/i)?.[1]?.trim())
+              || `EXCEPTIONS=${soloResult.exceptions || '?'} (Tally gave no text) — raw saved to logs`;
+            ERR(`Sales DIAGNOSE ${v.invoiceNo}: ${reason}`);
+            invoiceErrorMap[String(v.id)] = reason;
+            await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', reason);
+          } catch (e) {
+            ERR(`Sales DIAGNOSE ${v.invoiceNo} failed: ${e.message}`);
+          }
+        }
+      }
+
       // ── SAFEGUARD: Smart retry — only attempt Alter/Delete when appropriate ──
       //
       // ERROR CLASSIFICATION before any retry:
