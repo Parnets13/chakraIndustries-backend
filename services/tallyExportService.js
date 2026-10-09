@@ -1442,19 +1442,13 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     // "As per Transaction", leaving it blank and triggering the tax mismatch warning.
     // Emit only when a real sales ledger name is known (not empty / generic fallback).
     const GENERIC_LEDGER_NAMES = new Set(['', 'sales', 'sales accounts']);
-    // ── GSTLEDGERSOURCE SUPPRESSED (confirmed root cause of EXCEPTIONS on these items) ──
-    // Many ItemMaster.tallySalesLedger values are wrong or missing:
-    //   • blank → falls back to generic "Sales" (no GST rate in Tally)
-    //   • a PARTY name (e.g. "AVR SWARNA MAHAL JEWELRY ...") saved by mistake
-    //   • a wrong-rate ledger (e.g. "Cast Iron Dosa Tawa Sales Local 5%" on an 18% item)
-    //   • a wrong-product ledger (e.g. "Electric Fan Heater Glint Sales Local" on a kettle)
-    // When any of these is sent as GSTLEDGERSOURCE, Tally reads the ledger's (wrong/zero)
-    // GST rate for Tax Analysis → Expected tax mismatches the voucher's 18% → EXCEPTIONS.
-    // Suppressing GSTLEDGERSOURCE makes Tally use the STOCK ITEM's own GST rate (set
-    // correctly by the auto-masters step), which is the rate the voucher actually uses.
-    // HSN still goes via the separate GSTHSNNAME tag; accounting still posts to the
-    // specific sales ledger via ACCOUNTINGALLOCATIONS — only the GST-rate SOURCE changes.
-    const hasRealLedger = false;
+    // Emit GSTLEDGERSOURCE / HSNLEDGERSOURCE when the item has a real, specific sales
+    // ledger (not blank / not generic "Sales"). Tally reads the GST rate AND the HSN
+    // from this ledger master — which is how the confirmed-working invoices behave
+    // (see BIW20_EXACT_COPY.xml: GSTLEDGERSOURCE="SS Bottle Sales Local 5%"). The
+    // item→ledger mappings have been corrected in ItemMaster so these point to valid
+    // 18% sales ledgers that carry the correct HSN+rate.
+    const hasRealLedger = gstLedgerSrc && !GENERIC_LEDGER_NAMES.has(gstLedgerSrc.toLowerCase());
     const gstSourceXml = hasRealLedger
       ? `<GSTSOURCETYPE>${esc(item.gstSourceType || 'Ledger')}</GSTSOURCETYPE>
     <GSTLEDGERSOURCE>${esc(gstLedgerSrc)}</GSTLEDGERSOURCE>`
