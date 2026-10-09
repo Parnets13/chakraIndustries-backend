@@ -2,10 +2,11 @@
 import dotenv from 'dotenv';
 dotenv.config();
 import mongoose from 'mongoose';
+import connectDB from './config/database.js';
 import Invoice from './models/Invoice.js';
 
 async function main() {
-  await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 20000 });
+  await connectDB();
 
   const total   = await Invoice.countDocuments({ status: { $nin: ['Cancelled'] } });
   const synced  = await Invoice.countDocuments({ status: { $nin: ['Cancelled'] }, tallySync: true });
