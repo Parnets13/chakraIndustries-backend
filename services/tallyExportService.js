@@ -1545,8 +1545,11 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     <ISLASTDEEMEDPOSITIVE>${item.isLastDeemedPositive ? 'Yes' : 'No'}</ISLASTDEEMEDPOSITIVE>
     <ISGSTASSESSABLEVALUEOVERRIDDEN>No</ISGSTASSESSABLEVALUEOVERRIDDEN>
     ${gstSourceXml ? gstSourceXml + '\n    ' : ''}<GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
-    ${hsnSourceXml ? hsnSourceXml + '\n    ' : ''}<GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
-    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>\n    ` : ''}<RATE>${esc(item.rate || '')}</RATE>
+    ${hsnSourceXml ? hsnSourceXml + '\n    ' : ''}<GSTOVRDNSTOREDNATURE>Local Sales - Taxable</GSTOVRDNSTOREDNATURE>
+    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
+    <GSTRATEINFERAPPLICABILITY>As per Masters/Company</GSTRATEINFERAPPLICABILITY>
+    ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>\n    ` : ''}<GSTHSNINFERAPPLICABILITY>As per Masters/Company</GSTHSNINFERAPPLICABILITY>
+    <RATE>${esc(item.rate || '')}</RATE>
     <AMOUNT>${itemAmountTag.toFixed(2)}</AMOUNT>
     <ACTUALQTY>${esc(formatQty(item.actualQty || ''))}</ACTUALQTY>
     <BILLEDQTY>${esc(formatQty(item.billedQty || ''))}</BILLEDQTY>${batchAllocXml}${acctAllocsXml}${rateDetailsXml}
