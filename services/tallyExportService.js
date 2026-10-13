@@ -1181,7 +1181,7 @@ async function fetchTallySalesLedgerNames(cfg) {
   <TDL><TDLMESSAGE>
     <COLLECTION NAME="AllLedgers">
       <TYPE>Ledger</TYPE>
-      <FETCH>Name, Parent, TaxType, GSTRate, GSTApplicable</FETCH>
+      <FETCH>Name, Parent, TaxType, GSTRate, GSTApplicable, HSNCODE, GSTHSNNAME, GSTDETAILS.LIST, RATEDETAILS.LIST</FETCH>
     </COLLECTION>
   </TDLMESSAGE></TDL>
 </DESC></BODY>
@@ -1190,6 +1190,12 @@ async function fetchTallySalesLedgerNames(cfg) {
     if (!resp) return [];
 
     const salesLedgers = [];
+    // ledgerName(lower) → HSN code taken from the ledger's GST classification.
+    // Many stock items in Tally have a BLANK HSN, but the sales LEDGER they post
+    // to carries the HSN (e.g. "Dry Iron Sales Local" → 85164000). Capturing it
+    // here lets the export fill a missing item HSN from its ledger — the HSN
+    // still comes 100% from Tally, never invented.
+    const hsnByLedger = new Map();
     for (const m of resp.matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
       const block  = m[1];
       const name   = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
@@ -1199,9 +1205,20 @@ async function fetchTallySalesLedgerNames(cfg) {
       const isSalesParent = parent.includes('sales');
       const isSalesName = nameLow.includes('sales') || nameLow.includes('sale');
       if (!isSalesParent && !isSalesName) continue;
-      if (name) salesLedgers.push(name);
+      if (!name) continue;
+      salesLedgers.push(name);
+      // HSN can appear as <HSNCODE>, <GSTHSNNAME>, or inside a <GSTDETAILS.LIST>/
+      // <RATEDETAILS.LIST> block on the ledger. Take the first non-empty one.
+      const hsn = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1]
+                || block.match(/<GSTHSNNAME>(.*?)<\/GSTHSNNAME>/i)?.[1]
+                || block.match(/<HSNCODE[^>]*>(.*?)<\/HSNCODE>/i)?.[1]
+                || '').trim();
+      if (hsn) hsnByLedger.set(nameLow, hsn);
     }
-    LOG(`fetchTallySalesLedgerNames: found ${salesLedgers.length} sales ledgers: [${salesLedgers.slice(0, 10).join(', ')}${salesLedgers.length > 10 ? '...' : ''}]`);
+    LOG(`fetchTallySalesLedgerNames: found ${salesLedgers.length} sales ledgers (${hsnByLedger.size} with HSN): [${salesLedgers.slice(0, 10).join(', ')}${salesLedgers.length > 10 ? '...' : ''}]`);
+    // Attach the HSN map as a non-enumerable property so existing callers that
+    // treat the return value as a plain array keep working unchanged.
+    Object.defineProperty(salesLedgers, 'hsnByLedger', { value: hsnByLedger, enumerable: false });
     return salesLedgers;
   } catch (e) {
     ERR('fetchTallySalesLedgerNames failed (non-fatal):', e.message);
@@ -1996,21 +2013,38 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // The auto-masters step creates these ledgers if they don't exist anyway.
     let tallyGstLedgers = null;
     let tallySalesLedgers = [];
+    // ledgerName(lower) → HSN taken from the ledger master in Tally. Used as the
+    // final HSN fallback when an item (and its stock master) has no HSN but the
+    // sales ledger it posts to does. Populated from fetchTallySalesLedgerNames.
+    let ledgerHsnMap = new Map();
     const isConnectorOnlineMode = cfg.useConnector && cfg.connectorId && cfg.connectorOnline;
+
+    // Sales-ledger names + their HSN are ALWAYS fetched (all modes, including the
+    // connector-online mode used in production). They drive two things that fix
+    // the recurring "wrong ledger / HSN missing" problem: (1) matching each item
+    // to its correct sales ledger, and (2) filling a missing item HSN from that
+    // ledger's HSN. This is the same live-fetch path the stock-item GST/HSN fetch
+    // already uses through the connector, so it works online too.
+    try {
+      tallySalesLedgers = await fetchTallySalesLedgerNames(cfg);
+      if (tallySalesLedgers && tallySalesLedgers.hsnByLedger instanceof Map) {
+        ledgerHsnMap = tallySalesLedgers.hsnByLedger;
+      }
+      LOG(`exportSalesInvoices: found ${tallySalesLedgers.length} sales ledgers in Tally (${ledgerHsnMap.size} carry an HSN)`);
+    } catch (e) {
+      ERR('exportSalesInvoices: sales-ledger fetch failed (non-fatal):', e.message);
+    }
+
     if (!isConnectorOnlineMode) {
-      // Only fetch live ledger names in direct (local) mode or when connector is offline — fast enough
-      [tallyGstLedgers, tallySalesLedgers] = await Promise.all([
-        fetchTallyGstLedgerNames(cfg),
-        fetchTallySalesLedgerNames(cfg),
-      ]);
+      // GST ledger names are only fetched in direct/offline mode (unchanged behavior).
+      tallyGstLedgers = await fetchTallyGstLedgerNames(cfg);
       if (!tallyGstLedgers || (!tallyGstLedgers.cgstNames.length && !tallyGstLedgers.sgstNames.length && !tallyGstLedgers.igstNames.length)) {
         LOG('⚠️ exportSalesInvoices: could not fetch GST ledger names from Tally — using fallback names.');
       } else {
         LOG(`exportSalesInvoices: using Tally GST ledgers — cgst:[${tallyGstLedgers.cgstNames.join(', ')}] sgst:[${tallyGstLedgers.sgstNames.join(', ')}]`);
       }
-      LOG(`exportSalesInvoices: found ${tallySalesLedgers.length} sales ledgers in Tally`);
     } else {
-      LOG('exportSalesInvoices: connector mode (ONLINE) — skipping live GST/sales ledger name fetch (using fallback names)');
+      LOG('exportSalesInvoices: connector mode (ONLINE) — skipping live GST ledger name fetch (using fallback names)');
     }
 
     // Fetch all ERP invoices that haven't been successfully synced.
@@ -2289,12 +2323,17 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // This is the ONLY safe way to ensure correct tax: fix missing rates on first use,
     // never touch items that already have the correct rate.
     let tallyStockGstMap = new Map(); // name → current Tally GST rate
+    const tallyStockHsnMap = new Map(); // name(lower) → HSN code fetched live from Tally
     try {
       const co = (cfg.companyName || '').trim().toUpperCase();
       const coTag = co ? `<SVCURRENTCOMPANY>${esc(co)}</SVCURRENTCOMPANY>` : '';
+      // Fetch Name + GST rate + HSN for every stock item. HSNCODE and GSTHSNNAME are
+      // both requested because, depending on the Tally GST setup, the HSN may live on
+      // either tag (or inside GSTDETAILS). This lets the export read each item's HSN
+      // directly from Tally instead of relying on (often empty) ItemMaster.hsn.
       const fetchXml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>StockGSTCheck</ID></HEADER>
 <BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
-<TDL><TDLMESSAGE><COLLECTION NAME="StockGSTCheck"><TYPE>Stock Item</TYPE><FETCH>Name,GSTApplicable,GSTRate</FETCH></COLLECTION></TDLMESSAGE></TDL>
+<TDL><TDLMESSAGE><COLLECTION NAME="StockGSTCheck"><TYPE>Stock Item</TYPE><FETCH>Name,GSTApplicable,GSTRate,HSNCODE,GSTHSNNAME,GSTDETAILS.LIST</FETCH></COLLECTION></TDLMESSAGE></TDL>
 </DESC></BODY></ENVELOPE>`;
       const resp = await postXmlWithRetry(cfg, fetchXml, 30000);
       if (resp) {
@@ -2303,11 +2342,17 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const block = m[2];
           const rate = parseFloat((block.match(/<GSTRATE>(.*?)<\/GSTRATE>/i)?.[1] || '0'));
           tallyStockGstMap.set(iname.toLowerCase(), rate);
+          // HSN can appear as <HSNCODE>, <GSTHSNNAME>, or inside <GSTDETAILS.LIST>
+          const hsnLive = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1]
+                        || block.match(/<GSTHSNNAME>(.*?)<\/GSTHSNNAME>/i)?.[1]
+                        || block.match(/<HSNCODE[^>]*>(.*?)<\/HSNCODE>/i)?.[1]
+                        || '').trim();
+          if (hsnLive) tallyStockHsnMap.set(iname.toLowerCase(), hsnLive);
         }
-        LOG(`exportSalesInvoices: fetched GST rates for ${tallyStockGstMap.size} stock items from Tally`);
+        LOG(`exportSalesInvoices: fetched GST rates for ${tallyStockGstMap.size} stock items, HSN for ${tallyStockHsnMap.size} from Tally`);
       }
     } catch (e) {
-      LOG(`exportSalesInvoices: could not fetch stock item GST rates (non-fatal): ${e.message}`);
+      LOG(`exportSalesInvoices: could not fetch stock item GST/HSN (non-fatal): ${e.message}`);
     }
 
     const autoStockXml = stockNames.map(name => {
@@ -2510,7 +2555,20 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const enrichedItems = await Promise.all((inv.items || []).map(async item => {
             const n  = (item.description || item.name || '').trim();
             const im = masterMap.get(n);
-            const hsn = (item.hsn || '').trim() || (im?.hsn || '').trim();
+            // HSN priority: invoice line → ItemMaster → LIVE Tally stock-item HSN.
+            // The live Tally value is the authoritative source (matches what Tally
+            // itself expects for the e-invoice); it fills the gap when the invoice
+            // and ItemMaster have no HSN (Excel never carries HSN). If Tally has the
+            // HSN on the item, we also persist it to ItemMaster for future exports.
+            let hsn = (item.hsn || '').trim() || (im?.hsn || '').trim();
+            if (!hsn) {
+              const liveHsn = tallyStockHsnMap.get(n.toLowerCase());
+              if (liveHsn) {
+                hsn = liveHsn;
+                ItemMaster.updateOne({ name: n }, { $set: { hsn: liveHsn } })
+                  .catch(() => {});
+              }
+            }
 
             // Determine current tallySalesLedger: item → ItemMaster → resolve
             let tallySalesLedger = (item.tallySalesLedger || '').trim()
@@ -2558,6 +2616,23 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
                 // Save back to ItemMaster so future exports use the corrected ledger
                 ItemMaster.updateOne({ name: n }, { $set: { tallySalesLedger: resolved } })
                   .catch(e => ERR(`Failed to save tallySalesLedger for "${n}":`, e.message));
+              }
+            }
+
+            // ── FINAL HSN FALLBACK: take HSN from the resolved sales LEDGER ─────
+            // If the item still has no HSN (blank on the invoice line, in
+            // ItemMaster, AND on the Tally stock item), use the HSN carried by
+            // the sales ledger it posts to. Every item under the same ledger
+            // shares that ledger's HSN in Tally (e.g. "Dry Iron Sales Local" →
+            // 85164000), so this is the authoritative Tally value — not invented.
+            // Persist it to ItemMaster so future exports are instant.
+            if (!hsn && tallySalesLedger) {
+              const ledgerHsn = ledgerHsnMap.get(tallySalesLedger.toLowerCase());
+              if (ledgerHsn) {
+                hsn = ledgerHsn;
+                LOG(`HSN for "${n}" filled from ledger "${tallySalesLedger}" → ${ledgerHsn}`);
+                ItemMaster.updateOne({ name: n }, { $set: { hsn: ledgerHsn } })
+                  .catch(() => {});
               }
             }
 
