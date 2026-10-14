@@ -2972,7 +2972,40 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         continue;
       }
 
-      if (result.ok) {
+      // A response with NO errors but CREATED=0 AND ALTERED=0 is a SILENT NO-OP:
+      // Tally accepted the request but wrote nothing (usually the voucher already
+      // exists, so a plain Create is ignored). Marking these "Success" is exactly
+      // why the UI showed "exported" while Tally stayed empty. Treat a no-op as a
+      // duplicate and re-send the whole batch as Alter so the vouchers actually land.
+      const isNoOp = result.ok && (result.created || 0) === 0 && (result.altered || 0) === 0;
+      if (isNoOp) {
+        LOG(`Sales batch ${batchNo}: NO-OP (created=0 altered=0, no error) — re-sending ${batch.length} voucher(s) as Alter so they are actually written.`);
+        const alterXml      = batch.map(v => v.xml.replace(/ACTION="Create"/g, 'ACTION="Alter"')).join('');
+        const alterEnvelope = importEnvelope(cfg, 'Vouchers', alterXml);
+        const alterResp     = await postXml(cfg, alterEnvelope, 60000);
+        const alterResult   = parseResponse(alterResp, `Sales Invoices batch ${batchNo}/${batchTot} [NO-OP Alter retry]`);
+        const alterWrote    = (alterResult.created || 0) + (alterResult.altered || 0);
+
+        if (alterResult.ok && alterWrote > 0) {
+          totalCreated += alterResult.created || 0;
+          totalAltered += alterResult.altered || 0;
+          for (const v of batch) {
+            successIds.push(v.id);
+            await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', 'Written to Tally via Alter (Create was a no-op)');
+          }
+        } else {
+          // Still nothing written — report HONEST failure (do NOT mark synced).
+          const reason = alterResult.error
+            || 'Tally accepted the request but wrote nothing (created=0 altered=0). Voucher was NOT saved in Tally — check voucher type / company / voucher-number duplication.';
+          ERR(`Sales batch ${batchNo}: no-op persisted after Alter — ${reason}`);
+          batchErrors.push(`Batch ${batchNo}: ${reason}`);
+          for (const v of batch) {
+            failedInvoiceIds.push(v.id);
+            if (!invoiceErrorMap[String(v.id)]) invoiceErrorMap[String(v.id)] = reason;
+            await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', invoiceErrorMap[String(v.id)]);
+          }
+        }
+      } else if (result.ok) {
         totalCreated += result.created || 0;
         totalAltered += result.altered || 0;
         // ── SAFEGUARD 3: Per-invoice export log (created/success) ──────────
