@@ -219,7 +219,7 @@ function staticVars(cfg, extra = '') {
 /** Wrap XML payload in Tally Import envelope */
 function importEnvelope(cfg, reportName, innerXml) {
   return `<ENVELOPE>
-<HEADER><VERSION>1</VERSION><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA>
   <REQUESTDESC>
     <REPORTNAME>${reportName}</REPORTNAME>
@@ -237,7 +237,7 @@ ${innerXml}
 function importDebugEnvelope(cfg, reportName, innerXml) {
   const extra = '<SVEXPORTFORMAT>XML (Data Interchange)</SVEXPORTFORMAT>';
   return `<ENVELOPE>
-<HEADER><VERSION>1</VERSION><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA>
   <REQUESTDESC>
     <REPORTNAME>${reportName}</REPORTNAME>
@@ -1181,7 +1181,7 @@ async function fetchTallySalesLedgerNames(cfg) {
   <TDL><TDLMESSAGE>
     <COLLECTION NAME="AllLedgers">
       <TYPE>Ledger</TYPE>
-      <FETCH>Name, Parent, TaxType, GSTRate, GSTApplicable, HSNCODE, GSTHSNNAME, GSTDETAILS.LIST, RATEDETAILS.LIST</FETCH>
+      <FETCH>Name, Parent, TaxType, GSTRate, GSTApplicable</FETCH>
     </COLLECTION>
   </TDLMESSAGE></TDL>
 </DESC></BODY>
@@ -1190,12 +1190,6 @@ async function fetchTallySalesLedgerNames(cfg) {
     if (!resp) return [];
 
     const salesLedgers = [];
-    // ledgerName(lower) → HSN code taken from the ledger's GST classification.
-    // Many stock items in Tally have a BLANK HSN, but the sales LEDGER they post
-    // to carries the HSN (e.g. "Dry Iron Sales Local" → 85164000). Capturing it
-    // here lets the export fill a missing item HSN from its ledger — the HSN
-    // still comes 100% from Tally, never invented.
-    const hsnByLedger = new Map();
     for (const m of resp.matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
       const block  = m[1];
       const name   = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
@@ -1205,20 +1199,9 @@ async function fetchTallySalesLedgerNames(cfg) {
       const isSalesParent = parent.includes('sales');
       const isSalesName = nameLow.includes('sales') || nameLow.includes('sale');
       if (!isSalesParent && !isSalesName) continue;
-      if (!name) continue;
-      salesLedgers.push(name);
-      // HSN can appear as <HSNCODE>, <GSTHSNNAME>, or inside a <GSTDETAILS.LIST>/
-      // <RATEDETAILS.LIST> block on the ledger. Take the first non-empty one.
-      const hsn = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1]
-                || block.match(/<GSTHSNNAME>(.*?)<\/GSTHSNNAME>/i)?.[1]
-                || block.match(/<HSNCODE[^>]*>(.*?)<\/HSNCODE>/i)?.[1]
-                || '').trim();
-      if (hsn) hsnByLedger.set(nameLow, hsn);
+      if (name) salesLedgers.push(name);
     }
-    LOG(`fetchTallySalesLedgerNames: found ${salesLedgers.length} sales ledgers (${hsnByLedger.size} with HSN): [${salesLedgers.slice(0, 10).join(', ')}${salesLedgers.length > 10 ? '...' : ''}]`);
-    // Attach the HSN map as a non-enumerable property so existing callers that
-    // treat the return value as a plain array keep working unchanged.
-    Object.defineProperty(salesLedgers, 'hsnByLedger', { value: hsnByLedger, enumerable: false });
+    LOG(`fetchTallySalesLedgerNames: found ${salesLedgers.length} sales ledgers: [${salesLedgers.slice(0, 10).join(', ')}${salesLedgers.length > 10 ? '...' : ''}]`);
     return salesLedgers;
   } catch (e) {
     ERR('fetchTallySalesLedgerNames failed (non-fatal):', e.message);
@@ -1900,7 +1883,6 @@ ${addressListXml}
   <VOUCHERTYPENAME>${esc(voucherTypeName)}</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(v.voucherNumber || '')}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
-  <PARTYNAME>${esc(v.partyLedgerName || '')}</PARTYNAME>
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
   ${poOrderRefXml}
@@ -2014,38 +1996,21 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // The auto-masters step creates these ledgers if they don't exist anyway.
     let tallyGstLedgers = null;
     let tallySalesLedgers = [];
-    // ledgerName(lower) → HSN taken from the ledger master in Tally. Used as the
-    // final HSN fallback when an item (and its stock master) has no HSN but the
-    // sales ledger it posts to does. Populated from fetchTallySalesLedgerNames.
-    let ledgerHsnMap = new Map();
     const isConnectorOnlineMode = cfg.useConnector && cfg.connectorId && cfg.connectorOnline;
-
-    // Sales-ledger names + their HSN are ALWAYS fetched (all modes, including the
-    // connector-online mode used in production). They drive two things that fix
-    // the recurring "wrong ledger / HSN missing" problem: (1) matching each item
-    // to its correct sales ledger, and (2) filling a missing item HSN from that
-    // ledger's HSN. This is the same live-fetch path the stock-item GST/HSN fetch
-    // already uses through the connector, so it works online too.
-    try {
-      tallySalesLedgers = await fetchTallySalesLedgerNames(cfg);
-      if (tallySalesLedgers && tallySalesLedgers.hsnByLedger instanceof Map) {
-        ledgerHsnMap = tallySalesLedgers.hsnByLedger;
-      }
-      LOG(`exportSalesInvoices: found ${tallySalesLedgers.length} sales ledgers in Tally (${ledgerHsnMap.size} carry an HSN)`);
-    } catch (e) {
-      ERR('exportSalesInvoices: sales-ledger fetch failed (non-fatal):', e.message);
-    }
-
     if (!isConnectorOnlineMode) {
-      // GST ledger names are only fetched in direct/offline mode (unchanged behavior).
-      tallyGstLedgers = await fetchTallyGstLedgerNames(cfg);
+      // Only fetch live ledger names in direct (local) mode or when connector is offline — fast enough
+      [tallyGstLedgers, tallySalesLedgers] = await Promise.all([
+        fetchTallyGstLedgerNames(cfg),
+        fetchTallySalesLedgerNames(cfg),
+      ]);
       if (!tallyGstLedgers || (!tallyGstLedgers.cgstNames.length && !tallyGstLedgers.sgstNames.length && !tallyGstLedgers.igstNames.length)) {
         LOG('⚠️ exportSalesInvoices: could not fetch GST ledger names from Tally — using fallback names.');
       } else {
         LOG(`exportSalesInvoices: using Tally GST ledgers — cgst:[${tallyGstLedgers.cgstNames.join(', ')}] sgst:[${tallyGstLedgers.sgstNames.join(', ')}]`);
       }
+      LOG(`exportSalesInvoices: found ${tallySalesLedgers.length} sales ledgers in Tally`);
     } else {
-      LOG('exportSalesInvoices: connector mode (ONLINE) — skipping live GST ledger name fetch (using fallback names)');
+      LOG('exportSalesInvoices: connector mode (ONLINE) — skipping live GST/sales ledger name fetch (using fallback names)');
     }
 
     // Fetch all ERP invoices that haven't been successfully synced.
@@ -2324,17 +2289,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // This is the ONLY safe way to ensure correct tax: fix missing rates on first use,
     // never touch items that already have the correct rate.
     let tallyStockGstMap = new Map(); // name → current Tally GST rate
-    const tallyStockHsnMap = new Map(); // name(lower) → HSN code fetched live from Tally
     try {
       const co = (cfg.companyName || '').trim().toUpperCase();
       const coTag = co ? `<SVCURRENTCOMPANY>${esc(co)}</SVCURRENTCOMPANY>` : '';
-      // Fetch Name + GST rate + HSN for every stock item. HSNCODE and GSTHSNNAME are
-      // both requested because, depending on the Tally GST setup, the HSN may live on
-      // either tag (or inside GSTDETAILS). This lets the export read each item's HSN
-      // directly from Tally instead of relying on (often empty) ItemMaster.hsn.
       const fetchXml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>StockGSTCheck</ID></HEADER>
 <BODY><DESC><STATICVARIABLES>${coTag}<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
-<TDL><TDLMESSAGE><COLLECTION NAME="StockGSTCheck"><TYPE>Stock Item</TYPE><FETCH>Name,GSTApplicable,GSTRate,HSNCODE,GSTHSNNAME,GSTDETAILS.LIST</FETCH></COLLECTION></TDLMESSAGE></TDL>
+<TDL><TDLMESSAGE><COLLECTION NAME="StockGSTCheck"><TYPE>Stock Item</TYPE><FETCH>Name,GSTApplicable,GSTRate</FETCH></COLLECTION></TDLMESSAGE></TDL>
 </DESC></BODY></ENVELOPE>`;
       const resp = await postXmlWithRetry(cfg, fetchXml, 30000);
       if (resp) {
@@ -2343,17 +2303,11 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const block = m[2];
           const rate = parseFloat((block.match(/<GSTRATE>(.*?)<\/GSTRATE>/i)?.[1] || '0'));
           tallyStockGstMap.set(iname.toLowerCase(), rate);
-          // HSN can appear as <HSNCODE>, <GSTHSNNAME>, or inside <GSTDETAILS.LIST>
-          const hsnLive = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1]
-                        || block.match(/<GSTHSNNAME>(.*?)<\/GSTHSNNAME>/i)?.[1]
-                        || block.match(/<HSNCODE[^>]*>(.*?)<\/HSNCODE>/i)?.[1]
-                        || '').trim();
-          if (hsnLive) tallyStockHsnMap.set(iname.toLowerCase(), hsnLive);
         }
-        LOG(`exportSalesInvoices: fetched GST rates for ${tallyStockGstMap.size} stock items, HSN for ${tallyStockHsnMap.size} from Tally`);
+        LOG(`exportSalesInvoices: fetched GST rates for ${tallyStockGstMap.size} stock items from Tally`);
       }
     } catch (e) {
-      LOG(`exportSalesInvoices: could not fetch stock item GST/HSN (non-fatal): ${e.message}`);
+      LOG(`exportSalesInvoices: could not fetch stock item GST rates (non-fatal): ${e.message}`);
     }
 
     const autoStockXml = stockNames.map(name => {
@@ -2415,7 +2369,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
     LOG(`Sales: auto-creating ${partyNames.length} party ledgers + ${stockNames.length} stock items before vouchers`);
     LOG(`Sales: party names to create: ${partyNames.slice(0, 5).join(', ')}${partyNames.length > 5 ? ` ... (${partyNames.length - 5} more)` : ''}`);
-    const mastersEnvelope = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+    const mastersEnvelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${autoUnitXml}${autoLedgerXml}${autoStockXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
@@ -2556,20 +2510,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const enrichedItems = await Promise.all((inv.items || []).map(async item => {
             const n  = (item.description || item.name || '').trim();
             const im = masterMap.get(n);
-            // HSN priority: invoice line → ItemMaster → LIVE Tally stock-item HSN.
-            // The live Tally value is the authoritative source (matches what Tally
-            // itself expects for the e-invoice); it fills the gap when the invoice
-            // and ItemMaster have no HSN (Excel never carries HSN). If Tally has the
-            // HSN on the item, we also persist it to ItemMaster for future exports.
-            let hsn = (item.hsn || '').trim() || (im?.hsn || '').trim();
-            if (!hsn) {
-              const liveHsn = tallyStockHsnMap.get(n.toLowerCase());
-              if (liveHsn) {
-                hsn = liveHsn;
-                ItemMaster.updateOne({ name: n }, { $set: { hsn: liveHsn } })
-                  .catch(() => {});
-              }
-            }
+            const hsn = (item.hsn || '').trim() || (im?.hsn || '').trim();
 
             // Determine current tallySalesLedger: item → ItemMaster → resolve
             let tallySalesLedger = (item.tallySalesLedger || '').trim()
@@ -2617,23 +2558,6 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
                 // Save back to ItemMaster so future exports use the corrected ledger
                 ItemMaster.updateOne({ name: n }, { $set: { tallySalesLedger: resolved } })
                   .catch(e => ERR(`Failed to save tallySalesLedger for "${n}":`, e.message));
-              }
-            }
-
-            // ── FINAL HSN FALLBACK: take HSN from the resolved sales LEDGER ─────
-            // If the item still has no HSN (blank on the invoice line, in
-            // ItemMaster, AND on the Tally stock item), use the HSN carried by
-            // the sales ledger it posts to. Every item under the same ledger
-            // shares that ledger's HSN in Tally (e.g. "Dry Iron Sales Local" →
-            // 85164000), so this is the authoritative Tally value — not invented.
-            // Persist it to ItemMaster so future exports are instant.
-            if (!hsn && tallySalesLedger) {
-              const ledgerHsn = ledgerHsnMap.get(tallySalesLedger.toLowerCase());
-              if (ledgerHsn) {
-                hsn = ledgerHsn;
-                LOG(`HSN for "${n}" filled from ledger "${tallySalesLedger}" → ${ledgerHsn}`);
-                ItemMaster.updateOne({ name: n }, { $set: { hsn: ledgerHsn } })
-                  .catch(() => {});
               }
             }
 
@@ -2754,43 +2678,20 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // Previously BATCH_SIZE=1 caused 27K+ individual HTTP requests which
     // corrupts Tally's data file (triggers "Repair Company Data").
     // Per Tally XML docs, multiple VOUCHERs in one TALLYMESSAGE is supported.
-    // BATCH_SIZE=1 (one voucher per request): a 10-voucher batch is ~86 KB and,
-    // when relayed through the connector (CONNECTOR → Socket.IO path), Tally
-    // rejects it as "Unknown Request, cannot be processed" — the large payload
-    // does not arrive intact over the relay. A single voucher is ~8 KB and goes
-    // through cleanly. This trades a little speed for reliability over the
-    // connector. (Direct-mode exports in September used small payloads too.)
-    const BATCH_SIZE  = 1;
+    // Using batch of 10 balances reliability vs performance:
+    //  - Reduces HTTP requests by 10x (less file I/O stress on Tally)
+    //  - Still isolates failures to small groups
+    //  - Avoids payload size limits (10 invoices ~50KB, well under Tally's limit)
+    const BATCH_SIZE  = 10;
     let   totalCreated = 0, totalAltered = 0;
     const batchErrors  = [...preflightErrors];
     const successIds   = [];
-
-    // Persist a batch's successful invoices to the DB IMMEDIATELY (not only at the
-    // end of the whole run). This is the fix for "can't tell which invoice went in":
-    // if a later batch throws, the invoices already sent to Tally stay marked synced
-    // instead of being lost when the run aborts. Idempotent — safe to call per batch.
-    const flushSynced = async (ids) => {
-      if (!ids || !ids.length) return;
-      try {
-        await Invoice.updateMany(
-          { _id: { $in: ids } },
-          { tallySync: true, tallySyncAt: new Date(), retryCount: 0, lastError: '', lastTriedAt: new Date() }
-        );
-      } catch (e) {
-        ERR(`flushSynced failed (non-fatal): ${e.message}`);
-      }
-    };
-    const flushedIds = new Set();
 
     for (let b = 0; b < vouchersXml.length; b += BATCH_SIZE) {
       const batch    = vouchersXml.slice(b, b + BATCH_SIZE);
       const batchNo  = Math.floor(b / BATCH_SIZE) + 1;
       const batchTot = Math.ceil(vouchersXml.length / BATCH_SIZE);
       LOG(`Sales batch ${batchNo}/${batchTot} — ${batch.length} vouchers`);
-
-      // Isolate each batch: a thrown exception in one batch must NOT abort the whole
-      // run (that was why the export stopped mid-way and left invoices unaccounted).
-      try {
 
       const singleXml = batch.map(v => v.xml).join('');
       const singleEnvelope = importEnvelope(cfg, 'Vouchers', singleXml);
@@ -2975,40 +2876,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         continue;
       }
 
-      // A response with NO errors but CREATED=0 AND ALTERED=0 is a SILENT NO-OP:
-      // Tally accepted the request but wrote nothing (usually the voucher already
-      // exists, so a plain Create is ignored). Marking these "Success" is exactly
-      // why the UI showed "exported" while Tally stayed empty. Treat a no-op as a
-      // duplicate and re-send the whole batch as Alter so the vouchers actually land.
-      const isNoOp = result.ok && (result.created || 0) === 0 && (result.altered || 0) === 0;
-      if (isNoOp) {
-        LOG(`Sales batch ${batchNo}: NO-OP (created=0 altered=0, no error) — re-sending ${batch.length} voucher(s) as Alter so they are actually written.`);
-        const alterXml      = batch.map(v => v.xml.replace(/ACTION="Create"/g, 'ACTION="Alter"')).join('');
-        const alterEnvelope = importEnvelope(cfg, 'Vouchers', alterXml);
-        const alterResp     = await postXml(cfg, alterEnvelope, 60000);
-        const alterResult   = parseResponse(alterResp, `Sales Invoices batch ${batchNo}/${batchTot} [NO-OP Alter retry]`);
-        const alterWrote    = (alterResult.created || 0) + (alterResult.altered || 0);
-
-        if (alterResult.ok && alterWrote > 0) {
-          totalCreated += alterResult.created || 0;
-          totalAltered += alterResult.altered || 0;
-          for (const v of batch) {
-            successIds.push(v.id);
-            await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Success', 'Written to Tally via Alter (Create was a no-op)');
-          }
-        } else {
-          // Still nothing written — report HONEST failure (do NOT mark synced).
-          const reason = alterResult.error
-            || 'Tally accepted the request but wrote nothing (created=0 altered=0). Voucher was NOT saved in Tally — check voucher type / company / voucher-number duplication.';
-          ERR(`Sales batch ${batchNo}: no-op persisted after Alter — ${reason}`);
-          batchErrors.push(`Batch ${batchNo}: ${reason}`);
-          for (const v of batch) {
-            failedInvoiceIds.push(v.id);
-            if (!invoiceErrorMap[String(v.id)]) invoiceErrorMap[String(v.id)] = reason;
-            await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', invoiceErrorMap[String(v.id)]);
-          }
-        }
-      } else if (result.ok) {
+      if (result.ok) {
         totalCreated += result.created || 0;
         totalAltered += result.altered || 0;
         // ── SAFEGUARD 3: Per-invoice export log (created/success) ──────────
@@ -3032,36 +2900,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', invoiceErrorMap[String(v.id)]);
         }
       }
-      } catch (batchErr) {
-        // One batch threw — record every invoice in it as Failed with the real
-        // reason, then CONTINUE to the next batch instead of aborting the run.
-        const errMsg = `Batch ${batchNo} crashed: ${batchErr.message}`;
-        ERR(`Sales batch ${batchNo}: ${errMsg}`);
-        batchErrors.push(errMsg);
-        for (const v of batch) {
-          if (!successIds.includes(v.id)) {
-            failedInvoiceIds.push(v.id);
-            if (!invoiceErrorMap[String(v.id)]) invoiceErrorMap[String(v.id)] = errMsg;
-            await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', errMsg);
-          }
-        }
-      }
-
-      // Persist this batch's successes to the DB NOW (incremental), so a crash in
-      // a later batch can never erase the record of what already went to Tally.
-      const newlySynced = successIds.filter(id => !flushedIds.has(String(id)));
-      if (newlySynced.length) {
-        await flushSynced(newlySynced);
-        newlySynced.forEach(id => flushedIds.add(String(id)));
-      }
     }
 
-    // Final safety flush: mark any remaining successful invoices as synced
-    // (covers successes recorded outside the per-batch flush, e.g. retry paths).
-    const remainingSynced = successIds.filter(id => !flushedIds.has(String(id)));
-    if (remainingSynced.length > 0) {
+    // Mark only successfully exported invoices as synced
+    if (successIds.length > 0) {
       await Invoice.updateMany(
-        { _id: { $in: remainingSynced } }, 
+        { _id: { $in: successIds } }, 
         { 
           tallySync: true, 
           tallySyncAt: new Date(), 
@@ -3152,7 +2996,7 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
     ).join('');
 
     LOG(`Purchase: auto-creating ${vendorNames.length} vendor ledgers + ${poStockNames.length} stock items before vouchers`);
-    const purMastersEnvelope = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+    const purMastersEnvelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${purAutoLedgerXml}${purAutoStockXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
