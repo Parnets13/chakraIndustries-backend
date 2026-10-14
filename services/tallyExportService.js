@@ -1181,7 +1181,7 @@ async function fetchTallySalesLedgerNames(cfg) {
   <TDL><TDLMESSAGE>
     <COLLECTION NAME="AllLedgers">
       <TYPE>Ledger</TYPE>
-      <FETCH>Name, Parent, TaxType, GSTRate, GSTApplicable, HSNCODE, GSTHSNNAME, GSTDETAILS.LIST, RATEDETAILS.LIST</FETCH>
+      <FETCH>Name, Parent, TaxType, GSTRate, GSTApplicable, HSNCODE, GSTHSNNAME</FETCH>
     </COLLECTION>
   </TDLMESSAGE></TDL>
 </DESC></BODY>
@@ -1190,10 +1190,8 @@ async function fetchTallySalesLedgerNames(cfg) {
     if (!resp) return [];
 
     const salesLedgers = [];
-    // ledgerName(lower) → HSN taken from the ledger master. Many stock items have a
-    // BLANK HSN, but the sales ledger they post to carries it (e.g. "Dry Iron Sales
-    // Local" → 85164000). Capturing it lets the export fill a missing item HSN from
-    // its ledger — the HSN still comes from Tally, never invented.
+    // ledgerName(lower) → HSN from the ledger master. Used ONLY to fill an item's
+    // HSN when it is blank — never to change the ledger. The HSN comes from Tally.
     const hsnByLedger = new Map();
     for (const m of resp.matchAll(/<LEDGER[^>]*>([\s\S]*?)<\/LEDGER>/gi)) {
       const block  = m[1];
@@ -1208,13 +1206,10 @@ async function fetchTallySalesLedgerNames(cfg) {
       salesLedgers.push(name);
       const hsn = (block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1]
                 || block.match(/<GSTHSNNAME>(.*?)<\/GSTHSNNAME>/i)?.[1]
-                || block.match(/<HSNCODE[^>]*>(.*?)<\/HSNCODE>/i)?.[1]
                 || '').trim();
       if (hsn) hsnByLedger.set(nameLow, hsn);
     }
     LOG(`fetchTallySalesLedgerNames: found ${salesLedgers.length} sales ledgers (${hsnByLedger.size} with HSN): [${salesLedgers.slice(0, 10).join(', ')}${salesLedgers.length > 10 ? '...' : ''}]`);
-    // Attach the HSN map as a non-enumerable property so callers that treat the
-    // return value as a plain array keep working unchanged.
     Object.defineProperty(salesLedgers, 'hsnByLedger', { value: hsnByLedger, enumerable: false });
     return salesLedgers;
   } catch (e) {
@@ -1234,61 +1229,8 @@ async function fetchTallySalesLedgerNames(cfg) {
  * 4. First Tally ledger that is NOT a generic "Sales Accounts"
  * 5. "Sales Accounts" fallback
  */
-// ── Product category → sales-ledger keyword map ──────────────────────────────
-// Maps words found in a stock item's NAME to the keyword that identifies the
-// correct Tally sales ledger. This is what fixes the recurring "wrong ledger /
-// HSN missing" problem permanently: an item like "Glo Star Copper Water Purifier"
-// is matched to a "Water Purifier ..." ledger regardless of what (possibly wrong)
-// ledger was stored earlier. The actual ledger name is still taken from Tally's
-// live list — we only pick the one whose name contains the category keyword.
-// Order matters: more specific categories are listed BEFORE broader ones so an
-// air-cooler product ("coolmist"/"drift") is not swallowed by the water-purifier rule.
-const CATEGORY_LEDGER_KEYWORDS = [
-  { match: ['air cooler','coolmist','desert cooler','drift-plus','drift plus','mini cooler'], ledgerKeyword: 'air cooler' },
-  { match: ['air fryer','fryer'], ledgerKeyword: 'air fryer' },
-  { match: ['water purifier','ro+uv','ro + uv','alkaline','glo star','glo-star','envy','waas','zinger','bolt','celestia','mineraliser','ro purifier'], ledgerKeyword: 'water purifier' },
-  { match: ['induction','cooktop','infrared','infrarred','irx','icx','neo induction'], ledgerKeyword: 'induction' },
-  { match: ['coffee'], ledgerKeyword: 'coffee' },
-  { match: ['dry iron','steam iron','sleek','panache','fabrishine','fabrismooth','kratos'], ledgerKeyword: 'iron' },
-  { match: ['water heater','geyser','immersion','storage water'], ledgerKeyword: 'water heater' },
-  { match: ['kettle'], ledgerKeyword: 'water heater' },
-  { match: ['fan heater','quartz heater','room heater','heater'], ledgerKeyword: 'heater' },
-  { match: ['ceiling fan','pedestal fan','stand fan','table fan'], ledgerKeyword: 'fan' },
-  { match: ['mixer','grinder'], ledgerKeyword: 'mixer' },
-  { match: ['chopper','choper'], ledgerKeyword: 'chopper' },
-  { match: ['toaster','sandwich'], ledgerKeyword: 'toaster' },
-  { match: ['neck pillow','pillow'], ledgerKeyword: 'pillow' },
-];
-
-// Given an item name + Tally's live sales-ledger list, pick the ledger whose name
-// matches the item's product category. Returns '' if no confident category match.
-export function matchCategoryLedger(salesLedgers, itemName, isInterstate) {
-  const nameLow = (itemName || '').toLowerCase();
-  const supply  = isInterstate ? 'interstate' : 'local';
-  for (const cat of CATEGORY_LEDGER_KEYWORDS) {
-    if (!cat.match.some(w => nameLow.includes(w))) continue;
-    // Among ledgers whose name contains the category keyword, prefer the one
-    // whose supply type (local/interstate) matches; else take the first.
-    const candidates = salesLedgers.filter(l => l.toLowerCase().includes(cat.ledgerKeyword));
-    if (!candidates.length) continue;
-    const supplyMatch = candidates.find(l => {
-      const low = l.toLowerCase();
-      return isInterstate ? low.includes('interstate') : (low.includes('local') || !low.includes('interstate'));
-    });
-    return supplyMatch || candidates[0];
-  }
-  return '';
-}
-
 function resolveSalesLedger(salesLedgers, itemName, itemGSTRate, tallySalesLedger = null, isInterstate = false) {
-  // Priority 0: product-category keyword match from the item NAME against the live
-  // Tally ledger list. This takes precedence over a stored ledger ONLY when a
-  // confident category match exists — it is how a wrong stored ledger (e.g. a water
-  // purifier mapped to a "Comforter"/"Bedsheets"/customer ledger) gets corrected.
-  const catMatch = matchCategoryLedger(salesLedgers, itemName, isInterstate);
-  if (catMatch) return catMatch;
-
-  // Priority 1: stored exact ledger name from ItemMaster (only if it exists in Tally)
+  // Priority 1: stored exact ledger name from ItemMaster
   if (tallySalesLedger && salesLedgers.includes(tallySalesLedger)) {
     return tallySalesLedger;
   }
@@ -2010,8 +1952,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // The auto-masters step creates these ledgers if they don't exist anyway.
     let tallyGstLedgers = null;
     let tallySalesLedgers = [];
-    // ledgerName(lower) → HSN from the ledger master. Final HSN fallback when an
-    // item has no HSN but its sales ledger does. Populated below from the fetch.
+    // ledgerName(lower) → HSN from the ledger master. ONLY used to fill a blank item
+    // HSN; never changes the ledger. Populated from fetchTallySalesLedgerNames.
     let ledgerHsnMap = new Map();
     const isConnectorOnlineMode = cfg.useConnector && cfg.connectorId && cfg.connectorOnline;
     if (!isConnectorOnlineMode) {
@@ -2020,9 +1962,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         fetchTallyGstLedgerNames(cfg),
         fetchTallySalesLedgerNames(cfg),
       ]);
-      if (tallySalesLedgers && tallySalesLedgers.hsnByLedger instanceof Map) {
-        ledgerHsnMap = tallySalesLedgers.hsnByLedger;
-      }
+      if (tallySalesLedgers && tallySalesLedgers.hsnByLedger instanceof Map) ledgerHsnMap = tallySalesLedgers.hsnByLedger;
       if (!tallyGstLedgers || (!tallyGstLedgers.cgstNames.length && !tallyGstLedgers.sgstNames.length && !tallyGstLedgers.igstNames.length)) {
         LOG('⚠️ exportSalesInvoices: could not fetch GST ledger names from Tally — using fallback names.');
       } else {
@@ -2030,17 +1970,12 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       }
       LOG(`exportSalesInvoices: found ${tallySalesLedgers.length} sales ledgers in Tally`);
     } else {
-      // Connector ONLINE: GST-ledger fetch stays skipped (unchanged behavior), but we
-      // STILL fetch the sales-ledger list + their HSN. This is needed so items with a
-      // blank HSN can be filled from their sales ledger's HSN (the 41 blank-HSN
-      // invoices). It is one small Collection query, same path the stock-item HSN
-      // fetch already uses through the connector.
-      LOG('exportSalesInvoices: connector mode (ONLINE) — skipping GST ledger fetch, but fetching sales ledgers for HSN/ledger match');
+      // Connector ONLINE: keep GST-ledger fetch skipped (Oct-9 behavior), but fetch the
+      // sales-ledger list to read each ledger's HSN — needed to fill blank item HSN.
+      LOG('exportSalesInvoices: connector mode (ONLINE) — fetching sales ledgers only (for ledger HSN)');
       try {
         tallySalesLedgers = await fetchTallySalesLedgerNames(cfg);
-        if (tallySalesLedgers && tallySalesLedgers.hsnByLedger instanceof Map) {
-          ledgerHsnMap = tallySalesLedgers.hsnByLedger;
-        }
+        if (tallySalesLedgers && tallySalesLedgers.hsnByLedger instanceof Map) ledgerHsnMap = tallySalesLedgers.hsnByLedger;
         LOG(`exportSalesInvoices: (connector) found ${tallySalesLedgers.length} sales ledgers (${ledgerHsnMap.size} with HSN)`);
       } catch (e) {
         ERR('exportSalesInvoices: (connector) sales-ledger fetch failed (non-fatal):', e.message);
@@ -2550,28 +2485,8 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
             let tallySalesLedger = (item.tallySalesLedger || '').trim()
                                 || (im?.tallySalesLedger  || '').trim();
 
-            // Re-resolve the ledger when it is EITHER empty/generic OR invalid
-            // (not present in Tally's live sales-ledger list). The second case is
-            // the permanent fix for the recurring "wrong ledger / HSN missing"
-            // problem: a stored ledger that points to the wrong product/category
-            // (e.g. a water purifier mapped to "Comforter"/"Bedsheets"/a customer
-            // ledger) does NOT exist as a valid match, so we re-resolve by the
-            // item's own name against the live Tally ledger list. A stored ledger
-            // that IS valid in Tally is left untouched.
-            const ledgerLow     = tallySalesLedger.toLowerCase();
-            const isGenericLed  = GENERIC.has(ledgerLow);
-            const isInTallyList = tallySalesLedgers.length > 0 && tallySalesLedgers.includes(tallySalesLedger);
-            // Does the stored ledger's category actually match this item's name?
-            // (guards against a valid-but-wrong-category ledger, e.g. "Comforter").
-            const itemIgst0     = +(item.igst || 0);
-            const categoryLedger = tallySalesLedgers.length > 0
-              ? matchCategoryLedger(tallySalesLedgers, n, itemIgst0 > 0)
-              : '';
-            const storedMatchesCategory = categoryLedger && categoryLedger === tallySalesLedger;
-            const needsResolve = tallySalesLedgers.length > 0 &&
-              (isGenericLed || !isInTallyList || (categoryLedger && !storedMatchesCategory));
-
-            if (needsResolve) {
+            if (GENERIC.has(tallySalesLedger.toLowerCase()) && tallySalesLedgers.length > 0) {
+              // No ledger set — auto-resolve from live Tally list
               const itemCgst = +(item.cgst || 0);
               const itemIgst = +(item.igst || 0);
               const taxBase  = +(item.basic || 0) || +(item.amount || 0);
@@ -2586,21 +2501,19 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
                 tallySalesLedgers, n, gstRate, null, isInterstate
               );
               const GENERIC_RESOLVED = new Set(['sales accounts', 'sales accounts (group)']);
-              if (resolved && !GENERIC_RESOLVED.has(resolved.toLowerCase()) && resolved !== tallySalesLedger) {
-                LOG(`Ledger corrected for "${n}": "${tallySalesLedger||'(empty)'}" → "${resolved}" — saving to ItemMaster`);
+              if (resolved && !GENERIC_RESOLVED.has(resolved.toLowerCase())) {
                 tallySalesLedger = resolved;
-                // Save back to ItemMaster so future exports use the corrected ledger
+                LOG(`Auto-resolved tallySalesLedger for "${n}": "${resolved}" — saving to ItemMaster`);
+                // Save back to ItemMaster so future exports skip this resolution step
                 ItemMaster.updateOne({ name: n }, { $set: { tallySalesLedger: resolved } })
                   .catch(e => ERR(`Failed to save tallySalesLedger for "${n}":`, e.message));
               }
             }
 
-            // ── FILL MISSING HSN FROM THE RESOLVED SALES LEDGER ────────────────
-            // If the item has no HSN (blank on the invoice line AND in ItemMaster),
-            // take the HSN carried by its sales ledger in Tally. Every item under
-            // the same ledger shares that ledger's HSN (e.g. "Dry Iron Sales Local"
-            // → 85164000), so this is the authoritative Tally value — not invented.
-            // This is what the 41 blank-HSN invoices need. Persist for next time.
+            // ── FILL MISSING HSN FROM THE SALES LEDGER (only when item HSN is blank) ──
+            // Does NOT change the ledger — just reads the ledger's HSN from Tally when
+            // the item/master has none. This fixes the blank-HSN mismatch without
+            // touching the Oct-9 ledger behavior. Persist so next export is instant.
             if (!hsn && tallySalesLedger) {
               const ledgerHsn = ledgerHsnMap.get(tallySalesLedger.toLowerCase());
               if (ledgerHsn) {
