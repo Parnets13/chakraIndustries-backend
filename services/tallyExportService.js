@@ -2030,7 +2030,21 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       }
       LOG(`exportSalesInvoices: found ${tallySalesLedgers.length} sales ledgers in Tally`);
     } else {
-      LOG('exportSalesInvoices: connector mode (ONLINE) — skipping live GST/sales ledger name fetch (using fallback names)');
+      // Connector ONLINE: GST-ledger fetch stays skipped (unchanged behavior), but we
+      // STILL fetch the sales-ledger list + their HSN. This is needed so items with a
+      // blank HSN can be filled from their sales ledger's HSN (the 41 blank-HSN
+      // invoices). It is one small Collection query, same path the stock-item HSN
+      // fetch already uses through the connector.
+      LOG('exportSalesInvoices: connector mode (ONLINE) — skipping GST ledger fetch, but fetching sales ledgers for HSN/ledger match');
+      try {
+        tallySalesLedgers = await fetchTallySalesLedgerNames(cfg);
+        if (tallySalesLedgers && tallySalesLedgers.hsnByLedger instanceof Map) {
+          ledgerHsnMap = tallySalesLedgers.hsnByLedger;
+        }
+        LOG(`exportSalesInvoices: (connector) found ${tallySalesLedgers.length} sales ledgers (${ledgerHsnMap.size} with HSN)`);
+      } catch (e) {
+        ERR('exportSalesInvoices: (connector) sales-ledger fetch failed (non-fatal):', e.message);
+      }
     }
 
     // Fetch all ERP invoices that haven't been successfully synced.
