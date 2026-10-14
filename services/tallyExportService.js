@@ -219,7 +219,7 @@ function staticVars(cfg, extra = '') {
 /** Wrap XML payload in Tally Import envelope */
 function importEnvelope(cfg, reportName, innerXml) {
   return `<ENVELOPE>
-<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA>
   <REQUESTDESC>
     <REPORTNAME>${reportName}</REPORTNAME>
@@ -237,7 +237,7 @@ ${innerXml}
 function importDebugEnvelope(cfg, reportName, innerXml) {
   const extra = '<SVEXPORTFORMAT>XML (Data Interchange)</SVEXPORTFORMAT>';
   return `<ENVELOPE>
-<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA>
   <REQUESTDESC>
     <REPORTNAME>${reportName}</REPORTNAME>
@@ -2414,7 +2414,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
 
     LOG(`Sales: auto-creating ${partyNames.length} party ledgers + ${stockNames.length} stock items before vouchers`);
     LOG(`Sales: party names to create: ${partyNames.slice(0, 5).join(', ')}${partyNames.length > 5 ? ` ... (${partyNames.length - 5} more)` : ''}`);
-    const mastersEnvelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+    const mastersEnvelope = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${autoUnitXml}${autoLedgerXml}${autoStockXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
@@ -2762,11 +2762,32 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     const batchErrors  = [...preflightErrors];
     const successIds   = [];
 
+    // Persist a batch's successful invoices to the DB IMMEDIATELY (not only at the
+    // end of the whole run). This is the fix for "can't tell which invoice went in":
+    // if a later batch throws, the invoices already sent to Tally stay marked synced
+    // instead of being lost when the run aborts. Idempotent — safe to call per batch.
+    const flushSynced = async (ids) => {
+      if (!ids || !ids.length) return;
+      try {
+        await Invoice.updateMany(
+          { _id: { $in: ids } },
+          { tallySync: true, tallySyncAt: new Date(), retryCount: 0, lastError: '', lastTriedAt: new Date() }
+        );
+      } catch (e) {
+        ERR(`flushSynced failed (non-fatal): ${e.message}`);
+      }
+    };
+    const flushedIds = new Set();
+
     for (let b = 0; b < vouchersXml.length; b += BATCH_SIZE) {
       const batch    = vouchersXml.slice(b, b + BATCH_SIZE);
       const batchNo  = Math.floor(b / BATCH_SIZE) + 1;
       const batchTot = Math.ceil(vouchersXml.length / BATCH_SIZE);
       LOG(`Sales batch ${batchNo}/${batchTot} — ${batch.length} vouchers`);
+
+      // Isolate each batch: a thrown exception in one batch must NOT abort the whole
+      // run (that was why the export stopped mid-way and left invoices unaccounted).
+      try {
 
       const singleXml = batch.map(v => v.xml).join('');
       const singleEnvelope = importEnvelope(cfg, 'Vouchers', singleXml);
@@ -2975,12 +2996,36 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', invoiceErrorMap[String(v.id)]);
         }
       }
+      } catch (batchErr) {
+        // One batch threw — record every invoice in it as Failed with the real
+        // reason, then CONTINUE to the next batch instead of aborting the run.
+        const errMsg = `Batch ${batchNo} crashed: ${batchErr.message}`;
+        ERR(`Sales batch ${batchNo}: ${errMsg}`);
+        batchErrors.push(errMsg);
+        for (const v of batch) {
+          if (!successIds.includes(v.id)) {
+            failedInvoiceIds.push(v.id);
+            if (!invoiceErrorMap[String(v.id)]) invoiceErrorMap[String(v.id)] = errMsg;
+            await logInvoiceExportResult(syncId, v.invoiceNo, v.partyName, 'Failed', errMsg);
+          }
+        }
+      }
+
+      // Persist this batch's successes to the DB NOW (incremental), so a crash in
+      // a later batch can never erase the record of what already went to Tally.
+      const newlySynced = successIds.filter(id => !flushedIds.has(String(id)));
+      if (newlySynced.length) {
+        await flushSynced(newlySynced);
+        newlySynced.forEach(id => flushedIds.add(String(id)));
+      }
     }
 
-    // Mark only successfully exported invoices as synced
-    if (successIds.length > 0) {
+    // Final safety flush: mark any remaining successful invoices as synced
+    // (covers successes recorded outside the per-batch flush, e.g. retry paths).
+    const remainingSynced = successIds.filter(id => !flushedIds.has(String(id)));
+    if (remainingSynced.length > 0) {
       await Invoice.updateMany(
-        { _id: { $in: successIds } }, 
+        { _id: { $in: remainingSynced } }, 
         { 
           tallySync: true, 
           tallySyncAt: new Date(), 
@@ -3071,7 +3116,7 @@ export async function exportPurchaseInvoices(cfg, triggeredBy) {
     ).join('');
 
     LOG(`Purchase: auto-creating ${vendorNames.length} vendor ledgers + ${poStockNames.length} stock items before vouchers`);
-    const purMastersEnvelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+    const purMastersEnvelope = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
 <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>
 <REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${purAutoLedgerXml}${purAutoStockXml}</TALLYMESSAGE></REQUESTDATA>
 </IMPORTDATA></BODY></ENVELOPE>`;
