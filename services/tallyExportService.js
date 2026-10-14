@@ -1900,6 +1900,7 @@ ${addressListXml}
   <VOUCHERTYPENAME>${esc(voucherTypeName)}</VOUCHERTYPENAME>
   <VOUCHERNUMBER>${esc(v.voucherNumber || '')}</VOUCHERNUMBER>
   <PARTYLEDGERNAME>${esc(v.partyLedgerName || '')}</PARTYLEDGERNAME>
+  <PARTYNAME>${esc(v.partyLedgerName || '')}</PARTYNAME>
   <ISINVOICE>Yes</ISINVOICE>
   <BUYERSORDERNO>${esc(v.buyersOrderNo || '')}</BUYERSORDERNO>
   ${poOrderRefXml}
