@@ -2754,11 +2754,13 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     // Previously BATCH_SIZE=1 caused 27K+ individual HTTP requests which
     // corrupts Tally's data file (triggers "Repair Company Data").
     // Per Tally XML docs, multiple VOUCHERs in one TALLYMESSAGE is supported.
-    // Using batch of 10 balances reliability vs performance:
-    //  - Reduces HTTP requests by 10x (less file I/O stress on Tally)
-    //  - Still isolates failures to small groups
-    //  - Avoids payload size limits (10 invoices ~50KB, well under Tally's limit)
-    const BATCH_SIZE  = 10;
+    // BATCH_SIZE=1 (one voucher per request): a 10-voucher batch is ~86 KB and,
+    // when relayed through the connector (CONNECTOR → Socket.IO path), Tally
+    // rejects it as "Unknown Request, cannot be processed" — the large payload
+    // does not arrive intact over the relay. A single voucher is ~8 KB and goes
+    // through cleanly. This trades a little speed for reliability over the
+    // connector. (Direct-mode exports in September used small payloads too.)
+    const BATCH_SIZE  = 1;
     let   totalCreated = 0, totalAltered = 0;
     const batchErrors  = [...preflightErrors];
     const successIds   = [];
