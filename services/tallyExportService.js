@@ -1445,6 +1445,10 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     const hsnLedgerSrc = (item.hsnLedgerSource || gstLedgerSrc).trim();
     const gstHsnName   = (item.gstHsnName || '').trim();
 
+    // Derive Type of Supply from the item's HSN: SAC codes (starting with 99) → Services,
+    // all other HSN codes → Goods. Falls back to Goods when HSN is unknown.
+    const itemTypeOfSupply = gstHsnName.startsWith('99') ? 'Services' : 'Goods';
+
     // ── GSTLEDGERSOURCE / HSNLEDGERSOURCE ────────────────────────────────────
     // Required per BIW20_EXACT_COPY.xml (confirmed working e-invoice).
     // Without GSTLEDGERSOURCE Tally's Tax Analysis cannot populate "Tax Rate" or
@@ -1549,7 +1553,7 @@ export function serializeTallyVoucher(tallyVoucher, cfg, action = 'Create', guid
     <ISGSTASSESSABLEVALUEOVERRIDDEN>No</ISGSTASSESSABLEVALUEOVERRIDDEN>
     ${gstSourceXml ? gstSourceXml + '\n    ' : ''}<GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>
     ${hsnSourceXml ? hsnSourceXml + '\n    ' : ''}<GSTOVRDNSTOREDNATURE>Local Sales - Taxable</GSTOVRDNSTOREDNATURE>
-    <GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>
+    <GSTOVRDNTYPEOFSUPPLY>${itemTypeOfSupply}</GSTOVRDNTYPEOFSUPPLY>
     <GSTRATEINFERAPPLICABILITY>As per Masters/Company</GSTRATEINFERAPPLICABILITY>
     ${gstHsnName ? `<GSTHSNNAME>${esc(gstHsnName)}</GSTHSNNAME>\n    ` : ''}<GSTHSNINFERAPPLICABILITY>As per Masters/Company</GSTHSNINFERAPPLICABILITY>
     <RATE>${esc(item.rate || '')}</RATE>
@@ -1900,6 +1904,111 @@ ${addressListXml}
   <VCHSTATUSTAXUNIT>${esc(companyRegLabel)}</VCHSTATUSTAXUNIT>${einvStatusXml}${consignorXml}${billToXml}${shipToXml}${invoiceOrderListXml}${ledgerEntriesXml}${inventoryEntriesXml}${eInvoiceXml}
 </VOUCHER>`;
 }
+
+// ─── HSN / TYPE-OF-SUPPLY HELPERS ────────────────────────────────────────────
+
+/**
+ * Fetch HSN code and Type of Supply for every stock item from Tally master.
+ * Returns Map<itemName.toLowerCase() → { hsn: string, typeOfSupply: 'Goods'|'Services' }>
+ * Non-fatal — if the fetch fails, returns empty Map so export continues normally.
+ */
+async function fetchTallyStockItemHsnAndType(cfg) {
+  try {
+    const company = (cfg.companyName || '').trim().toUpperCase();
+    const coTag   = company ? `<SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY>` : '';
+
+    const xml = `<ENVELOPE>
+<HEADER>
+  <VERSION>1</VERSION>
+  <TALLYREQUEST>Export</TALLYREQUEST>
+  <TYPE>Collection</TYPE>
+  <ID>StockHsnTypeCheck</ID>
+</HEADER>
+<BODY><DESC>
+  <STATICVARIABLES>
+    ${coTag}
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+  </STATICVARIABLES>
+  <TDL><TDLMESSAGE>
+    <COLLECTION NAME="StockHsnTypeCheck">
+      <TYPE>Stock Item</TYPE>
+      <FETCH>Name, HSNCode, GSTTypeOfSupply</FETCH>
+    </COLLECTION>
+  </TDLMESSAGE></TDL>
+</DESC></BODY>
+</ENVELOPE>`;
+
+    const timeout = (cfg.useConnector && cfg.connectorId) ? 90000 : 30000;
+    const resp = await postXmlWithRetry(cfg, xml, timeout, 1);
+    if (!resp) return new Map();
+
+    const result = new Map();
+    for (const m of resp.matchAll(/<STOCKITEM[^>]*>([\s\S]*?)<\/STOCKITEM>/gi)) {
+      const block = m[1];
+      const name  = (block.match(/<NAME>(.*?)<\/NAME>/i)?.[1] || '').trim();
+      if (!name) continue;
+
+      const hsn = (
+        block.match(/<HSNCODE>(.*?)<\/HSNCODE>/i)?.[1] ||
+        block.match(/<GSTHSNCODE>(.*?)<\/GSTHSNCODE>/i)?.[1] ||
+        ''
+      ).trim();
+
+      const rawType    = (block.match(/<GSTTYPEOFSUPPLY>(.*?)<\/GSTTYPEOFSUPPLY>/i)?.[1] || 'Goods').trim();
+      const typeOfSupply = rawType.toLowerCase().includes('service') ? 'Services' : 'Goods';
+
+      result.set(name.toLowerCase(), { hsn, typeOfSupply, name });
+    }
+
+    LOG(`fetchTallyStockItemHsnAndType: ${result.size} stock items fetched from Tally`);
+    return result;
+  } catch (err) {
+    ERR('fetchTallyStockItemHsnAndType failed (non-fatal):', err.message);
+    return new Map();
+  }
+}
+
+/**
+ * Validates an invoice item against Tally's Stock Item master HSN and Type of Supply.
+ *
+ * Rules:
+ *  1. If tallyMaster is null/undefined → valid (item not yet in Tally, will be created)
+ *  2. If HSN is blank in Tally master → invalid, show error
+ *  3. If HSN starts with "99" → expected type = Services; else expected type = Goods
+ *  4. If Tally master typeOfSupply != expected → invalid, show mismatch error
+ *
+ * @param {string} itemName
+ * @param {{ hsn: string, typeOfSupply: string }|undefined} tallyMaster
+ * @returns {{ valid: boolean, reason?: string, itemName?: string }}
+ */
+function validateItemHsnAndType(itemName, tallyMaster) {
+  if (!tallyMaster) return { valid: true };
+
+  const { hsn, typeOfSupply } = tallyMaster;
+
+  // Rule 1: HSN is blank in Tally master
+  if (!hsn || !hsn.trim()) {
+    return {
+      valid: false,
+      reason: `Please correct HSN in Tally Master for Item: "${itemName}" — HSN blank`,
+      itemName,
+    };
+  }
+
+  // Rules 2 & 3: derive expected type from HSN prefix
+  const expectedType = hsn.startsWith('99') ? 'Services' : 'Goods';
+  if (typeOfSupply !== expectedType) {
+    return {
+      valid: false,
+      reason: `Please correct HSN in Tally Master for Item: "${itemName}" — HSN "${hsn}" is ${expectedType} but Type is "${typeOfSupply}"`,
+      itemName,
+    };
+  }
+
+  return { valid: true };
+}
+
+// ─── EXPORT TASK: SALES INVOICES ─────────────────────────────────────────────
 
 export async function exportSalesInvoices(cfg, triggeredBy) {
   const start  = Date.now();
@@ -2328,7 +2437,11 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       const hsn     = stockHsnMap.get(name) || '';
       const gstRateTag = gstRate > 0 ? `<GSTRATE>${gstRate}</GSTRATE>` : '';
       const hsnTag     = hsn ? `<HSNCODE>${esc(hsn)}</HSNCODE>` : '';
-      const gstDetailsTag = gstRate > 0 ? `<GSTDETAILS.LIST ACTION="Replace"><APPLICABLEFROM>20230401</APPLICABLEFROM><TAXABILITY>Taxable</TAXABILITY><GSTRATEINPERCENT>${gstRate}</GSTRATEINPERCENT><ISREVERSECHARGE>No</ISREVERSECHARGE><ISINELIGIBLEITC>No</ISINELIGIBLEITC><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY></GSTDETAILS.LIST>` : '';
+      // Determine Type of Supply from HSN: codes starting with 99 are Services.
+      // For stock item master XML we use the ERP's own HSN (stockHsnMap) since this
+      // runs before the voucher-level check. Falls back to Goods when HSN is unknown.
+      const stockItemTypeOfSupply = hsn.startsWith('99') ? 'Services' : 'Goods';
+      const gstDetailsTag = gstRate > 0 ? `<GSTDETAILS.LIST ACTION="Replace"><APPLICABLEFROM>20230401</APPLICABLEFROM><TAXABILITY>Taxable</TAXABILITY><GSTRATEINPERCENT>${gstRate}</GSTRATEINPERCENT><ISREVERSECHARGE>No</ISREVERSECHARGE><ISINELIGIBLEITC>No</ISINELIGIBLEITC><GSTTYPEOFSUPPLY>${stockItemTypeOfSupply}</GSTTYPEOFSUPPLY></GSTDETAILS.LIST>` : '';
 
       const tallyCurrentRate = tallyStockGstMap.get(name.toLowerCase());
       const existsInTally = tallyCurrentRate !== undefined;
@@ -2351,11 +2464,11 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         // Use the SAME unit the voucher line will send (see stockUnitMap) so the
         // master's base unit matches the voucher — otherwise Tally hides Qty/Rate.
         const unit = stockUnitMap.get(name) || 'Nos';
-        return `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>${esc(unit)}</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
+        return `<STOCKITEM NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><UNITS>${esc(unit)}</UNITS><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>${stockItemTypeOfSupply}</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
       } else if (tallyRateIsMissing && gstRate > 0) {
         // Item exists but GST rate is 0/unset in Tally → ALTER to set the correct rate
         LOG(`exportSalesInvoices: stock item "${name}" has no GST rate in Tally (rate=0) → setting to ${gstRate}%`);
-        return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
+        return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>${stockItemTypeOfSupply}</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
       } else if (rateFetchUnavailable && gstRate > 0) {
         // Live rate unknown (connector fetch returned nothing). Send ONLY an Alter.
         // Why not Create+Alter together: sending Create AND Alter for the SAME item
@@ -2364,7 +2477,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         // exists it sets the GST rate; if it does not exist Tally skips it quietly.
         // (These items already exist in Tally from earlier GST-less creation, which is
         // exactly why their rate is 0 — so Alter is the correct, sufficient action.)
-        return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
+        return `<STOCKITEM NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME><GSTAPPLICABLE>Applicable</GSTAPPLICABLE><GSTTYPEOFSUPPLY>${stockItemTypeOfSupply}</GSTTYPEOFSUPPLY>${hsnTag}${gstRateTag}${gstDetailsTag}</STOCKITEM>`;
       } else {
         // Item exists with a nonzero rate already set → skip entirely (never overwrite)
         return '';
@@ -2449,6 +2562,13 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     }
     LOG(`exportSalesInvoices: voucher dates will be capped to ${periodEnd || '(none — actual invoice dates used)'}`);
 
+    // ── Step HSN: Fetch HSN + Type of Supply from Tally Stock Item master ────
+    // Used to validate each item before allowing its invoice to be exported.
+    // Non-fatal if the fetch fails — tallyStockHsnTypeMap will be empty and
+    // validation is silently skipped (safe fallback, no change to existing behaviour).
+    const tallyStockHsnTypeMap = await fetchTallyStockItemHsnAndType(cfg);
+    LOG(`exportSalesInvoices: HSN/Type map loaded — ${tallyStockHsnTypeMap.size} items from Tally master`);
+
     const failedItems  = [];
     const skippedItems = [];   // invoices skipped due to validation failure or dedup
     const vouchersXml = [];    // populated below after safeguard checks
@@ -2471,6 +2591,31 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           invoiceErrorMap[String(inv._id)] = errMsg;
           await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', errMsg);
           continue;
+        }
+
+        // ── SAFEGUARD HSN: Validate HSN + Type of Supply against Tally master ─
+        // Runs only when tallyStockHsnTypeMap is populated (fetch succeeded above).
+        // If any item on this invoice has a blank HSN or a Goods/Services mismatch
+        // in Tally, the entire invoice is blocked and shown in the "Not Exported" list.
+        if (tallyStockHsnTypeMap.size > 0) {
+          let hsnBlockReason = null;
+          for (const item of (inv.items || [])) {
+            const iName      = (item.description || item.name || '').trim();
+            const tallyMaster = tallyStockHsnTypeMap.get(iName.toLowerCase());
+            const hsnCheck   = validateItemHsnAndType(iName, tallyMaster);
+            if (!hsnCheck.valid) {
+              hsnBlockReason = hsnCheck.reason;
+              break;
+            }
+          }
+          if (hsnBlockReason) {
+            ERR(`Invoice ${inv.invoiceNo}: BLOCKED — ${hsnBlockReason}`);
+            failedItems.push({ id: inv.invoiceNo, partyName: inv.partyName || '', error: hsnBlockReason });
+            failedInvoiceIds.push(inv._id);
+            invoiceErrorMap[String(inv._id)] = hsnBlockReason;
+            await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', hsnBlockReason);
+            continue;
+          }
         }
 
         // ── SAFEGUARD 2: Invoice-number dedup check against Tally ───────────
