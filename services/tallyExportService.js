@@ -18,6 +18,7 @@ import TallyVoucher   from '../models/TallyVoucher.js';
 import Category       from '../models/Category.js';
 import { postXmlWithRetry } from './tallyFetchEngine.js';
 import { normalizeToTallyVoucher, tallyUnitSymbol } from './normalizeToTallyVoucher.js';
+import { getHsnByName } from './hsnDictionary.js';
 
 const LOG = (...a) => console.log('[TallyExport]', ...a);
 const ERR = (...a) => console.error('[TallyExport ERROR]', ...a);
@@ -2694,7 +2695,7 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           const enrichedItems = await Promise.all((inv.items || []).map(async item => {
             const n  = (item.description || item.name || '').trim();
             const im = masterMap.get(n);
-            let hsn = (item.hsn || '').trim() || (im?.hsn || '').trim();
+            let hsn = (item.hsn || '').trim() || (im?.hsn || '').trim() || getHsnByName(item.description || item.name || '');
 
             // Determine current tallySalesLedger: item → ItemMaster → resolve
             let tallySalesLedger = (item.tallySalesLedger || '').trim()

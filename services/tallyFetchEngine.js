@@ -3027,6 +3027,10 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
     // Step 3: Create bulk operations
     const ops = uniqueItems.map(({ name, guid, alterId, hsn, gst, unit, cost, openingStock, openingValue, closingBalance, closingValue, gstApplicable, sku, itemId, filter }) => {
       const UNIT_MAP = { Nos: 'units', Kg: 'kg', Ltr: 'liter', Mtr: 'meter', Box: 'box', Pcs: 'piece' };
+      // Only write hsn when Tally provides a non-blank value AND the existing
+      // ItemMaster record doesn't already have one (to avoid overwriting
+      // an ERP-filled HSN with a blank that Tally returns for unset items).
+      const hsnSet = hsn ? { hsn } : {};
       return {
         updateOne: {
           filter,
@@ -3037,7 +3041,8 @@ async function fetchAndSave(cfg, entityType, fromDate, toDate, timeoutMs) {
               itemName: name,
               tallyGuid: guid,
               tallyAlterId: alterId,
-              hsn, gst, unit: UNIT_MAP[unit] || 'units', costPrice: cost, unitPrice: cost,
+              ...hsnSet,
+              gst, unit: UNIT_MAP[unit] || 'units', costPrice: cost, unitPrice: cost,
               openingStock,
               openingValue: openingValue || 0,
               closingBalance: closingBalance || '0',

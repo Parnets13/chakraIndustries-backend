@@ -442,19 +442,45 @@ export const bulkUpdateHsn = async (req, res) => {
         filter = { name: rawName };
       }
 
-      // ── Execute update ─────────────────────────────────────────────────────
+      // ── Execute update (regex → updateMany, exact name → upsert) ────────────
       try {
-        const result = await ItemMaster.updateMany(filter, { $set: { hsn: rawHsn } });
-        const matched  = result.matchedCount  || 0;
-        const modified = result.modifiedCount || 0;
-
-        totalMatched  += matched;
-        totalModified += modified;
-
-        if (matched === 0) {
-          results.push({ name: rawName, hsn: rawHsn, status: 'not_found', matched: 0, modified: 0 });
+        if (rawName.startsWith('regex:')) {
+          // Regex: update all matching items (no upsert — we can't generate a valid sku for unknown items)
+          const result = await ItemMaster.updateMany(filter, { $set: { hsn: rawHsn } });
+          const matched  = result.matchedCount  || 0;
+          const modified = result.modifiedCount || 0;
+          totalMatched  += matched;
+          totalModified += modified;
+          if (matched === 0) {
+            results.push({ name: rawName, hsn: rawHsn, status: 'not_found', matched: 0, modified: 0 });
+          } else {
+            results.push({ name: rawName, hsn: rawHsn, status: 'ok', matched, modified });
+          }
         } else {
-          results.push({ name: rawName, hsn: rawHsn, status: 'ok', matched, modified });
+          // Exact name: upsert — creates item if it doesn't exist yet
+          const sku = 'HSN-' + rawName.replace(/[^A-Z0-9]/gi, '-').toUpperCase().slice(0, 20) + '-' + Date.now().toString(36).slice(-4).toUpperCase();
+          const doc = await ItemMaster.findOneAndUpdate(
+            { name: rawName },
+            {
+              $set: { hsn: rawHsn },
+              $setOnInsert: {
+                name:         rawName,
+                itemId:       sku,
+                sku:          sku,
+                unit:         'Nos',
+                unitPrice:    0,
+                costPrice:    0,
+                sellingPrice: 0,
+                isActive:     true,
+                dataSource:   'ERP',
+              },
+            },
+            { upsert: true, new: true }
+          );
+          const wasNew = doc && !doc.updatedAt;
+          totalMatched  += 1;
+          totalModified += 1;
+          results.push({ name: rawName, hsn: rawHsn, status: 'ok', matched: 1, modified: 1, created: !doc?.tallyGuid && wasNew });
         }
       } catch (updateErr) {
         results.push({ name: rawName, hsn: rawHsn, status: 'error', reason: updateErr.message });

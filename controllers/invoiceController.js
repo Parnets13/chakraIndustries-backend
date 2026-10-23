@@ -8,6 +8,7 @@ import { sendInvoiceEmail } from '../utils/emailService.js';
 import { pushSingleInvoiceToTally } from '../services/tallyService.js';
 import { normalizeToTallyVoucher } from '../services/normalizeToTallyVoucher.js';
 import TallyConfig from '../models/TallyConfig.js';
+import { getHsnByName } from '../services/hsnDictionary.js';
 
 // ── Sales ledger safety guard ─────────────────────────────────────────────────
 // A tallySalesLedger value from Excel is ONLY safe to store if it looks like a
@@ -57,7 +58,7 @@ async function enrichItemsFromItemMaster(items) {
     const im   = masterMap.get(name);
     return {
       ...item,
-      hsn:             item.hsn             || im?.hsn             || '',
+      hsn:             item.hsn             || im?.hsn             || getHsnByName(item.description || item.name) || '',
       // Do NOT fall back to the item name as tallySalesLedger.
       // Using a stock item name as GSTLEDGERSOURCE in Tally XML causes EXCEPTIONS=1.
       tallySalesLedger: item.tallySalesLedger || im?.tallySalesLedger || '',
@@ -486,7 +487,7 @@ export const bulkUpload = async (req, res) => {
           const tallySalesLedger = sanitiseSalesLedger(item.tallySalesLedger) || sanitiseSalesLedger(im?.tallySalesLedger);
           return {
             ...item,
-            hsn:             (item.hsn || '').trim() || (im?.hsn || '').trim(),
+            hsn:             (item.hsn || '').trim() || (im?.hsn || '').trim() || getHsnByName(item.description || item.name),
             tallySalesLedger,
           };
         });
