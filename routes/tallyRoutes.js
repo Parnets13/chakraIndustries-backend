@@ -1056,6 +1056,153 @@ router.get('/hsn-status', async (req, res) => {
   }
 });
 
+// ── COMPREHENSIVE HSN DIAGNOSTIC ─────────────────────────────────────────────
+// GET /api/tally/hsn-full-report
+//
+// Returns:
+//  - ItemMaster: total count, how many have HSN, how many don't
+//  - 5 sample items WITH hsn, 10 sample items WITHOUT hsn
+//  - All distinct HSN values stored in ItemMaster
+//  - Invoice items array: does it carry an hsn field?
+//  - Where item.hsn comes from in normalizeToTallyVoucher (static analysis answer)
+//  - Pending (unsynced) invoices: how many items have blank hsn vs filled hsn
+//
+// This endpoint is READ-ONLY. It changes nothing.
+router.get('/hsn-full-report', async (req, res) => {
+  try {
+    const Invoice    = (await import('../models/Invoice.js')).default;
+    const ItemMaster = (await import('../models/ItemMaster.js')).default;
+
+    // ── 1. ItemMaster collection stats ───────────────────────────────────────
+    const allItems = await ItemMaster.find({}, 'name hsn').lean();
+    const withHsn    = allItems.filter(i => (i.hsn || '').trim() !== '');
+    const withoutHsn = allItems.filter(i => (i.hsn || '').trim() === '');
+
+    // Distinct HSN values (non-blank)
+    const distinctHsn = [...new Set(withHsn.map(i => i.hsn.trim()))].sort();
+
+    // ── 2. Invoice items — check the hsn field on items array ────────────────
+    // Pull one recent invoice to confirm the field exists at DB level
+    const sampleInvoice = await Invoice.findOne({}, 'invoiceNo items').lean();
+    const sampleItem = sampleInvoice?.items?.[0];
+    const invoiceItemHasHsnField = sampleItem !== undefined
+      ? Object.prototype.hasOwnProperty.call(sampleItem, 'hsn')
+      : null;
+    const invoiceItemHsnValue = sampleItem
+      ? ((sampleItem.hsn || '').trim() || '(blank)')
+      : null;
+
+    // ── 3. Pending invoices breakdown ─────────────────────────────────────────
+    // Count items across ALL unsynced invoices — how many have hsn vs blank
+    const pendingInvoices = await Invoice.find(
+      { tallySync: { $ne: true }, status: { $nin: ['Cancelled'] } },
+      'invoiceNo items'
+    ).lean();
+
+    let pendingItemTotal = 0;
+    let pendingItemWithHsn = 0;
+    let pendingItemWithoutHsn = 0;
+    const pendingBlankHsnItems = new Map(); // itemName → count of blank-hsn appearances
+
+    for (const inv of pendingInvoices) {
+      for (const it of (inv.items || [])) {
+        pendingItemTotal++;
+        const hsn = (it.hsn || '').trim();
+        if (hsn) {
+          pendingItemWithHsn++;
+        } else {
+          pendingItemWithoutHsn++;
+          const n = (it.description || it.name || '').trim();
+          pendingBlankHsnItems.set(n, (pendingBlankHsnItems.get(n) || 0) + 1);
+        }
+      }
+    }
+
+    // For blank invoice-item names, check if ItemMaster has a HSN for them
+    const blankNames = [...pendingBlankHsnItems.keys()];
+    const imForBlank = await ItemMaster.find({ name: { $in: blankNames } }, 'name hsn').lean();
+    const imBlankMap = new Map(imForBlank.map(m => [m.name, (m.hsn || '').trim()]));
+
+    const pendingBlankDetail = blankNames
+      .sort((a, b) => pendingBlankHsnItems.get(b) - pendingBlankHsnItems.get(a))
+      .slice(0, 20)
+      .map(n => ({
+        itemName:              n,
+        blankHsnInvoiceCount:  pendingBlankHsnItems.get(n),
+        itemMasterHsn:         imBlankMap.get(n) || '(not in ItemMaster or also blank)',
+        willAutoFix:           !!(imBlankMap.get(n)),
+      }));
+
+    const canAutoFix  = pendingBlankDetail.filter(d => d.willAutoFix).length;
+    const cannotFix   = pendingBlankDetail.filter(d => !d.willAutoFix).length;
+
+    res.json({
+      success: true,
+
+      // ── ItemMaster stats ──────────────────────────────────────────────────
+      itemMasterCollection: 'itemmasters',
+      hsnFieldName:         'hsn',
+      totalItemMasters:     allItems.length,
+      withHsn:              withHsn.length,
+      withoutHsn:           withoutHsn.length,
+      hsnFillRate:          allItems.length
+        ? `${((withHsn.length / allItems.length) * 100).toFixed(1)}%`
+        : '0%',
+
+      sampleWithHsn: withHsn.slice(0, 5).map(i => ({ name: i.name, hsn: i.hsn })),
+      sampleWithoutHsn: withoutHsn.slice(0, 10).map(i => ({ name: i.name, hsn: '' })),
+
+      distinctHsnValues: distinctHsn,
+      distinctHsnCount:  distinctHsn.length,
+
+      // ── Invoice items analysis ────────────────────────────────────────────
+      invoiceItemHasHsnField:  invoiceItemHasHsnField,
+      invoiceItemSampleHsn:    invoiceItemHsnValue,
+      invoiceSampleNo:         sampleInvoice?.invoiceNo || null,
+
+      // ── Pending invoices breakdown ────────────────────────────────────────
+      pendingInvoiceCount:         pendingInvoices.length,
+      pendingItemTotal:            pendingItemTotal,
+      pendingItemWithHsn:          pendingItemWithHsn,
+      pendingItemWithoutHsn:       pendingItemWithoutHsn,
+      pendingBlankHsnUniqueItems:  blankNames.length,
+      pendingCanAutoFix:           canAutoFix,
+      pendingCannotFix:            cannotFix,
+      pendingBlankHsnDetail:       pendingBlankDetail,
+
+      // ── Source of item.hsn in normalizeToTallyVoucher.js ─────────────────
+      normalizeSource: {
+        file:    'services/normalizeToTallyVoucher.js',
+        line:    289,
+        code:    "const itemHSN = (item.hsn || '').toString().trim();",
+        origin:  'item.hsn comes directly from the invoice item object (inv.items[i].hsn). ' +
+                 'It is NOT looked up from ItemMaster at normalize time. ' +
+                 'It is populated BEFORE normalization in exportSalesInvoices: ' +
+                 'the enrichedItems loop reads im.hsn from ItemMaster and merges it as item.hsn. ' +
+                 'So the chain is: Excel upload → Invoice.items[].hsn (may be blank) → ' +
+                 'enrichedItems fills it from ItemMaster.hsn → normalizeToTallyVoucher reads item.hsn.',
+        bottomLine: 'If ItemMaster.hsn is blank AND Excel did not send HSN, ' +
+                    'then item.hsn will be blank when it reaches Tally XML.',
+      },
+
+      // ── Action summary ────────────────────────────────────────────────────
+      actionSummary: {
+        message: withoutHsn.length === 0
+          ? 'All ItemMaster items have HSN — no action needed.'
+          : `${withoutHsn.length} ItemMaster items have blank HSN. ` +
+            `Of the ${blankNames.length} unique items with blank HSN in pending invoices, ` +
+            `${canAutoFix} will be auto-fixed from ItemMaster (already have HSN there) and ` +
+            `${cannotFix} need HSN filled in ItemMaster before they can export.`,
+        fixInstruction: cannotFix > 0
+          ? 'Go to ERP → Item Master → edit each item in "pendingBlankHsnDetail" where willAutoFix=false → fill the HSN field → Save → re-run export.'
+          : 'No manual action needed — auto-fix will handle all blank items on next export.',
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── FINAL FIX: create a NEW clean stock item under a slightly different name,
 // test that a voucher with it succeeds, and if so repoint the 12 chopper
 // invoices (ItemMaster + invoices) to the new item. Nothing else changes.
