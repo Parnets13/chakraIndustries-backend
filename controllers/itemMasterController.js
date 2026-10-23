@@ -359,3 +359,122 @@ export const regenerateBarcode = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// ── BULK HSN UPDATE ──────────────────────────────────────────────────────────
+/**
+ * POST /api/itemmasters/bulk-hsn
+ *
+ * Body: Array of { name, hsn } objects.
+ *       name  — exact item name (case-sensitive) OR regex pattern prefixed with "regex:"
+ *               e.g. "regex:Orient 16.*Pedestal Fan"  (flags: i always applied)
+ *       hsn   — HSN/SAC code string, e.g. "84145930"
+ *
+ * Returns a per-item result: matched / modified / skipped counts and any errors.
+ * Validates HSN format (4–8 digit numeric) before writing. Rejects blanks.
+ *
+ * Example body:
+ * [
+ *   { "name": "Bajaj ICX 160TS Neo Induction Stove", "hsn": "85166000" },
+ *   { "name": "LIV-ENVY-WAAS",                       "hsn": "84212190" },
+ *   { "name": "regex:Orient 16.*Pedestal Fan",        "hsn": "84145930" }
+ * ]
+ */
+export const bulkUpdateHsn = async (req, res) => {
+  try {
+    const rows = req.body;
+
+    // ── Input validation ─────────────────────────────────────────────────────
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Body must be a non-empty array of { name, hsn } objects',
+      });
+    }
+    if (rows.length > 2000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Maximum 2000 items per request. Split into smaller batches.',
+      });
+    }
+
+    // HSN: 4–8 digit numeric string (covers both HSN goods codes and SAC service codes)
+    const HSN_RE = /^\d{4,8}$/;
+
+    const results  = [];
+    let totalMatched  = 0;
+    let totalModified = 0;
+    let totalSkipped  = 0;
+    let totalErrors   = 0;
+
+    for (const row of rows) {
+      const rawName = (row.name || '').toString().trim();
+      const rawHsn  = (row.hsn  || '').toString().trim();
+      const rowIdx  = rows.indexOf(row);
+
+      // ── Per-row validation ─────────────────────────────────────────────────
+      if (!rawName) {
+        results.push({ name: rawName, hsn: rawHsn, status: 'skipped', reason: 'name is blank' });
+        totalSkipped++;
+        continue;
+      }
+      if (!rawHsn) {
+        results.push({ name: rawName, hsn: rawHsn, status: 'skipped', reason: 'hsn is blank' });
+        totalSkipped++;
+        continue;
+      }
+      if (!HSN_RE.test(rawHsn)) {
+        results.push({ name: rawName, hsn: rawHsn, status: 'error', reason: `Invalid HSN "${rawHsn}" — must be 4–8 digits` });
+        totalErrors++;
+        continue;
+      }
+
+      // ── Build MongoDB filter ───────────────────────────────────────────────
+      let filter;
+      if (rawName.startsWith('regex:')) {
+        const pattern = rawName.slice('regex:'.length).trim();
+        if (!pattern) {
+          results.push({ name: rawName, hsn: rawHsn, status: 'skipped', reason: 'regex pattern is empty after "regex:" prefix' });
+          totalSkipped++;
+          continue;
+        }
+        filter = { name: { $regex: pattern, $options: 'i' } };
+      } else {
+        filter = { name: rawName };
+      }
+
+      // ── Execute update ─────────────────────────────────────────────────────
+      try {
+        const result = await ItemMaster.updateMany(filter, { $set: { hsn: rawHsn } });
+        const matched  = result.matchedCount  || 0;
+        const modified = result.modifiedCount || 0;
+
+        totalMatched  += matched;
+        totalModified += modified;
+
+        if (matched === 0) {
+          results.push({ name: rawName, hsn: rawHsn, status: 'not_found', matched: 0, modified: 0 });
+        } else {
+          results.push({ name: rawName, hsn: rawHsn, status: 'ok', matched, modified });
+        }
+      } catch (updateErr) {
+        results.push({ name: rawName, hsn: rawHsn, status: 'error', reason: updateErr.message });
+        totalErrors++;
+      }
+    }
+
+    return res.json({
+      success: true,
+      summary: {
+        total:         rows.length,
+        totalMatched,
+        totalModified,
+        totalSkipped,
+        totalErrors,
+        totalNotFound: results.filter(r => r.status === 'not_found').length,
+      },
+      results,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
