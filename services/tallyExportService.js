@@ -1981,18 +1981,30 @@ async function fetchTallyStockItemHsnAndType(cfg) {
  * @param {{ hsn: string, typeOfSupply: string }|undefined} tallyMaster
  * @returns {{ valid: boolean, reason?: string, itemName?: string }}
  */
-function validateItemHsnAndType(itemName, tallyMaster) {
+function validateItemHsnAndType(itemName, tallyMaster, erpItemMaster) {
   if (!tallyMaster) return { valid: true };
 
   const { hsn, typeOfSupply } = tallyMaster;
 
-  // Rule 1: HSN is blank in Tally master
+  // Rule 1: HSN is blank in Tally master — try to auto-fix from ERP ItemMaster
   if (!hsn || !hsn.trim()) {
-    return {
-      valid: false,
-      reason: `Please correct HSN in Tally Master for Item: "${itemName}" — HSN blank`,
-      itemName,
-    };
+    if (erpItemMaster && erpItemMaster.hsn && erpItemMaster.hsn.trim()) {
+      // ERP has the HSN — mark for auto-update into Tally, don't block invoice
+      const hsnFromErp = erpItemMaster.hsn.trim();
+      return {
+        valid: true,
+        needsUpdate: true,
+        hsnFromErp,
+        expectedType: hsnFromErp.startsWith('99') ? 'Services' : 'Goods',
+      };
+    } else {
+      // HSN missing in both Tally AND ERP — block invoice, user must fill ItemMaster
+      return {
+        valid: false,
+        reason: `HSN missing in both Tally and ERP for Item: "${itemName}" - Please fill HSN in ItemMaster`,
+        itemName,
+      };
+    }
   }
 
   // Rules 2 & 3: derive expected type from HSN prefix
@@ -2563,11 +2575,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     LOG(`exportSalesInvoices: voucher dates will be capped to ${periodEnd || '(none — actual invoice dates used)'}`);
 
     // ── Step HSN: Fetch HSN + Type of Supply from Tally Stock Item master ────
-    // Used to validate each item before allowing its invoice to be exported.
+    // Used to auto-fix blank HSN in Tally from ERP ItemMaster before export.
     // Non-fatal if the fetch fails — tallyStockHsnTypeMap will be empty and
     // validation is silently skipped (safe fallback, no change to existing behaviour).
     const tallyStockHsnTypeMap = await fetchTallyStockItemHsnAndType(cfg);
     LOG(`exportSalesInvoices: HSN/Type map loaded — ${tallyStockHsnTypeMap.size} items from Tally master`);
+
+    // Accumulates stock items whose HSN is blank in Tally but present in ERP.
+    // Sent as a single Alter batch to Tally BEFORE the sales voucher batches.
+    const stockItemsToUpdate = new Map(); // key: itemName.toLowerCase()
 
     const failedItems  = [];
     const skippedItems = [];   // invoices skipped due to validation failure or dedup
@@ -2593,19 +2609,29 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
           continue;
         }
 
-        // ── SAFEGUARD HSN: Validate HSN + Type of Supply against Tally master ─
+        // ── SAFEGUARD HSN: Auto-fix blank HSN in Tally from ERP master ────────
         // Runs only when tallyStockHsnTypeMap is populated (fetch succeeded above).
-        // If any item on this invoice has a blank HSN or a Goods/Services mismatch
-        // in Tally, the entire invoice is blocked and shown in the "Not Exported" list.
+        // - If Tally HSN is blank BUT ERP has HSN → mark for Tally Alter, do NOT block
+        // - If HSN missing in BOTH Tally AND ERP → block invoice (user must fill ItemMaster)
+        // - If Tally HSN exists but Type mismatch → block invoice (user must fix Tally)
         if (tallyStockHsnTypeMap.size > 0) {
           let hsnBlockReason = null;
           for (const item of (inv.items || [])) {
-            const iName      = (item.description || item.name || '').trim();
+            const iName       = (item.description || item.name || '').trim();
             const tallyMaster = tallyStockHsnTypeMap.get(iName.toLowerCase());
-            const hsnCheck   = validateItemHsnAndType(iName, tallyMaster);
+            const erpMaster   = { hsn: (item.hsn || '').trim() };
+            const hsnCheck    = validateItemHsnAndType(iName, tallyMaster, erpMaster);
             if (!hsnCheck.valid) {
               hsnBlockReason = hsnCheck.reason;
               break;
+            }
+            if (hsnCheck.needsUpdate) {
+              // Blank in Tally, available in ERP — queue for Alter before vouchers
+              stockItemsToUpdate.set(iName.toLowerCase(), {
+                name:         iName,
+                hsn:          hsnCheck.hsnFromErp,
+                expectedType: hsnCheck.expectedType,
+              });
             }
           }
           if (hsnBlockReason) {
@@ -2823,6 +2849,29 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
         invoiceErrorMap[String(inv._id)] = errMsg;
         await logInvoiceExportResult(syncId, inv.invoiceNo || '?', inv.partyName || '?', 'Failed', errMsg);
       }
+    }
+
+    // ── Pre-step: Fix blank HSN in Tally Stock Masters (auto-fix from ERP) ───
+    // Items queued above (HSN blank in Tally, present in ERP) are sent as a
+    // single ACTION="Alter" masters import BEFORE the sales voucher batches.
+    // This ensures Tally's master has correct HSN before the voucher references it.
+    if (stockItemsToUpdate.size > 0) {
+      LOG(`exportSalesInvoices: auto-fixing HSN for ${stockItemsToUpdate.size} stock item(s) in Tally before vouchers...`);
+      const hsnAlterXml = [...stockItemsToUpdate.values()].map(({ name, hsn, expectedType }) =>
+        `<STOCKITEM NAME="${esc(name)}" ACTION="Alter">` +
+        `<NAME>${esc(name)}</NAME>` +
+        `<GSTAPPLICABLE>Applicable</GSTAPPLICABLE>` +
+        `<GSTTYPEOFSUPPLY>${esc(expectedType)}</GSTTYPEOFSUPPLY>` +
+        `<HSNCODE>${esc(hsn)}</HSNCODE>` +
+        `</STOCKITEM>`
+      ).join('');
+      const hsnAlterEnvelope = `<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>` +
+        `<BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME>${staticVars(cfg)}</REQUESTDESC>` +
+        `<REQUESTDATA><TALLYMESSAGE xmlns:UDF="TallyUDF">${hsnAlterXml}</TALLYMESSAGE></REQUESTDATA>` +
+        `</IMPORTDATA></BODY></ENVELOPE>`;
+      const hsnAlterResp = await postXml(cfg, hsnAlterEnvelope, 60000);
+      parseResponse(hsnAlterResp, `HSN Auto-Fix (${stockItemsToUpdate.size} items)`); // log result, don't abort
+      LOG(`exportSalesInvoices: HSN auto-fix sent for ${stockItemsToUpdate.size} item(s) — proceeding with vouchers`);
     }
 
     // ── Send vouchers in small batches to avoid overwhelming Tally ─────────
@@ -3068,14 +3117,18 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
     }
 
     // Update failed invoices: increment retryCount, set lastError, lastTriedAt
+    // Exception: "HSN missing in both Tally and ERP" errors do NOT increment retryCount
+    // so user can fix ItemMaster and retry without manual DB reset.
     if (failedInvoiceIds.length > 0) {
       for (const invoiceId of failedInvoiceIds) {
+        const errMsg = invoiceErrorMap[String(invoiceId)] || "Unknown error";
+        const isHsnMissingBothPlaces = errMsg.includes('HSN missing in both Tally and ERP');
         await Invoice.findByIdAndUpdate(
-          invoiceId, 
-          { 
-            $inc: { retryCount: 1 }, 
-            lastError: invoiceErrorMap[String(invoiceId)] || "Unknown error", 
-            lastTriedAt: new Date() 
+          invoiceId,
+          {
+            ...(isHsnMissingBothPlaces ? {} : { $inc: { retryCount: 1 } }),
+            lastError: errMsg,
+            lastTriedAt: new Date(),
           },
           { new: true }
         );
