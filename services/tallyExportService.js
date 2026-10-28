@@ -2341,9 +2341,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
       //   Tax Type: Central Tax (for CGST), State Tax (for SGST), Integrated Tax (for IGST)
       //   Percentage of Calculation: 2.5 / 6 / 9 / 14 / 5 / 12 / 18 / 28 as applicable
       // ─────────────────────────────────────────────────────────────────────────────────
-      ...partyNames.map(name =>
-        `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sundry Debtors</PARENT></LEDGER>`
-      ),
+      ...partyNames.map(name => {
+        const partyInv   = invoices.find(i => i.partyName === name) || {};
+        const gstin      = (partyInv.partyGST || partyInv.billToGST || '').trim();
+        const state      = (partyInv.partyState || partyInv.billToState || '').trim();
+        const gstRegType = gstin ? 'Regular' : 'Unregistered';
+        const gstinTag   = gstin  ? `<PARTYGSTIN>${esc(gstin)}</PARTYGSTIN>` : '';
+        const stateTag   = state  ? `<STATENAME>${esc(state)}</STATENAME><LEDGERSTATE>${esc(state)}</LEDGERSTATE>` : '';
+        return `<LEDGER NAME="${esc(name)}" ACTION="Create"><NAME>${esc(name)}</NAME><PARENT>Sundry Debtors</PARENT><GSTREGISTRATIONTYPE>${gstRegType}</GSTREGISTRATIONTYPE>${gstinTag}${stateTag}</LEDGER>`;
+      }),
       // ── Item-specific sales ledgers (GST-enabled) ──────────────────────────
       // These are the ACTUAL ledger names as they exist in Tally (or as we compute them).
       // ACTION="Create" — Tally skips any that already exist.
