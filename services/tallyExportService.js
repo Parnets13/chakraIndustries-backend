@@ -1236,6 +1236,29 @@ function resolveSalesLedger(salesLedgers, itemName, itemGSTRate, tallySalesLedge
     return tallySalesLedger;
   }
 
+  // Priority 1b: deterministic PRODUCT-TYPE mapping (brand name ignored).
+  // Matches the product CATEGORY (iron, fan, etc.) via phrase patterns and picks
+  // the Local/Interstate ledger for that category. This runs BEFORE the loose
+  // single-word keyword logic below so brand words (e.g. "Maharaja") can never
+  // steer the match to the wrong ledger. Only returns a ledger that actually
+  // exists in Tally's live list — otherwise falls through to the keyword logic.
+  const PRODUCT_LEDGER_MAP = [
+    { category: 'iron',           patterns: [/steam\s*iron/i, /dry\s*iron/i, /\biron\b/i],          local: 'Dry Iron Sales Local',   interstate: 'Dry Iron Sales Interstate'   },
+    { category: 'water purifier', patterns: [/water\s*purifier/i, /\bro\b/i, /waas/i, /liv.*bolt/i], local: 'RO Sales Local',         interstate: 'RO Sales Interstate'         },
+    { category: 'induction',      patterns: [/induction/i, /icx/i],                                  local: 'Induction Sales Local',  interstate: 'Induction Sales Interstate'  },
+    { category: 'fan',            patterns: [/\bfan\b/i, /pedestal/i, /stand.*fan/i],                local: 'Fan Sales Local',        interstate: 'Fan Sales Interstate'        },
+    { category: 'mixer',          patterns: [/mixer/i, /grinder/i],                                  local: 'Mixer Sales Local',      interstate: 'Mixer Sales Interstate'      },
+    { category: 'cooker',         patterns: [/cooker/i, /pressure/i],                                local: 'Cooker Sales Local',     interstate: 'Cooker Sales Interstate'     },
+  ];
+  for (const map of PRODUCT_LEDGER_MAP) {
+    for (const pat of map.patterns) {
+      if (pat.test(itemName)) {
+        const want = isInterstate ? map.interstate : map.local;
+        if (salesLedgers.includes(want)) return want;
+      }
+    }
+  }
+
   if (!salesLedgers || salesLedgers.length === 0) {
     // No Tally ledgers available — build best-guess name
     if (itemName && itemGSTRate > 0) {
@@ -2717,7 +2740,15 @@ export async function exportSalesInvoices(cfg, triggeredBy) {
                     ? Math.round(((itemCgst + itemIgst) / taxBase) * 100 * 2) / 2
                     : +(item.taxRate || 0))
                 : +(item.taxRate || 0);
-              const isInterstate = itemIgst > 0;
+              // Interstate is decided by STATE comparison (company vs party), not by the
+              // igst column alone. A blank/misfiled igst cell must not force "Local".
+              // cfg.state is the live company state (Karnataka); fall back to 'karnataka'
+              // if the config has no state. igst>0 is used only when a state is unknown.
+              const companyStateRaw = (cfg && cfg.state) ? cfg.state : 'karnataka';
+              const companyState    = companyStateRaw.toString().trim().toLowerCase();
+              const partyStateRaw   = inv.partyState || inv.billToState || inv.customerState || '';
+              const partyState      = partyStateRaw.toString().trim().toLowerCase();
+              const isInterstate    = (companyState && partyState) ? (companyState !== partyState) : (itemIgst > 0);
 
               const resolved = resolveSalesLedger(
                 tallySalesLedgers, n, gstRate, null, isInterstate
