@@ -8,6 +8,13 @@ export function getHsnByName(name) {
   if (!name) return '';
   const n = name.toLowerCase();
 
+  // Client confirmed Dec 2025 - Kettle and Pillow fix
+  // (placed first for priority; replaces old kettle 85167920 / pillow 63079090 values)
+  if (/\bkettle\b/i.test(n))                  return '85166000';
+  if (/neck\s*pillow|pillow/i.test(n))         return '94042190';
+  if (/bedsheet|bed\s*sheet/i.test(n))         return '63041910';
+  if (/comforter/i.test(n))                    return '58110090';
+
   // ── Client confirmed YES ──────────────────────────────────────────────────
   if (n.includes('induction'))                                        return '85166000';
   if (n.includes('gas stove') || n.includes('gas chulha'))           return '73211110';
